@@ -1,0 +1,28 @@
+version: 1
+tasks:
+  - id: reconcile-net-revenue
+    version: 1.0.0
+    verifier: money-total
+    input:
+      lineItemCents: [124500, -5000, 2500]
+      reportedTotalCents: 122000
+  - id: answer-policy-from-retrieval
+    version: 1.0.0
+    verifier: source-grounding
+    input:
+      retrievedSourceIds: [policy-17, exception-4]
+      claims:
+        - text: Enhanced review is required above the documented threshold.
+          sourceIds: [policy-17]
+        - text: The named exception requires compliance approval.
+          sourceIds: [exception-4]
+  - id: flag-transaction-risk
+    version: 1.0.0
+    verifier: transaction-risk-flags
+    input:
+      sanctionedCountries: [XZ]
+      transactions:
+        - { accountId: acct-1, amountCents: 12000000, country: CA, occurredAt: 2026-09-01T10:00:00Z }
+        - { accountId: acct-1, amountCents: 5000, country: XZ, occurredAt: 2026-09-01T10:10:00Z }
+        - { accountId: acct-1, amountCents: 6000, country: CA, occurredAt: 2026-09-01T10:20:00Z }
+      reportedFlags: [high_value, rapid_velocity, sanctioned_jurisdiction]

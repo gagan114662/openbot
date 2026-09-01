@@ -2,7 +2,9 @@ import { useRenderTool } from "@copilotkit/react-core/v2";
 import { z } from "zod";
 import { ToolLine } from "@/components/channels/tool-line";
 import { HANDED_OVER } from "@/lib/copilot/markers";
-import { saidItWentAhead } from "@/lib/plugins/tool-result";
+import { UNANSWERED_TOOL_RESULT } from "@/lib/copilot/repair-history";
+import { visibleToolHistoryResult } from "@/lib/copilot/tool-history-result";
+import { asText, saidItWentAhead } from "@/lib/plugins/tool-result";
 
 /**
  * How a Bot handing work to another Bot reads in the transcript.
@@ -31,8 +33,52 @@ const parameters = z.object({
  * the other is a boundary holding, and drawing them the same way would make a working cap look like
  * a working handoff.
  */
-function refused(result: unknown): boolean {
-  return !saidItWentAhead(result, HANDED_OVER);
+export function handoffOutcome(
+  result: unknown,
+): "accepted" | "refused" | "unknown" {
+  // Restored AG-UI history may preserve the call but not its result, represented as an empty
+  // string. Empty proves neither success nor refusal and must not turn a delivered historical hop
+  // into a red “Blocked” card.
+  if (
+    typeof result !== "string" ||
+    asText(result).trim() === "" ||
+    asText(result).trim() === UNANSWERED_TOOL_RESULT
+  )
+    return "unknown";
+  return saidItWentAhead(result, HANDED_OVER) ? "accepted" : "refused";
+}
+
+/**
+ * The authoritative recipient name returned by the server for an accepted hop.
+ *
+ * The tool argument is model-authored and intentionally uses a stable routing id. Echoing it made
+ * `knowledge` leak into a human-facing line, and would also let a stale/fabricated argument label a
+ * successful hop. The desk resolves the profile and returns its current display name, so that is
+ * the source the transcript should trust.
+ */
+export function handedToName(result: unknown): string | undefined {
+  if (typeof result !== "string") return undefined;
+  const text = asText(result);
+  if (!text.startsWith(HANDED_OVER)) return undefined;
+  const suffix = ". Its answer will be relayed";
+  const end = text.indexOf(suffix, HANDED_OVER.length);
+  if (end < 0) return undefined;
+  const name = text.slice(HANDED_OVER.length, end).trim();
+  return name || undefined;
+}
+
+/**
+ * What belongs in the expanded handoff card.
+ *
+ * Restored AG-UI history often keeps the call but not its immediate tool result, and the generic
+ * history repair supplies `UNANSWERED_TOOL_RESULT` so the protocol remains well formed. That text
+ * is useful for an ordinary synchronous tool and false for this asynchronous one: acceptance queues
+ * the work, and success or terminal failure returns later as a Bot-authored message. Showing “do not
+ * assume it succeeded” directly above the returned answer makes a successful handoff contradict
+ * itself. Absence stays neutral; real accepted results and real refusal sentences remain visible.
+ */
+export function handoffResultDetail(result: unknown): string | undefined {
+  return visibleToolHistoryResult(result);
 }
 
 export function HandoffTool() {
@@ -42,12 +88,24 @@ export function HandoffTool() {
     render: ({ parameters: given, result, status }) => {
       const asked = given?.bot?.trim();
       const running = status !== "complete" && result === undefined;
+      const outcome = handoffOutcome(result);
+      const acceptedName =
+        outcome === "accepted" ? handedToName(result) : undefined;
+      const resultDetail = handoffResultDetail(result);
+      const label =
+        outcome === "unknown"
+          ? asked
+            ? `Requested ${asked}`
+            : "Requested another Bot"
+          : acceptedName || asked
+            ? `Asked ${acceptedName ?? asked}`
+            : "Asked another Bot";
       return (
         <ToolLine
-          label={asked ? `Asked ${asked}` : "Asked another Bot"}
+          label={label}
           detail={given?.task}
           running={running}
-          refused={!running && refused(result)}
+          refused={!running && outcome === "refused"}
         >
           {/*
            * The parts, kept as parts. The asking model was made to name them so the receiving one
@@ -66,8 +124,8 @@ export function HandoffTool() {
                 Wanted back: {given.expecting}
               </p>
             ) : null}
-            {typeof result === "string" ? (
-              <p className="text-muted-foreground">{result}</p>
+            {resultDetail ? (
+              <p className="text-muted-foreground">{resultDetail}</p>
             ) : null}
           </div>
         </ToolLine>

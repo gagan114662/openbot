@@ -23,10 +23,11 @@ import {
   useMessageScroller,
 } from "@/components/ui/message-scroller";
 import { Skeleton } from "@/components/ui/skeleton";
+import { visibleToolHistoryResult } from "@/lib/copilot/tool-history-result";
 import { markdownComponents } from "@/lib/markdown";
 import { EASE_OUT, ENTRANCE_SECONDS } from "@/lib/motion";
 import { readToolName } from "@/lib/plugins/tool-name";
-import { asText, forDisplay, REFUSAL_MARKER } from "@/lib/plugins/tool-result";
+import { forDisplay, REFUSAL_MARKER } from "@/lib/plugins/tool-result";
 import { toVisibleChatItems } from "./chat-messages";
 import type { QueuedMessage } from "./composer";
 import { ToolRenderBoundary } from "./tool-boundary";
@@ -593,7 +594,7 @@ function ServerToolLine({ name, result }: { name: string; result?: string }) {
    * wording is a policy message an administrator can rewrite and the first rephrasing would break
    * any guess made here. See REFUSAL_MARKER in server/src/plugins/tools.ts.
    */
-  const answer = result === undefined ? undefined : asText(result);
+  const answer = visibleToolHistoryResult(result);
   const refused = answer?.startsWith(REFUSAL_MARKER) ?? false;
   /*
    * The marker is for this component, not for the reader. Left in, a refusal reads "Blocked" in the

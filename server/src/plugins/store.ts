@@ -2188,9 +2188,9 @@ export function createPluginStore(options: PluginStoreOptions) {
     /**
      * Whether this Bot's run happens in this process, rather than at an endpoint somewhere.
      *
-     * Undefined for a Bot nobody has heard of. Asked because a tool this deployment executes can
-     * only be offered to a run it builds: a Bot at an endpoint runs its own loop and is handed
-     * descriptions of what it may call back for, and handing work to another Bot is not one of them.
+     * Undefined for a Bot nobody has heard of. The boolean remains useful to callers that care
+     * where a Bot executes; reach grants accept both kinds because remote Bots call the deployment
+     * back with a signed run assertion.
      */
     async agentRunsHere(agentId: string): Promise<boolean | undefined> {
       const [row] = await database
@@ -2347,15 +2347,10 @@ export function createPluginStore(options: PluginStoreOptions) {
     /**
      * The Bots this one may hand work to, and can actually reach.
      *
-     * FILTERED AT READ TIME, not only when the grant is made. Refusing a new grant to a Bot that
-     * runs at its own endpoint stops one being created; it does nothing about the ones already
-     * there, or about a Bot that was built in when it was granted and was pointed at an endpoint
-     * afterwards. Those rows read as configured and are inert, which is the shape of thing an
-     * administrator debugs for an afternoon: the grant is right there in the table and no hop ever
-     * happens.
-     *
-     * The asking side is the one that matters here — a Bot at an endpoint runs its own loop and is
-     * never offered this tool — so it is the grantee, `agent_id`, that is checked.
+     * Both local and remote registered Bots can use these. A remote Bot receives the offer with a
+     * deployment-signed run assertion and calls back here, where the grant is read again before the
+     * reach tool executes. Filtering remote grantees here would make an accepted grant disappear
+     * immediately and reproduce the exact configured-but-inert state this read is meant to avoid.
      */
     async botsReachableFrom(agentId: string): Promise<string[]> {
       const rows = await database
@@ -2363,11 +2358,7 @@ export function createPluginStore(options: PluginStoreOptions) {
         .from(pluginGrants)
         .innerJoin(agents, eq(agents.id, pluginGrants.agentId))
         .where(
-          and(
-            eq(pluginGrants.kind, "bot"),
-            eq(pluginGrants.agentId, agentId),
-            eq(agents.type, "built_in"),
-          ),
+          and(eq(pluginGrants.kind, "bot"), eq(pluginGrants.agentId, agentId)),
         );
       return rows.map((row) => row.ref);
     },
@@ -2787,6 +2778,9 @@ export function createPluginStore(options: PluginStoreOptions) {
       args: Record<string, unknown>;
       botId: string;
       actorId: string;
+      /** Signed run correlation; absent for direct administrative calls. */
+      runId?: string;
+      threadId?: string;
     }): Promise<{ text: string; isError: boolean }> {
       const [serverId, ...rest] = input.ref.split("/");
       const toolName = rest.join("/");
@@ -2803,6 +2797,8 @@ export function createPluginStore(options: PluginStoreOptions) {
           payload: {
             actor: input.actorId,
             bot: input.botId,
+            ...(input.runId ? { runId: input.runId } : {}),
+            ...(input.threadId ? { threadId: input.threadId } : {}),
             server: serverId,
             tool: toolName,
             refusal: "not_granted",
@@ -2874,6 +2870,8 @@ export function createPluginStore(options: PluginStoreOptions) {
       const decided = {
         actor: input.actorId,
         bot: input.botId,
+        ...(input.runId ? { runId: input.runId } : {}),
+        ...(input.threadId ? { threadId: input.threadId } : {}),
         server: serverId,
         tool: toolName,
         effect,

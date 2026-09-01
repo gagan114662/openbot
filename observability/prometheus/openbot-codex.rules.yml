@@ -1,0 +1,31 @@
+groups:
+  - name: openbot-codex-slos
+    rules:
+      - alert: OpenBotCodexDailyBudgetNearExhaustion
+        expr: openbot_codex_daily_run_budget > 0 and openbot_codex_daily_runs / openbot_codex_daily_run_budget > 0.9
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Codex run budget is above 90% for {{ $labels.deployment }}"
+      - alert: OpenBotCodexHighErrorRatio
+        expr: sum by (deployment) (rate(openbot_codex_run_errors_total[15m])) / clamp_min(sum by (deployment) (rate(openbot_codex_runs_total[15m])), 0.000001) > 0.05
+        for: 15m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Codex run errors exceed 5% for {{ $labels.deployment }}"
+      - alert: OpenBotCodexP95LatencyHigh
+        expr: histogram_quantile(0.95, sum by (deployment, le) (rate(openbot_codex_run_duration_milliseconds_bucket[15m]))) > 60000
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Codex p95 latency exceeds 60 seconds for {{ $labels.deployment }}"
+      - alert: OpenBotCodexConcurrencySaturated
+        expr: openbot_codex_active_runs >= openbot_codex_max_concurrent_runs
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Codex concurrency is saturated for {{ $labels.deployment }}"

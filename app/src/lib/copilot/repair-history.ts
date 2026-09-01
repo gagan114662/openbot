@@ -5,7 +5,7 @@ import { newId } from "../new-id";
  * Insert explanatory tool results for unanswered tool calls before sending history to providers.
  */
 
-const UNANSWERED =
+export const UNANSWERED_TOOL_RESULT =
   "This call produced no result: the surface was interrupted before it could answer. Do not assume it succeeded.";
 
 /** A tool result message, which AG-UI models as its own role. */
@@ -99,7 +99,7 @@ export function repairUnansweredToolCalls(
             id: mintId(),
             role: "tool",
             toolCallId: call.id,
-            content: UNANSWERED,
+            content: UNANSWERED_TOOL_RESULT,
           } as Message),
       );
       // A duplicated call id may only receive one repair result.

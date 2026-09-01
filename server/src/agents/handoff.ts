@@ -121,6 +121,7 @@ export function createHandoffDesk(options: {
         // useful half of the question.
         target: target.slice(0, 120),
         run: from.runId,
+        ...(from.threadId ? { threadId: from.threadId } : {}),
         depth: from.depth ?? 0,
         reason,
       },
@@ -397,6 +398,7 @@ export function createHandoffDesk(options: {
           from: from.botId,
           to: found.id,
           run: from.runId,
+          ...(from.threadId ? { threadId: from.threadId } : {}),
           depth: depth + 1,
           // What was asked, so the trail says what one Bot sent another rather than merely that it
           // did. The task is the Bot's own words about the work, not a person's private content.

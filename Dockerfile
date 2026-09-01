@@ -43,6 +43,7 @@ COPY tsconfig.base.json bunfig.toml ./
 COPY app/package.json app/package.json
 COPY server/package.json server/package.json
 COPY worker/package.json worker/package.json
+COPY agent-codex/package.json agent-codex/package.json
 RUN bun install --frozen-lockfile
 
 # The lockfile travels with the manifest, because `--frozen-lockfile` with no lockfile in the context

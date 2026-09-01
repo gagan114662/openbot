@@ -417,6 +417,7 @@ export function createHandoffRunner(options: {
                 from: work.fromBotId,
                 to: work.toBotId,
                 run: work.runId,
+                ...(work.threadId ? { threadId: work.threadId } : {}),
                 depth: work.depth,
                 ms: Date.now() - startedAt,
               },

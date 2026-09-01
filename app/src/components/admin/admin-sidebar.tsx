@@ -7,6 +7,7 @@ import {
   IconKey,
   IconLayoutGrid,
   IconListDetails,
+  IconChartDots3,
   IconPuzzle,
   IconShieldCheck,
   IconUsers,
@@ -46,6 +47,11 @@ const GROUPS: {
   {
     label: "What Bots can reach",
     items: [
+      {
+        title: "Agent Analytics",
+        icon: IconChartDots3,
+        linkOptions: { to: "/admin/analytics" },
+      },
       {
         title: "Credentials",
         icon: IconKey,

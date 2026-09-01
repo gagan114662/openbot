@@ -127,6 +127,7 @@ export function escalationTool(options: {
           payload: {
             bot: from.botId,
             run: from.runId,
+            ...(from.threadId ? { threadId: from.threadId } : {}),
             question: parsed.data.question,
             ...(parsed.data.why ? { why: parsed.data.why } : {}),
             ...("reached" in outcome

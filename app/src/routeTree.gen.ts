@@ -20,6 +20,7 @@ import { Route as AuthedAppBotRouteImport } from './routes/_authed/_app/bot'
 import { Route as AuthedAppRoutinesRouteImport } from './routes/_authed/_app/routines'
 import { Route as AuthedAppSkillsRouteImport } from './routes/_authed/_app/skills'
 import { Route as AuthedAdminIndexRouteImport } from './routes/_authed/admin/index'
+import { Route as AuthedAdminAnalyticsRouteImport } from './routes/_authed/admin/analytics'
 import { Route as AuthedAdminAuditRouteImport } from './routes/_authed/admin/audit'
 import { Route as AuthedAdminBoundariesRouteImport } from './routes/_authed/admin/boundaries'
 import { Route as AuthedAdminComputersRouteImport } from './routes/_authed/admin/computers'
@@ -93,6 +94,11 @@ const AuthedAppSkillsRoute = AuthedAppSkillsRouteImport.update({
 const AuthedAdminIndexRoute = AuthedAdminIndexRouteImport.update({
   id: '/',
   path: '/',
+  getParentRoute: () => AuthedAdminRouteRoute,
+} as any)
+const AuthedAdminAnalyticsRoute = AuthedAdminAnalyticsRouteImport.update({
+  id: '/analytics',
+  path: '/analytics',
   getParentRoute: () => AuthedAdminRouteRoute,
 } as any)
 const AuthedAdminAuditRoute = AuthedAdminAuditRouteImport.update({
@@ -219,6 +225,7 @@ export interface FileRoutesByFullPath {
   '/bot': typeof AuthedAppBotRoute
   '/routines': typeof AuthedAppRoutinesRoute
   '/skills': typeof AuthedAppSkillsRoute
+  '/admin/analytics': typeof AuthedAdminAnalyticsRoute
   '/admin/audit': typeof AuthedAdminAuditRoute
   '/admin/boundaries': typeof AuthedAdminBoundariesRoute
   '/admin/computers': typeof AuthedAdminComputersRoute
@@ -249,6 +256,7 @@ export interface FileRoutesByTo {
   '/bot': typeof AuthedAppBotRoute
   '/routines': typeof AuthedAppRoutinesRoute
   '/skills': typeof AuthedAppSkillsRoute
+  '/admin/analytics': typeof AuthedAdminAnalyticsRoute
   '/admin/audit': typeof AuthedAdminAuditRoute
   '/admin/boundaries': typeof AuthedAdminBoundariesRoute
   '/admin/computers': typeof AuthedAdminComputersRoute
@@ -283,6 +291,7 @@ export interface FileRoutesById {
   '/_authed/_app/bot': typeof AuthedAppBotRoute
   '/_authed/_app/routines': typeof AuthedAppRoutinesRoute
   '/_authed/_app/skills': typeof AuthedAppSkillsRoute
+  '/_authed/admin/analytics': typeof AuthedAdminAnalyticsRoute
   '/_authed/admin/audit': typeof AuthedAdminAuditRoute
   '/_authed/admin/boundaries': typeof AuthedAdminBoundariesRoute
   '/_authed/admin/computers': typeof AuthedAdminComputersRoute
@@ -318,6 +327,7 @@ export interface FileRouteTypes {
     | '/bot'
     | '/routines'
     | '/skills'
+    | '/admin/analytics'
     | '/admin/audit'
     | '/admin/boundaries'
     | '/admin/computers'
@@ -348,6 +358,7 @@ export interface FileRouteTypes {
     | '/bot'
     | '/routines'
     | '/skills'
+    | '/admin/analytics'
     | '/admin/audit'
     | '/admin/boundaries'
     | '/admin/computers'
@@ -381,6 +392,7 @@ export interface FileRouteTypes {
     | '/_authed/_app/bot'
     | '/_authed/_app/routines'
     | '/_authed/_app/skills'
+    | '/_authed/admin/analytics'
     | '/_authed/admin/audit'
     | '/_authed/admin/boundaries'
     | '/_authed/admin/computers'
@@ -488,6 +500,13 @@ declare module '@tanstack/react-router' {
       path: '/'
       fullPath: '/admin/'
       preLoaderRoute: typeof AuthedAdminIndexRouteImport
+      parentRoute: typeof AuthedAdminRouteRoute
+    }
+    '/_authed/admin/analytics': {
+      id: '/_authed/admin/analytics'
+      path: '/analytics'
+      fullPath: '/admin/analytics'
+      preLoaderRoute: typeof AuthedAdminAnalyticsRouteImport
       parentRoute: typeof AuthedAdminRouteRoute
     }
     '/_authed/admin/audit': {
@@ -641,6 +660,7 @@ declare module '@tanstack/react-router' {
 }
 
 interface AuthedAdminRouteRouteChildren {
+  AuthedAdminAnalyticsRoute: typeof AuthedAdminAnalyticsRoute
   AuthedAdminAuditRoute: typeof AuthedAdminAuditRoute
   AuthedAdminBoundariesRoute: typeof AuthedAdminBoundariesRoute
   AuthedAdminComputersRoute: typeof AuthedAdminComputersRoute
@@ -658,6 +678,7 @@ interface AuthedAdminRouteRouteChildren {
 }
 
 const AuthedAdminRouteRouteChildren: AuthedAdminRouteRouteChildren = {
+  AuthedAdminAnalyticsRoute: AuthedAdminAnalyticsRoute,
   AuthedAdminAuditRoute: AuthedAdminAuditRoute,
   AuthedAdminBoundariesRoute: AuthedAdminBoundariesRoute,
   AuthedAdminComputersRoute: AuthedAdminComputersRoute,

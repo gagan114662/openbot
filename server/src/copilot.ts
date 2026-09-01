@@ -8,10 +8,11 @@ import {
 } from "@copilotkit/runtime/v2";
 import { createCopilotHonoHandler } from "@copilotkit/runtime/v2/hono";
 import type { Observable } from "rxjs";
-import { defer, from, switchMap } from "rxjs";
+import { defer, from, lastValueFrom, switchMap, toArray } from "rxjs";
 import { z } from "zod";
 import {
   COMPUTER_GUIDANCE,
+  EXECUTION_GUIDANCE,
   PROVENANCE_GUIDANCE,
 } from "../../shared/bot-prompt";
 import type { AgentActor } from "./agents/profile-types";
@@ -109,6 +110,7 @@ export function standingRoleMessage(
       `You are ${profile.name}, ${profile.title}.`,
       profile.roleDescription,
       "This standing role applies in every channel. Treat channel messages as task-specific instructions within it.",
+      EXECUTION_GUIDANCE,
       /*
        * Here rather than in the package, because for a remote Bot the standing role is the only
        * instruction there is: `role_description` is one sentence somebody wrote about what it is
@@ -237,6 +239,7 @@ export function builtInAgentConfiguration(
      */
     prompt: [
       agent.systemPrompt,
+      EXECUTION_GUIDANCE,
       /*
        * Unconditional, unlike the two below it.
        *
@@ -271,6 +274,253 @@ export function builtInAgentConfiguration(
  * Beyond that a model is not making progress, and every extra step is somebody's money.
  */
 const TOOL_STEPS = 8;
+
+/**
+ * Whether the person made evidence gathering part of the requested result.
+ *
+ * Narrow on explicit research language rather than trying to classify every factual question. The
+ * gate below spends a second model attempt when the first ignores its tools, so false positives have
+ * a real cost; the phrases here are the cases where an answer from memory cannot satisfy what was
+ * asked regardless of whether that memory happens to be right.
+ */
+export function requiresToolEvidence(text: string): boolean {
+  return /\b(?:search|research|look\s*up|verify|fact[- ]?check|browse|current|latest|official sources?|source urls?|cite (?:the )?(?:exact )?(?:sources?|urls?)|as of)\b/i.test(
+    text,
+  );
+}
+
+const EVIDENCE_RETRY_INSTRUCTION = [
+  "Your previous draft was rejected because it did not prove the requested retrieved evidence.",
+  "Call at least one relevant granted read tool now before answering. Use its returned evidence, cite",
+  "only exact final URLs present in the tool result when the person requested URLs, and never say you verified or read a source",
+  "unless that tool actually returned it. If the tools fail or cannot establish the claim, state the",
+  "precise limitation instead of filling the gap from memory.",
+].join(" ");
+
+const NO_EVIDENCE_ANSWER =
+  "I could not verify this request with the tools available in this run. I have not treated my own memory as current or sourced evidence, so I cannot honestly provide the requested verified answer yet.";
+
+function calledATool(events: readonly BaseEvent[]): boolean {
+  return events.some((event) => event.type === "TOOL_CALL_START");
+}
+
+function asksForSourceUrls(text: string): boolean {
+  return /\b(?:exact\s+)?(?:source\s+)?urls?\b|\bcite\b[^.?!\n]{0,80}\burls?\b/i.test(
+    text,
+  );
+}
+
+function urlsIn(text: string): Set<string> {
+  const urls = new Set<string>();
+  for (const match of text.matchAll(/https?:\/\/[^\s<>"'`]+/gi)) {
+    const raw = match[0].replace(/[),.;:!?\]}]+$/g, "");
+    try {
+      const parsed = new URL(raw);
+      parsed.hash = "";
+      if (parsed.pathname.length > 1)
+        parsed.pathname = parsed.pathname.replace(/\/$/, "");
+      urls.add(parsed.toString());
+    } catch {
+      // A malformed string that merely starts like a URL is not citation evidence.
+    }
+  }
+  return urls;
+}
+
+function textFromEvents(events: readonly BaseEvent[], type: string): string {
+  return events
+    .filter((event) => event.type === type)
+    .map((event) => {
+      if ("delta" in event && typeof event.delta === "string")
+        return event.delta;
+      if ("content" in event && typeof event.content === "string")
+        return event.content;
+      return "";
+    })
+    .join("\n");
+}
+
+/** A citation request is satisfied only by URLs that the retrieval result itself contained. */
+function hasRequestedCitationLineage(
+  events: readonly BaseEvent[],
+  requestText: string,
+): boolean {
+  if (!asksForSourceUrls(requestText)) return true;
+  const cited = urlsIn(textFromEvents(events, "TEXT_MESSAGE_CONTENT"));
+  if (cited.size === 0) return false;
+  const retrieved = urlsIn(textFromEvents(events, "TOOL_CALL_RESULT"));
+  return [...cited].every((url) => retrieved.has(url));
+}
+
+function hasRequiredEvidence(
+  events: readonly BaseEvent[],
+  requestText: string,
+): boolean {
+  return (
+    calledATool(events) && hasRequestedCitationLineage(events, requestText)
+  );
+}
+
+function evidenceGateMetrics(
+  events: readonly BaseEvent[],
+  requestText: string,
+) {
+  const cited = urlsIn(textFromEvents(events, "TEXT_MESSAGE_CONTENT"));
+  const retrieved = urlsIn(textFromEvents(events, "TOOL_CALL_RESULT"));
+  return {
+    calledTool: calledATool(events),
+    citationLineageRequired: asksForSourceUrls(requestText),
+    citedUrls: cited.size,
+    retrievedUrls: retrieved.size,
+    unmatchedCitations: [...cited].filter((url) => !retrieved.has(url)).length,
+  };
+}
+
+function recordEvidenceGate(
+  input: RunAgentInput,
+  attempt: "first" | "retry",
+  events: readonly BaseEvent[],
+  requestText: string,
+  accepted: boolean,
+) {
+  // Counts only: useful proof of enforcement without logging prompts, source URLs or tool results.
+  console.info(
+    JSON.stringify({
+      type: "evidence-gate",
+      runId: input.runId,
+      attempt,
+      accepted,
+      ...evidenceGateMetrics(events, requestText),
+    }),
+  );
+}
+
+function endedWithRunError(events: readonly BaseEvent[]): boolean {
+  return events.some((event) => event.type === "RUN_ERROR");
+}
+
+async function eventsFromObservable(
+  events: Observable<BaseEvent>,
+): Promise<BaseEvent[]> {
+  return lastValueFrom(events.pipe(toArray()));
+}
+
+/** Replace an unsupported draft with one honest, protocol-complete assistant message. */
+function noEvidenceEvents(
+  events: readonly BaseEvent[],
+  input: RunAgentInput,
+): BaseEvent[] {
+  const started = events.find((event) => event.type === "RUN_STARTED");
+  const finished = [...events]
+    .reverse()
+    .find((event) => event.type === "RUN_FINISHED");
+  const messageId = `evidence-required:${input.runId}`;
+  return [
+    ...(started ? [started] : []),
+    {
+      type: "TEXT_MESSAGE_START",
+      messageId,
+      role: "assistant",
+    } as BaseEvent,
+    {
+      type: "TEXT_MESSAGE_CONTENT",
+      messageId,
+      delta: NO_EVIDENCE_ANSWER,
+    } as BaseEvent,
+    { type: "TEXT_MESSAGE_END", messageId } as BaseEvent,
+    ...(finished ? [finished] : []),
+  ];
+}
+
+/**
+ * Run once, retry once with a corrective system instruction when no evidence tool was called, then
+ * fail honestly rather than publish an unsupported verification claim.
+ *
+ * Events are buffered only for requests whose definition of done explicitly includes evidence. A
+ * first draft with no tool is never emitted or persisted; a successful retry is the one observable
+ * run. This turns “try another approach” into runtime behavior and makes the final fallback
+ * deterministic when the model ignores the correction too.
+ */
+export function runWithEvidenceRequirement(
+  agent: AbstractAgent,
+  input: RunAgentInput,
+): Observable<BaseEvent> {
+  let attempt = 0;
+  return runEvidenceAttempts(input, (attemptInput) => {
+    const running = attempt === 0 ? agent : agent.clone();
+    attempt += 1;
+    return running.run(attemptInput);
+  });
+}
+
+/** Shared by built-in agents and remote middleware so neither execution path can bypass the gate. */
+function runEvidenceAttempts(
+  input: RunAgentInput,
+  runAttempt: (input: RunAgentInput) => Observable<BaseEvent>,
+): Observable<BaseEvent> {
+  return defer(async () => {
+    try {
+      const requestText = latestUserText(input.messages);
+      const first = await eventsFromObservable(runAttempt(input));
+      const firstAccepted = hasRequiredEvidence(first, requestText);
+      recordEvidenceGate(input, "first", first, requestText, firstAccepted);
+      if (firstAccepted || endedWithRunError(first)) return first;
+
+      const retry = await eventsFromObservable(
+        runAttempt({
+          ...input,
+          messages: [
+            {
+              id: `evidence-retry:${input.runId}`,
+              role: "system",
+              content: EVIDENCE_RETRY_INSTRUCTION,
+            },
+            ...input.messages,
+          ],
+        }),
+      );
+      const retryAccepted = hasRequiredEvidence(retry, requestText);
+      recordEvidenceGate(input, "retry", retry, requestText, retryAccepted);
+      if (retryAccepted || endedWithRunError(retry)) return retry;
+      return noEvidenceEvents(retry, input);
+    } catch (error) {
+      console.error(
+        JSON.stringify({
+          type: "evidence-gate-error",
+          runId: input.runId,
+          error: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+        }),
+      );
+      throw error;
+    }
+  }).pipe(switchMap((events) => from(events)));
+}
+
+class EvidenceRequiredAgent extends AbstractAgent {
+  private inner: AbstractAgent;
+
+  constructor(
+    identity: { agentId: string; description: string },
+    inner: AbstractAgent,
+  ) {
+    super(identity);
+    this.inner = inner;
+  }
+
+  run(input: RunAgentInput): Observable<BaseEvent> {
+    return runWithEvidenceRequirement(this.inner, input);
+  }
+
+  getCapabilities() {
+    return this.inner.getCapabilities?.() ?? Promise.resolve({});
+  }
+
+  abortRun(): void {
+    this.inner.abortRun();
+    super.abortRun();
+  }
+}
 
 /**
  * Build the built-in and remote AG-UI agent map the runtime serves.
@@ -391,24 +641,26 @@ async function buildAgent(
      * `remote.run(input)` skips it: the endpoint would get a run with no standing role, no holdings
      * message, no tools and no signed assertion, and every one of those failures is silent.
      *
-     * WHICH IS ALSO WHY A REMOTE BOT IS OFFERED NEITHER `message_bot` NOR `ask_person`. Both are
-     * executed here, by the wrapper below, against this deployment's grants and caps. A Bot at an
-     * endpoint runs its own loop and is handed descriptions of tools it may call back for, and the
-     * callback path executes MCP refs only — so a described `message_bot` would be a tool it could
-     * announce and never invoke. Granting one is refused at the door rather than stored dead: see
-     * `enablementRefusal` in plugins/routes.ts.
-     *
-     * Making this work is a feature rather than a fix: the callback would have to carry a run
-     * assertion the endpoint cannot forge, and execute a hop on its behalf. Worth doing; not done
-     * here, and worth knowing it is missing rather than assuming it is not.
+     * Reach tools are also resolved per run. The remote endpoint receives only their descriptions
+     * and the deployment-signed run assertion; execution comes back through the authenticated
+     * callback, where this deployment re-resolves the tools against current grants, caps and depth.
+     * That keeps a remote Bot from gaining a reach tool by naming one it was not offered.
      */
+    const toolsForRun =
+      narrowing || handoff
+        ? async (input: RunAgentInput) => {
+            const offered = narrowing ? await offeredFor(input) : granted;
+            const reaching = (await handoff?.(agent.id, input)) ?? [];
+            return reaching.length > 0 ? [...offered, ...reaching] : offered;
+          }
+        : undefined;
     return remoteAgentWithStandingRole(
       agent,
       stallGuard,
       granted,
       signRun,
       connectedVendors,
-      narrowing ? offeredFor : undefined,
+      toolsForRun,
       agentFetch,
     );
   }
@@ -431,8 +683,13 @@ async function buildAgent(
     );
 
   const whole = withTools(granted);
-  if (!narrowing && !handoff) return whole;
 
+  /*
+   * Every built-in run goes through RunBuiltAgent, even when this deployment has neither adaptive
+   * selection nor handoff. Evidence enforcement is a run property derived from the person's latest
+   * message; returning `whole` here used to bypass it completely on the simplest deployment. That
+   * exact path produced a confident, source-citing live answer with zero tool calls.
+   */
   return new RunBuiltAgent(
     { agentId: agent.id, description: agent.name },
     whole,
@@ -450,9 +707,22 @@ async function buildAgent(
       const tools = passing.length > 0 ? [...offered, ...passing] : offered;
       // Nothing added and nothing narrowed means nothing to rebuild, and reusing the agent already
       // built for this request keeps that path allocation-for-allocation what it was.
-      return tools.length === granted.length && passing.length === 0
-        ? whole
-        : withTools(tools);
+      const built =
+        tools.length === granted.length && passing.length === 0
+          ? whole
+          : withTools(tools);
+      /*
+       * Evidence requirements fail closed even when selection or grants leave this run with no
+       * tools. That absence is exactly when an answer from memory is most tempting and least able
+       * to satisfy the request. The wrapper will replace both memory-only attempts with an honest
+       * limitation instead of silently opting out of enforcement.
+       */
+      return requiresToolEvidence(latestUserText(input.messages))
+        ? new EvidenceRequiredAgent(
+            { agentId: agent.id, description: agent.name },
+            built,
+          )
+        : built;
     },
   );
 }
@@ -658,7 +928,13 @@ function remoteAgentWithStandingRole(
   remote.use((input, next) =>
     defer(() =>
       from(narrow ? narrow(input) : Promise.resolve(tools)).pipe(
-        switchMap((offered) => runWith(offered, input, next)),
+        switchMap((offered) => {
+          const run = (attemptInput: RunAgentInput) =>
+            runWith(offered, attemptInput, next);
+          return requiresToolEvidence(latestUserText(input.messages))
+            ? runEvidenceAttempts(input, run)
+            : run(input);
+        }),
       ),
     ),
   );

@@ -693,9 +693,9 @@ export function createPluginRoutes(
       /*
        * A grant that could never do anything is refused rather than stored, from both ends.
        *
-       * The GRANTEE has to run here, because handing work on is a tool this deployment executes: a
-       * Bot at an endpoint runs its own loop and is handed descriptions of what it may call back
-       * for, and there is no callback path that would execute a hop.
+       * The GRANTEE has to be registered. A Bot at an endpoint receives the tool description and a
+       * signed run assertion, then calls this deployment back to execute the hop against current
+       * grants and caps. It therefore has the same authorization boundary as a Bot running here.
        *
        * The TARGET only has to exist. Being handed work is not the same as being able to hand it on,
        * so a target at its own endpoint is perfectly ordinary — but `ref` is bare text with no
@@ -710,9 +710,6 @@ export function createPluginRoutes(
       }
       const runsHere = await store.agentRunsHere(agentId);
       if (runsHere === undefined) return "There is no such Bot.";
-      if (!runsHere) {
-        return `${agentId} runs at its own endpoint, so this deployment cannot offer it a tool for handing work on. Only a Bot that runs here can be given one.`;
-      }
       if (!(await store.agentIsRegistered(ref))) {
         return `There is no Bot called ${ref} to hand work to.`;
       }

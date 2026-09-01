@@ -252,6 +252,8 @@ describe("a grant is the permission", () => {
         args: {},
         botId: strangerId,
         actorId: "someone@openbot.local",
+        runId: `refused-run-${suite}`,
+        threadId: `refused-thread-${suite}`,
       }),
     ).rejects.toBeInstanceOf(PluginRefusedError);
 
@@ -265,6 +267,10 @@ describe("a grant is the permission", () => {
     expect((rejected[0].payload as { refusal?: string }).refusal).toBe(
       "not_granted",
     );
+    expect(rejected[0].payload).toMatchObject({
+      runId: `refused-run-${suite}`,
+      threadId: `refused-thread-${suite}`,
+    });
   });
 
   test("granting lets the same Bot past the grant check", async () => {
@@ -451,7 +457,14 @@ describe("the trail says what happened, not what was permitted", () => {
     const actorId = `trail_${suite}`;
 
     await expect(
-      store.callTool({ ref, args: {}, botId: holderId, actorId }),
+      store.callTool({
+        ref,
+        args: {},
+        botId: holderId,
+        actorId,
+        runId: "run-correlation-proof",
+        threadId: "thread-correlation-proof",
+      }),
     ).rejects.toBeInstanceOf(PluginRefusedError);
 
     const mine = (await auditRowsFor(ref)).filter(
@@ -465,6 +478,10 @@ describe("the trail says what happened, not what was permitted", () => {
     expect((failed[0].payload as { failure?: string }).failure).toContain(
       "connected",
     );
+    expect(failed[0].payload).toMatchObject({
+      runId: "run-correlation-proof",
+      threadId: "thread-correlation-proof",
+    });
 
     // The point of the whole test: nothing claims this worked.
     expect(

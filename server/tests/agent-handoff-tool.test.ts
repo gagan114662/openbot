@@ -33,6 +33,27 @@ const ALLOWED: HandoffOutcome = {
 };
 
 describe("the handoff tool", () => {
+  test("shows the Bot the coworkers authorized for this run", () => {
+    const tool = handoffTool({
+      desk: deskReturning(ALLOWED),
+      from: FROM,
+      hasSomebodyToAsk: true,
+      reachableBots: [
+        { id: "knowledge", name: "Knowledge" },
+        { id: "risk-analyst", name: "Risk Analyst" },
+      ],
+      maxDepth: 2,
+      maxPerRun: 2,
+    });
+
+    expect(tool?.description).toContain(
+      "Knowledge (stable id: knowledge), Risk Analyst (stable id: risk-analyst)",
+    );
+    expect(tool?.description).toContain(
+      "Use the display name in the bot parameter",
+    );
+  });
+
   test("is offered to a Bot that has somebody to ask", () => {
     const tool = handoffTool({
       desk: deskReturning(ALLOWED),

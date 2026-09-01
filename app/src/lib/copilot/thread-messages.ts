@@ -48,6 +48,22 @@ export type StoredThread = {
 const NOTHING: StoredThread = { messages: [], unreadable: 0 };
 
 /**
+ * Restore the durable thread without erasing messages that arrived while it was being read.
+ *
+ * The runtime may pre-populate one historical message during `connectAgent`. Treating any local
+ * message as a reason to skip restoration leaves a long thread showing only that one message. The
+ * store owns historical order; local-only ids are the concurrent arrivals and belong afterwards.
+ */
+export function mergeStoredMessages(
+  stored: readonly Message[],
+  local: readonly Message[],
+): Message[] {
+  if (stored.length === 0) return [...local];
+  const storedIds = new Set(stored.map((message) => message.id));
+  return [...stored, ...local.filter((message) => !storedIds.has(message.id))];
+}
+
+/**
  * The turns that parse, kept in order, and a count of the ones that did not.
  *
  * Exported so it can be tested against real stored shapes without a server. Takes `unknown[]`

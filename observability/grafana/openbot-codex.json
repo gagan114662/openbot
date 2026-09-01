@@ -1,0 +1,104 @@
+{
+  "annotations": { "list": [] },
+  "editable": true,
+  "panels": [
+    {
+      "type": "stat",
+      "title": "Daily run budget used",
+      "id": 1,
+      "gridPos": { "h": 8, "w": 6, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "expr": "100 * openbot_codex_daily_runs{deployment=~\"$deployment\"} / clamp_min(openbot_codex_daily_run_budget{deployment=~\"$deployment\"}, 1)",
+          "legendFormat": "{{deployment}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green" },
+              { "color": "orange", "value": 80 },
+              { "color": "red", "value": 95 }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] } }
+    },
+    {
+      "type": "timeseries",
+      "title": "Run latency p95",
+      "id": 2,
+      "gridPos": { "h": 8, "w": 9, "x": 6, "y": 0 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.95, sum by (deployment, le) (rate(openbot_codex_run_duration_milliseconds_bucket{deployment=~\"$deployment\"}[5m])))",
+          "legendFormat": "{{deployment}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Run error ratio",
+      "id": 3,
+      "gridPos": { "h": 8, "w": 9, "x": 15, "y": 0 },
+      "targets": [
+        {
+          "expr": "sum by (deployment) (rate(openbot_codex_run_errors_total{deployment=~\"$deployment\"}[5m])) / clamp_min(sum by (deployment) (rate(openbot_codex_runs_total{deployment=~\"$deployment\"}[5m])), 0.000001)",
+          "legendFormat": "{{deployment}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] }
+    },
+    {
+      "type": "timeseries",
+      "title": "Policy and budget refusals",
+      "id": 4,
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "expr": "sum by (deployment) (rate(openbot_codex_refusals_total{deployment=~\"$deployment\"}[5m]))",
+          "legendFormat": "{{deployment}}"
+        }
+      ]
+    },
+    {
+      "type": "timeseries",
+      "title": "Active vs concurrency budget",
+      "id": 5,
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "expr": "openbot_codex_active_runs{deployment=~\"$deployment\"}",
+          "legendFormat": "active {{deployment}}"
+        },
+        {
+          "expr": "openbot_codex_max_concurrent_runs{deployment=~\"$deployment\"}",
+          "legendFormat": "limit {{deployment}}"
+        }
+      ]
+    }
+  ],
+  "schemaVersion": 41,
+  "tags": ["openbot", "codex", "slo"],
+  "templating": {
+    "list": [
+      {
+        "name": "deployment",
+        "type": "query",
+        "query": "label_values(openbot_codex_runs_total, deployment)",
+        "includeAll": true,
+        "multi": true
+      }
+    ]
+  },
+  "time": { "from": "now-6h", "to": "now" },
+  "title": "OpenBot Codex tenant budgets and SLOs",
+  "uid": "openbot-codex-slo",
+  "version": 1
+}

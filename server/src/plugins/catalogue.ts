@@ -267,6 +267,32 @@ export const CATALOGUE: readonly CatalogueEntry[] = Object.freeze([
     docsUrl: "https://developers.notion.com/guides/mcp/build-mcp-client",
   },
   {
+    key: "open-web",
+    title: "Open Web",
+    vendor: "OpenBot",
+    summary:
+      "Fetch pages, JSON, feeds, links and robots rules directly, without Monid or a data broker.",
+    host: "builtin://open-web",
+    path: "/",
+    transport: "builtin-web",
+    auth: Object.freeze({ kind: "builtin" }),
+    writeTools: Object.freeze([]),
+    docsUrl: "https://github.com/CopilotKit/OpenBot",
+  },
+  {
+    key: "repository",
+    title: "Repository Evidence",
+    vendor: "OpenBot",
+    summary:
+      "Search and read this deployment's source checkout with traversal, secret-file, size, and output bounds.",
+    host: "builtin://repository",
+    path: "/",
+    transport: "builtin-repository",
+    auth: Object.freeze({ kind: "builtin" }),
+    writeTools: Object.freeze([]),
+    docsUrl: "https://github.com/CopilotKit/OpenBot",
+  },
+  {
     key: "routines",
     title: "Routines",
     vendor: "OpenBot",

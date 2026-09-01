@@ -56,6 +56,11 @@ A Bot is any endpoint speaking [AG-UI](https://github.com/ag-ui-protocol/ag-ui),
 - [Bun](https://bun.sh) 1.3+, for the app and API server.
 - A CopilotKit Intelligence project and license. A free plan is available, and Intelligence can be self-hosted.
 - A model key. The proof-of-concept Bot uses OpenAI; the LangGraph Bot can use OpenAI, Anthropic, or Google.
+- Or a Codex subscription login for the included local adapter; see [Codex subscription setup](docs/codex-subscription.md).
+
+For verified gaps, battle-test evidence, the seven-layer model, and RLVR safety gates, see
+[Production readiness](docs/production-readiness.md) and
+[multi-tenant isolation](docs/multi-tenancy.md).
 
 ## Quick start
 
@@ -282,6 +287,17 @@ OKTA_OAUTH_ISSUER=https://example.okta.com/oauth2/default
 ```
 
 Restart. Accounts, sessions and roles are stored in the same PostgreSQL database as everything else.
+
+After placing the selected provider's client id and secret in `.env`, complete the interdependent
+session settings atomically without putting either credential in shell history:
+
+```sh
+bun run identity:configure --provider google --admin admin@example.com
+```
+
+Use `microsoft` or `okta` instead when appropriate. The command generates `BETTER_AUTH_SECRET`, sets
+the local callback and trusted origin defaults, names the initial administrator, sets the file mode
+to `0600`, and disables `OPENBOT_SINGLE_USER`. A real browser sign-in is still the final verification.
 
 A company's own SAML or OpenID Connect provider is registered while the deployment runs, under
 Admin → Identity providers, and routed by email domain. An OIDC registration needs every host in the

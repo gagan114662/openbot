@@ -1,10 +1,16 @@
 import type { Hono as HonoApp, MiddlewareHandler } from "hono";
 import { Hono } from "hono";
 import { serveStatic } from "hono/bun";
-import { authoriseAgentCall, sameToken } from "./agents/callback-token";
+import {
+  authoriseAgentCall,
+  type RunAssertion,
+  sameToken,
+} from "./agents/callback-token";
 import type { BotAccessCheck } from "./agents/profile-policy";
 import type { AgentProfileStore } from "./agents/profile-store";
 import { createAgentRoutes } from "./agents/routes";
+import { createAnalyticsRoutes } from "./analytics/routes";
+import type { AnalyticsStore } from "./analytics/store";
 import {
   type AuditReader,
   type AuditStore,
@@ -41,6 +47,13 @@ import type { PeopleStore } from "./people/store";
 import { createPluginRoutes } from "./plugins/routes";
 import type { PluginStore } from "./plugins/store";
 import { REFUSAL_MARKER } from "./plugins/tools";
+
+export type AgentCallbackToolResolver = (input: {
+  name: string;
+  args: Record<string, unknown>;
+  run: RunAssertion;
+}) => Promise<{ text: string; isError?: boolean } | null>;
+
 import { createRoutineRoutes, type RoutineStore } from "./routines/routes";
 import type { RoutineRunner } from "./routines/runner";
 import type { IntentRouter } from "./routing/classify";
@@ -202,6 +215,10 @@ export function createApp(
    * nothing can finish.
    */
   onboardingStore?: OnboardingStore,
+  /** Privacy-controlled agent traces and product outcomes. Appended to preserve positional callers. */
+  analyticsStore?: AnalyticsStore,
+  /** Deployment-owned tools a remote Bot may call with its signed run. Appended for positional callers. */
+  agentCallbackTool?: AgentCallbackToolResolver,
 ) {
   const app = new Hono<{ Variables: AppVariables }>();
 
@@ -892,6 +909,13 @@ export function createApp(
     app.route("/api/routines", createRoutineRoutes(routineStore, requireUser));
   }
 
+  if (analyticsStore) {
+    app.route(
+      "/api/analytics",
+      createAnalyticsRoutes(analyticsStore, requireUser),
+    );
+  }
+
   if (componentStore) {
     app.route(
       "/api/components",
@@ -1011,6 +1035,19 @@ export function createApp(
       }
 
       try {
+        const deploymentResult = await agentCallbackTool?.({
+          name: body.name,
+          args: body.args ?? {},
+          run: {
+            botId: verdict.botId,
+            actorId: verdict.actorId,
+            runId: verdict.runId,
+            ...(verdict.threadId ? { threadId: verdict.threadId } : {}),
+            depth: verdict.depth,
+          },
+        });
+        if (deploymentResult) return context.json(deploymentResult);
+
         const result = await pluginStore.callTool({
           // The model is offered `mcp__server__tool`; the store speaks `server/tool`.
           ref: body.name.replace(/^mcp__/, "").replace("__", "/"),
@@ -1018,6 +1055,8 @@ export function createApp(
           botId: verdict.botId,
           // From the assertion, never the body: this is the name the audit row will carry.
           actorId: verdict.actorId,
+          runId: verdict.runId,
+          threadId: verdict.threadId,
         });
         return context.json({ text: result.text, isError: result.isError });
       } catch (error) {

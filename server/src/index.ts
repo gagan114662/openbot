@@ -6,16 +6,25 @@ import {
 import { serve } from "bun";
 import { eq } from "drizzle-orm";
 import { COMPUTER_GUIDANCE } from "../../shared/bot-prompt";
-import { mintRunAssertion, readRunAssertion } from "./agents/callback-token";
+import {
+  mintRunAssertion,
+  type RunAssertion,
+  readRunAssertion,
+} from "./agents/callback-token";
 import { createAgentFetch } from "./agents/endpoint";
-import { askTheirOwnPerson, escalationTool } from "./agents/escalation";
+import {
+  askTheirOwnPerson,
+  ESCALATE_TOOL,
+  escalationTool,
+} from "./agents/escalation";
 import { createHandoffDesk, HANDOFF_KIND } from "./agents/handoff";
 import { createHandoffDelivery } from "./agents/handoff-delivery";
 import { createHandoffRunner } from "./agents/handoff-runner";
-import { handoffTool } from "./agents/handoff-tool";
+import { HANDOFF_TOOL, handoffTool } from "./agents/handoff-tool";
 import { createAgentProfileStore } from "./agents/profile-store";
 import type { AgentActor } from "./agents/profile-types";
 import { createRuntimeAgentLoader } from "./agents/runtime-agents";
+import { createAnalyticsStore } from "./analytics/store";
 import { createApp } from "./app";
 import { createAuditReader, createAuditStore, recordAuditEvent } from "./audit";
 import { startRetentionSweeps } from "./audit-retention";
@@ -66,7 +75,7 @@ import { createPeopleStore } from "./people/store";
 import { useRoutineTools } from "./plugins/builtin-routines";
 import { redirectUriFor } from "./plugins/oauth";
 import { createPluginStore } from "./plugins/store";
-import { grantedSkills, grantedTools } from "./plugins/tools";
+import { grantedSkills, grantedTools, REFUSAL_MARKER } from "./plugins/tools";
 import { createTurnRunner } from "./routines/run-turn";
 import { createRoutineRunner } from "./routines/runner";
 import { createRoutineStore } from "./routines/store";
@@ -714,6 +723,58 @@ const routineRunner = createRoutineRunner({
 });
 
 /**
+ * Resolve deployment-owned reach tools from authoritative run identity.
+ *
+ * Used both while a run is built and when a remote agent calls back. Re-resolving on callback is
+ * intentional: a grant revoked after the offer must stop the call, and the signed depth—not a body
+ * field controlled by the remote process—decides whether another hop is allowed.
+ */
+const reachToolsForRun = async (run: RunAssertion) => {
+  const couldHandOn =
+    config.handoff.maxDepth > 0 &&
+    config.handoff.maxPerRun > 0 &&
+    (run.depth ?? 0) < config.handoff.maxDepth;
+
+  const reachableBotIds = couldHandOn
+    ? await pluginStore.botsReachableFrom(run.botId).catch(() => [] as string[])
+    : [];
+  /*
+   * A grant stores immutable ids, while a person and the transcript need names. Resolve both from
+   * the profile store for the run's actual actor: an id in a grant must not leak a hidden/deleted or
+   * otherwise inaccessible profile into the model's roster. A failed identity/profile lookup fails
+   * closed by offering no handoff tool, just like a failed grant lookup above.
+   */
+  const reachableBots = couldHandOn
+    ? await actorFor(run.actorId)
+        .then(async (actor) => {
+          const profiles = await Promise.all(
+            reachableBotIds.map((id) => agentProfileStore.get(actor, id)),
+          );
+          return profiles
+            .filter((profile) => profile !== null)
+            .map((profile) => ({ id: profile.id, name: profile.name }));
+        })
+        .catch(() => [] as Array<{ id: string; name: string }>)
+    : [];
+  const passing = couldHandOn
+    ? handoffTool({
+        desk: handoffDesk,
+        from: run,
+        hasSomebodyToAsk: reachableBots.length > 0,
+        reachableBots,
+        maxDepth: config.handoff.maxDepth,
+        maxPerRun: config.handoff.maxPerRun,
+      })
+    : null;
+  const asking = escalationTool({
+    from: run,
+    route: askTheirOwnPerson,
+    auditStore: bootAuditStore,
+  });
+  return passing ? [passing, asking] : [asking];
+};
+
+/**
  * The runtime, and the two things beside it a hop needs.
  *
  * `agentFor` builds the addressed Bot exactly the way a person's run builds it, and `history` reads
@@ -758,58 +819,7 @@ const copilotRuntime = mountCopilotRuntime(
       threadId: input.threadId,
       depth: from?.depth ?? 0,
     };
-    /*
-     * The caps are checked BEFORE the grants query, not inside the tool that would discard it.
-     *
-     * `handoffTool` short-circuits on all three of these, but only after being handed a
-     * `hasSomebodyToAsk` that costs a query. So a deployment which switched the capability off
-     * still paid one grants read per run of every Bot, for a tool it was never going to be offered,
-     * and a run already at the cap paid it again.
-     */
-    const couldHandOn =
-      config.handoff.maxDepth > 0 &&
-      config.handoff.maxPerRun > 0 &&
-      run.depth < config.handoff.maxDepth;
-
-    const passing = couldHandOn
-      ? handoffTool({
-          desk: handoffDesk,
-          /*
-           * How deep this run already is comes from the assertion the deployment signed when it handed
-           * this work on. A run a person started carries none, and none means zero.
-           *
-           * NOT `from.botId`. The assertion proves what this run is, and the Bot is whichever one the
-           * runtime is building right now: on a hop those agree, and taking the id from the signed
-           * value rather than from the build would let a stale assertion aim the next hop at the
-           * wrong Bot's grants.
-           */
-          from: run,
-          // Read now rather than at boot, so a grant made a minute ago counts and one revoked a
-          // minute ago stops counting.
-          hasSomebodyToAsk:
-            (
-              await pluginStore
-                .botsReachableFrom(botId)
-                .catch(() => [] as string[])
-            ).length > 0,
-          maxDepth: config.handoff.maxDepth,
-          maxPerRun: config.handoff.maxPerRun,
-        })
-      : null;
-    /*
-     * The way to stop and ask is offered whether or not there is a Bot to hand to.
-     *
-     * It is the cheaper of the two and the one a Bot should reach for first: asking the person who
-     * is already in the conversation spends nothing and cannot be aimed anywhere they cannot see.
-     * A deployment that offered only the expensive exit would push every unanswerable question
-     * sideways into another run.
-     */
-    const asking = escalationTool({
-      from: run,
-      route: askTheirOwnPerson,
-      auditStore: bootAuditStore,
-    });
-    return passing ? [passing, asking] : [asking];
+    return reachToolsForRun(run);
   },
   // A run started or ended on a thread; light the channel it belongs to. Fire-and-forget, keyed by
   // thread, and a scratch thread maps to no channel and signals nowhere.
@@ -1068,6 +1078,20 @@ const app = createApp(
   routineStore,
   // Where each person is in first-run onboarding, read by /api/me and written by the wizard.
   createOnboardingStore(database),
+  createAnalyticsStore(database),
+  async ({ name, args, run }) => {
+    if (name !== HANDOFF_TOOL && name !== ESCALATE_TOOL) return null;
+    const tool = (await reachToolsForRun(run)).find(
+      (candidate) => candidate.name === name,
+    );
+    if (!tool) {
+      return {
+        text: `${REFUSAL_MARKER} This reach tool is not available for this run. Its grant may have been revoked or the handoff limit may have been reached.`,
+        isError: true,
+      };
+    }
+    return { text: await tool.execute(args) };
+  },
 );
 
 /**

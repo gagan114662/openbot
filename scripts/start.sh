@@ -30,9 +30,15 @@ SERVER_PORT="$(setting SERVER_PORT 3001)"
 COMPUTER_PORT="$(setting COMPUTER_PORT 4100)"
 BOT_PORT="$(setting BOT_PORT 4200)"
 LANGGRAPH_PORT="$(setting LANGGRAPH_PORT 4201)"
+CODEX_AGENT_PORT="$(setting CODEX_AGENT_PORT 4202)"
 SUPERVISOR_PORT="$(setting SUPERVISOR_PORT 4500)"
+COMPOSE_PROJECT_NAME="$(setting COMPOSE_PROJECT_NAME openbot)"
+# The same identity scopes Intelligence threads and per-Bot computers. A local tenant stack names
+# its Compose project once and inherits a collision-proof boundary everywhere else.
+DEPLOYMENT_ID="$(setting DEPLOYMENT_ID "$COMPOSE_PROJECT_NAME")"
+COMPUTER_NAMESPACE="$(setting COMPUTER_NAMESPACE "$DEPLOYMENT_ID")"
 ONE_COMPUTER_EACH="${OPENBOT_ONE_COMPUTER_EACH:-true}"
-export APP_PORT SERVER_PORT
+export APP_PORT SERVER_PORT COMPOSE_PROJECT_NAME DEPLOYMENT_ID COMPUTER_NAMESPACE
 SUPERVISOR_TOKEN="$(setting SUPERVISOR_TOKEN openbot-dev-supervisor-token)"
 COMPUTER_TOKEN="$(setting COMPUTER_TOKEN openbot-dev-computer-token)"
 # A fixed default is fine here, unlike `AGENT_TOOL_TOKEN` below, but not because of where the server
@@ -57,7 +63,7 @@ WORKER_SHARED_SECRET="$(setting WORKER_SHARED_SECRET openbot-dev-worker-secret)"
 # The laptop stack runs agent-langgraph on LANGGRAPH_PORT. The one-container image does not, so
 # this default stays in the script rather than in .env: a `docker run --env-file .env` must not
 # inherit a URL that points at a process the image does not contain.
-MANAGED_AGENT_AG_UI_URL="$(setting MANAGED_AGENT_AG_UI_URL "http://localhost:${LANGGRAPH_PORT}/ag-ui")"
+MANAGED_AGENT_AG_UI_URL="$(setting MANAGED_AGENT_AG_UI_URL "http://localhost:${CODEX_AGENT_PORT}/ag-ui")"
 export MANAGED_AGENT_AG_UI_URL
 
 # Whether this run minted a secret that something already running may not have.
@@ -215,21 +221,31 @@ fi
 # `docker compose up -d` is declarative and does nothing for a service whose configuration has not
 # changed, so naming them all costs a comparison and buys the guarantee that what is running is what
 # this run configured.
-for svc in agent-computer agent-bot agent-langgraph; do
+for svc in agent-computer; do
   SERVICES+=("$svc")
 done
 
 export SUPERVISOR_TOKEN COMPUTER_TOKEN WORKER_SHARED_SECRET
 export COMPUTER_PORT BOT_PORT LANGGRAPH_PORT SUPERVISOR_PORT
 docker compose up -d --build "${SERVICES[@]}" >/dev/null
-if ! docker compose run --rm --build migrate >"$LOGS/migrate.log" 2>&1; then
+if ! (cd server && bun run db:migrate) >"$LOGS/migrate.log" 2>&1; then
   red "  Migrations did not apply. The database is not the schema this server expects."
   red "  Log: $LOGS/migrate.log"
   exit 1
 fi
 wait_for "http://localhost:$COMPUTER_PORT/health" "agent-computer"
-wait_for "http://localhost:$BOT_PORT/health" "agent-bot"
-wait_for "http://localhost:$LANGGRAPH_PORT/health" "agent-langgraph"
+if ! codex login status >/dev/null 2>&1; then
+  red "  Codex is not signed in. Run: codex login"
+  exit 1
+fi
+require_free_or_ours "$CODEX_AGENT_PORT" agent-codex
+if ! identifies_as_openbot "$CODEX_AGENT_PORT" agent-codex; then
+  (cd "$ROOT" && CODEX_AGENT_PORT="$CODEX_AGENT_PORT" \
+    MANAGED_AGENT_TOKEN="$MANAGED_AGENT_TOKEN" AGENT_TOOL_TOKEN="$AGENT_TOOL_TOKEN" \
+    OPENBOT_TOOL_URL="http://localhost:$SERVER_PORT/api/agent-tools/call" \
+    nohup bun agent-codex/src/index.ts >"$LOGS/agent-codex.log" 2>&1 </dev/null &)
+fi
+wait_for "http://localhost:$CODEX_AGENT_PORT/health" "agent-codex"
 
 for table in agent_profiles agent_preferences; do
   if ! docker compose exec -T postgres \
@@ -307,11 +323,11 @@ if ! identifies_as_openbot "$SERVER_PORT" server; then
       SUPERVISOR_TOKEN="$SUPERVISOR_TOKEN" \
       COMPUTER_TOKEN="$COMPUTER_TOKEN" \
       WORKER_SHARED_SECRET="$WORKER_SHARED_SECRET" \
-      bun --env-file=../.env src/index.ts >"$LOGS/server.log" 2>&1 &)
+      nohup bun --env-file=../.env src/index.ts >"$LOGS/server.log" 2>&1 </dev/null &)
   else
     (cd server && PORT="$SERVER_PORT" \
       WORKER_SHARED_SECRET="$WORKER_SHARED_SECRET" \
-      bun --env-file=../.env src/index.ts >"$LOGS/server.log" 2>&1 &)
+      nohup bun --env-file=../.env src/index.ts >"$LOGS/server.log" 2>&1 </dev/null &)
   fi
 fi
 wait_for_openbot "$SERVER_PORT" server
@@ -338,7 +354,7 @@ if ! pgrep -f "bun worker/src/index.ts" >/dev/null 2>&1; then
     DATABASE_URL="$WORKER_DATABASE_URL" \
     SERVER_INTERNAL_URL="http://localhost:$SERVER_PORT" \
     WORKER_SHARED_SECRET="$WORKER_SHARED_SECRET" \
-    bun worker/src/index.ts >"$LOGS/worker.log" 2>&1 &)
+    nohup bun worker/src/index.ts >"$LOGS/worker.log" 2>&1 </dev/null &)
   info "  worker: started (routine sweep loop)"
   sleep 1
   if ! pgrep -f "bun worker/src/index.ts" >/dev/null 2>&1; then
@@ -368,7 +384,7 @@ PY
 info "4/4  App"
 require_free_or_ours "$APP_PORT" app
 if ! identifies_as_openbot "$APP_PORT" app; then
-  (cd app && bun run dev --port "$APP_PORT" --strictPort >"$LOGS/app.log" 2>&1 &)
+  (cd app && nohup bun run dev --port "$APP_PORT" --strictPort >"$LOGS/app.log" 2>&1 </dev/null &)
 fi
 wait_for_openbot "$APP_PORT" app
 

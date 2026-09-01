@@ -97,7 +97,12 @@ describe("who may call a tool back, and as whom", () => {
 
   const runForA = () =>
     mintRunAssertion(
-      { botId: AGENT_A, actorId: "visitor_9", runId: "r1" },
+      {
+        botId: AGENT_A,
+        actorId: "visitor_9",
+        runId: "r1",
+        threadId: "thread-1",
+      },
       KEY,
     );
 
@@ -115,6 +120,9 @@ describe("who may call a tool back, and as whom", () => {
       ok: true,
       botId: AGENT_A,
       actorId: "visitor_9",
+      runId: "r1",
+      threadId: "thread-1",
+      depth: 0,
     });
   });
 
@@ -167,6 +175,9 @@ describe("who may call a tool back, and as whom", () => {
       ok: true,
       botId: AGENT_A,
       actorId: "visitor_9",
+      runId: "r1",
+      threadId: "thread-1",
+      depth: 0,
     });
   });
 

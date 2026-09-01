@@ -134,6 +134,8 @@ and in whatever holds the release, which is not where `KEY_ENCRYPTION_KEY` belon
   value: {{ ternary "on" "off" .Values.server.embeddedComputer | quote }}
 - name: TENANT_PACKAGE_DIR
   value: {{ .Values.config.tenantPackageDir | quote }}
+- name: DEPLOYMENT_ID
+  value: {{ default (printf "%s/%s" .Release.Namespace .Release.Name) .Values.config.deploymentId | quote }}
 {{- if .Values.config.publicUrl }}
 - name: OPENBOT_PUBLIC_URL
   value: {{ .Values.config.publicUrl | quote }}
@@ -432,4 +434,3 @@ than anything that names the cause.
 {{- define "openbot.automountToken" -}}
 {{- or .Values.serviceAccount.automountServiceAccountToken (eq .Values.computers.mode "sandbox") -}}
 {{- end -}}
-

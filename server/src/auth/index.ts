@@ -197,7 +197,22 @@ export function createAuth(
     },
     plugins,
     socialProviders: {
-      ...(authConfig.google ? { google: authConfig.google } : {}),
+      ...(authConfig.google
+        ? {
+            google: {
+              ...authConfig.google,
+              /*
+               * Authentication is not incremental authorization.
+               *
+               * Better Auth defaults this to true. Reusing a Google client that previously held
+               * Analytics or Search Console grants then made OpenBot's identity-only sign-in ask
+               * for those scopes too, despite this flow requesting only openid/email/profile.
+               * Keep tokens from this flow bounded to exactly the scopes this flow asks for.
+               */
+              includeGrantedScopes: false,
+            },
+          }
+        : {}),
       ...(authConfig.microsoft
         ? {
             microsoft: {

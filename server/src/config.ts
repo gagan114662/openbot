@@ -566,7 +566,9 @@ function runtimeCapabilities(environment: Environment): RuntimeCapabilities {
   const settings = {
     apiUrl: url(environment, "INTELLIGENCE_API_URL"),
     gatewayWsUrl: url(environment, "INTELLIGENCE_GATEWAY_WS_URL"),
-    apiKey: optional(environment, "INTELLIGENCE_API_KEY"),
+    apiKey:
+      optional(environment, "INTELLIGENCE_API_KEY") ??
+      optional(environment, "CPK_INTELLIGENCE_API_KEY"),
     licenseToken: optional(environment, "COPILOTKIT_LICENSE_TOKEN"),
   };
 

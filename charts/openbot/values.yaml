@@ -116,6 +116,10 @@ migrations:
 
 # What OpenBot needs to run. Anything secret belongs in `secrets` below, never here.
 config:
+  # Stable tenant boundary inside shared external systems such as CopilotKit Intelligence. Empty
+  # derives `<namespace>/<release>`, so two releases of the same tenant package never mint the same
+  # thread namespace. Never change this for an existing tenant after it has created threads.
+  deploymentId: ""
   # Where people reach this deployment. Sets the OAuth callback and the trusted origin.
   publicUrl: ""
   # Administrators by email address, comma-separated. Required unless singleUser is on.

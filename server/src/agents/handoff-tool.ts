@@ -21,11 +21,17 @@ import type { HandoffDesk } from "./handoff";
 /** What the model is offered. One name, so a transcript can find every hop by searching for it. */
 export const HANDOFF_TOOL = "message_bot";
 
+/** A coworker the run may address: an immutable routing key and its authoritative human name. */
+export type ReachableBot = {
+  id: string;
+  name: string;
+};
+
 const parameters = z.object({
   bot: z
     .string()
     .describe(
-      "The name of the Bot to hand this to, as it appears in the roster",
+      "The display name of the Bot to hand this to, exactly as it appears in the authorized roster; use its stable id only when duplicate names make the name ambiguous",
     ),
   task: z
     .string()
@@ -57,11 +63,20 @@ export function handoffTool(options: {
   from: RunAssertion;
   /** Whether this Bot has been granted anybody at all. */
   hasSomebodyToAsk: boolean;
+  /** Authoritative identities the run may address, shown so it can discover and name coworkers. */
+  reachableBots?: readonly ReachableBot[];
   maxDepth: number;
   /** How many Bots one run may address. Zero switches it off as surely as a depth of zero. */
   maxPerRun: number;
 }): GrantedTool | null {
-  const { desk, from, hasSomebodyToAsk, maxDepth, maxPerRun } = options;
+  const {
+    desk,
+    from,
+    hasSomebodyToAsk,
+    reachableBots = [],
+    maxDepth,
+    maxPerRun,
+  } = options;
   /*
    * Both zeros mean the same thing, and both have to be checked here.
    *
@@ -87,6 +102,13 @@ export function handoffTool(options: {
     ref: `bot/${HANDOFF_TOOL}`,
     description:
       "Hand a piece of work to another Bot in this workspace and let it answer for itself. " +
+      (reachableBots.length > 0
+        ? `Bots currently authorized for this run: ${reachableBots
+            .map(({ id, name }) => `${name} (stable id: ${id})`)
+            .join(
+              ", ",
+            )}. Use the display name in the bot parameter; use the stable id only to disambiguate duplicate names. `
+        : "") +
       "Use this when the work needs a role you do not have. The other Bot answers in its own " +
       "conversation with this person, so do not wait for it or repeat what it will say: tell them " +
       "who you have asked and what for. If the work is yours to do, do it, and if it needs a " +

@@ -6,6 +6,27 @@ import { defineConfig } from "vite";
 
 export default defineConfig({
   plugins: [tanstackRouter(), react(), tailwindcss()],
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (!id.includes("node_modules")) return undefined;
+          if (id.includes("@ag-ui")) return "ag-ui";
+          if (id.includes("@copilotkit+react-core")) return "copilotkit-react";
+          if (
+            id.includes("@copilotkit+web-components") ||
+            id.includes("@copilotkit+a2ui-renderer")
+          )
+            return "copilotkit-ui";
+          if (id.includes("@copilotkit+channels-"))
+            return "copilotkit-channels";
+          if (id.includes("@copilotkit")) return "copilotkit-runtime";
+          if (id.includes("@tanstack")) return "tanstack";
+          return undefined;
+        },
+      },
+    },
+  },
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),

@@ -175,7 +175,9 @@ services:
       COMPUTER_IMAGE: ${COMPUTER_IMAGE:-openbot-agent-computer:latest}
       # Which deployment the computers it creates belong to, so two stacks on one Docker host never
       # derive the same container and volume names for the same Bot.
-      COMPUTER_NAMESPACE: ${COMPUTER_NAMESPACE:-openbot}
+      # Compose project names are the local tenant boundary. An explicit value still wins, but two
+      # independently named stacks no longer derive the same Bot containers and volumes by default.
+      COMPUTER_NAMESPACE: ${COMPUTER_NAMESPACE:-${COMPOSE_PROJECT_NAME:-openbot}}
       # Empty by default because the API server runs on the host in local development and reaches
       # computers by published loopback ports. Deployments running the server inside this network set
       # the network name so computers publish no host ports.

@@ -13,7 +13,18 @@ import {
   takeFirstMessage,
   transcriptMessages,
 } from "@/components/channels/transcript-messages";
+import { Button } from "@/components/ui/button";
 import { agentListQueryOptions } from "@/lib/agents/queries";
+import {
+  beginTurnAnalytics,
+  evaluateTurnAnalytics,
+  fetchTurnEvaluation,
+  finishTurnAnalytics,
+  humanGateTools,
+  latestEvaluableTurnSessionId,
+  observedTools,
+  recordHumanGate,
+} from "@/lib/analytics/turns";
 import {
   recordChannelActivityMutationOptions,
   setChannelBusyMutationOptions,
@@ -28,7 +39,10 @@ import { ConversationProvider } from "@/lib/copilot/conversation";
 import { afterMs, joinWithin } from "@/lib/copilot/join-thread";
 import { repairUnansweredToolCalls } from "@/lib/copilot/repair-history";
 import { stoppedReason } from "@/lib/copilot/stopped-turn";
-import { readThreadMessages } from "@/lib/copilot/thread-messages";
+import {
+  mergeStoredMessages,
+  readThreadMessages,
+} from "@/lib/copilot/thread-messages";
 import { useSkillCommands } from "@/lib/plugins/skill-commands";
 import { queryClient } from "@/query-client";
 import { newId } from "../../lib/new-id";
@@ -161,13 +175,11 @@ export function ChannelChat({
           channel.threadId,
           runtimeAgentId,
         );
-        // Never overwrite local messages that arrived while history was loading.
-        if (
-          current &&
-          stored.messages.length > 0 &&
-          agent.messages.length === 0
-        ) {
-          agent.setMessages(stored.messages);
+        // Durable history owns its order; local-only ids are messages that arrived during the read.
+        if (current && stored.messages.length > 0) {
+          agent.setMessages(
+            mergeStoredMessages(stored.messages, agent.messages),
+          );
         }
         /*
          * Said on screen rather than only counted. A turn the history store holds and this app cannot
@@ -264,7 +276,30 @@ export function ChannelChat({
 
   // Run failures arrive as events and are reported only for turns started in this mount.
   const [runError, setRunError] = useState<string | null>(null);
+  const [evaluation, setEvaluation] = useState<{
+    sessionId: string;
+    state: "ready" | "saving" | "saved" | "error";
+    taskCompleted?: boolean;
+  } | null>(null);
+
   const awaitingReply = useRef(false);
+  const completedRunAnalytics = useRef<{
+    model?: string;
+    inputTokens?: number;
+    cachedInputTokens?: number;
+    outputTokens?: number;
+    reasoningOutputTokens?: number;
+    totalTokens?: number;
+  } | null>(null);
+  const activeAnalyticsTurn = useRef<{
+    turn: Parameters<typeof beginTurnAnalytics>[0];
+    messageIdsBeforeRun: Set<string>;
+  } | null>(null);
+  const humanGateTiming = useRef<{
+    id: string;
+    startedAtMs: number;
+    waitMs?: number;
+  } | null>(null);
 
   /*
    * TWO DIFFERENT FACTS ABOUT ONE TURN, AND NEITHER OF THEM IS `agent.isRunning`.
@@ -291,7 +326,34 @@ export function ChannelChat({
    * first one to finish declare the conversation idle.
    */
   const [turnsInFlight, setTurnsInFlight] = useState(0);
+  const turnsInFlightRef = useRef(0);
   const [runsInFlight, setRunsInFlight] = useState(0);
+
+  // A durable answer remains evaluable after reload. Reconstruct its deterministic session id
+  // from the user message that began the turn, then restore an existing verdict if there is one.
+  useEffect(() => {
+    if (restoring || evaluation || turnsInFlight > 0) return;
+    const sessionId = latestEvaluableTurnSessionId(agent.messages, channel.id);
+    if (!sessionId) return;
+    let current = true;
+    void fetchTurnEvaluation(sessionId)
+      .then((saved) => {
+        if (!current || !saved || saved.status !== "completed") return;
+        setEvaluation(
+          saved.taskCompleted === null
+            ? { sessionId, state: "ready" }
+            : {
+                sessionId,
+                state: "saved",
+                taskCompleted: saved.taskCompleted,
+              },
+        );
+      })
+      .catch(() => undefined);
+    return () => {
+      current = false;
+    };
+  }, [agent.messages, channel.id, evaluation, restoring, turnsInFlight]);
 
   /**
    * Tell the roster what was just said. Failures here must not block the conversation.
@@ -302,19 +364,11 @@ export function ChannelChat({
    * Show this channel as working on the roster while its own turn runs.
    *
    * The server cannot see a person's turn begin — the runtime does not tell it — so the browser
-   * reports it, keyed on whether a turn is in flight. The server broadcasts it to every member, so
-   * the row shows the dots even on a tab that has since navigated elsewhere; a run that outlives
-   * this tab clears itself when the roster next refetches, which is the acceptable failure for a
-   * transient hint. Not cleared on unmount on purpose: a turn keeps running server-side after the
-   * person leaves the channel, and clearing here would drop the indicator while the work goes on.
+   * reports it around the async turn itself. The ref survives this component unmounting long enough
+   * for `say`'s `finally` to send the matching false, while also preventing an overlapping turn from
+   * clearing the first one's indicator. The server broadcasts the transition to every member.
    */
   const setBusy = useMutation(setChannelBusyMutationOptions());
-  const busy = turnsInFlight > 0;
-  // Keyed on the busy transition alone; `setBusy.mutate` is a stable handle, not a dependency.
-  // biome-ignore lint/correctness/useExhaustiveDependencies: firing on the busy transition only.
-  useEffect(() => {
-    setBusy.mutate({ channelId: channel.id, busy });
-  }, [busy, channel.id]);
   const report = (text: string, agentId: string | null) => {
     const trimmed = text.trim();
     if (!trimmed) return;
@@ -356,6 +410,7 @@ export function ChannelChat({
     const target = agentRef.current;
 
     setRunError(null);
+    setEvaluation(null);
     awaitingReply.current = true;
 
     /*
@@ -378,26 +433,118 @@ export function ChannelChat({
       });
     }
 
+    const userMessageId = newId();
     target.addMessage({
       content: trimmed,
-      id: newId(),
+      id: userMessageId,
       role: "user",
     });
     report(trimmed, null);
+
+    const turnAnalytics = {
+      id: `channel:${channel.id}:turn:${userMessageId}`,
+      agentId: runtimeAgentId,
+      threadId: channel.threadId,
+      startedAt: new Date().toISOString(),
+      promptLength: trimmed.length,
+    };
+    // Observability must never become a dependency of the conversation it observes.
+    void beginTurnAnalytics(turnAnalytics).catch(() => undefined);
 
     // Providers reject later turns if prior tool calls have no result; repair before sending.
     const repaired = repairUnansweredToolCalls(target.messages);
     if (repaired !== target.messages) {
       target.setMessages(repaired as typeof target.messages);
     }
+    const messageIdsBeforeRun = new Set(
+      target.messages.map((message) => message.id),
+    );
+    activeAnalyticsTurn.current = {
+      turn: turnAnalytics,
+      messageIdsBeforeRun,
+    };
+    humanGateTiming.current = null;
 
     setRunsInFlight((count) => count + 1);
+    completedRunAnalytics.current = null;
+    const startedAtMs = Date.now();
     try {
       await copilotkit.runAgent({ agent: target });
+      const reply = [...target.messages]
+        .reverse()
+        .find((message) => message.role === "assistant");
+      const responseLength =
+        typeof reply?.content === "string" ? reply.content.length : 0;
+      const tools = observedTools(target.messages, messageIdsBeforeRun);
+      const completedGate = humanGateTools(tools)[0];
+      // The message-update effect mutates this ref while `runAgent` is suspended; TypeScript's
+      // straight-line narrowing cannot see that concurrent React lifecycle edge across the await.
+      const gateTiming = humanGateTiming.current as {
+        id: string;
+        startedAtMs: number;
+        waitMs?: number;
+      } | null;
+      const humanWaitMs =
+        completedGate?.resultObserved && gateTiming?.id === completedGate.id
+          ? (gateTiming.waitMs ?? Date.now() - gateTiming.startedAtMs)
+          : undefined;
+      void finishTurnAnalytics(turnAnalytics, {
+        status: "completed",
+        latencyMs: Date.now() - startedAtMs,
+        responseLength,
+        tools,
+        ...(humanWaitMs === undefined ? {} : { humanWaitMs }),
+        ...(completedRunAnalytics.current ?? {}),
+      })
+        .then(() => {
+          setEvaluation({ sessionId: turnAnalytics.id, state: "ready" });
+        })
+        .catch(() => undefined);
+    } catch (error) {
+      void finishTurnAnalytics(turnAnalytics, {
+        status: "failed",
+        latencyMs: Date.now() - startedAtMs,
+        responseLength: 0,
+        errorType: error instanceof Error ? error.name : "UnknownError",
+      }).catch(() => undefined);
+      throw error;
     } finally {
+      activeAnalyticsTurn.current = null;
       setRunsInFlight((count) => count - 1);
     }
   };
+
+  const activeHumanGate = (() => {
+    const active = activeAnalyticsTurn.current;
+    if (!active) return null;
+    return (
+      humanGateTools(
+        observedTools(agent.messages, active.messageIdsBeforeRun),
+      )[0] ?? null
+    );
+  })();
+  const activeHumanGateId = activeHumanGate?.id;
+  const activeHumanGateName = activeHumanGate?.name;
+  const activeHumanGateResultObserved = activeHumanGate?.resultObserved;
+  useEffect(() => {
+    const active = activeAnalyticsTurn.current;
+    if (!active || !activeHumanGateId || !activeHumanGateName) return;
+    const gate = {
+      id: activeHumanGateId,
+      name: activeHumanGateName,
+      resultObserved: activeHumanGateResultObserved ?? false,
+    };
+    const timing = humanGateTiming.current;
+    if (!timing || timing.id !== gate.id) {
+      humanGateTiming.current = {
+        id: gate.id,
+        startedAtMs: Date.now(),
+      };
+    } else if (gate.resultObserved && timing.waitMs === undefined) {
+      timing.waitMs = Date.now() - timing.startedAtMs;
+    }
+    void recordHumanGate(active.turn, gate).catch(() => undefined);
+  }, [activeHumanGateId, activeHumanGateName, activeHumanGateResultObserved]);
 
   /**
    * Send a user turn through the channel, including activity reporting and history repair.
@@ -411,11 +558,19 @@ export function ChannelChat({
     const trimmed = text.trim();
     if (!trimmed) return;
 
-    setTurnsInFlight((count) => count + 1);
+    turnsInFlightRef.current += 1;
+    if (turnsInFlightRef.current === 1) {
+      setBusy.mutate({ channelId: channel.id, busy: true });
+    }
+    setTurnsInFlight(turnsInFlightRef.current);
     try {
       await deliver(trimmed, skillInstructions);
     } finally {
-      setTurnsInFlight((count) => count - 1);
+      turnsInFlightRef.current = Math.max(0, turnsInFlightRef.current - 1);
+      if (turnsInFlightRef.current === 0) {
+        setBusy.mutate({ channelId: channel.id, busy: false });
+      }
+      setTurnsInFlight(turnsInFlightRef.current);
     }
   };
 
@@ -430,7 +585,11 @@ export function ChannelChat({
       // both is not told two different things about the same silence.
       onRunErrorEvent: ({ event }) => fail(stoppedReason(event?.message)),
       onRunFailed: ({ error }) => fail(stoppedReason(error)),
-      onRunFinishedEvent: () => {
+      onRunFinishedEvent: ({ event }) => {
+        const result = event.result as
+          | { openbotAnalytics?: typeof completedRunAnalytics.current }
+          | undefined;
+        completedRunAnalytics.current = result?.openbotAnalytics ?? null;
         const wasOurs = awaitingReply.current;
         awaitingReply.current = false;
         if (!wasOurs) return;
@@ -493,6 +652,64 @@ export function ChannelChat({
            * it — and they are independent, so neither is an `else` for the other.
            */
           <>
+            {evaluation ? (
+              <fieldset
+                className="mb-2 flex items-center gap-2 text-sm text-muted-foreground"
+                aria-label="Evaluate the latest answer"
+              >
+                {evaluation.state === "saved" ? (
+                  <span role="status">
+                    Recorded as{" "}
+                    {evaluation.taskCompleted ? "correct" : "incorrect"}.
+                  </span>
+                ) : (
+                  <>
+                    <legend className="float-left">
+                      Was the latest answer correct?
+                    </legend>
+                    {[true, false].map((taskCompleted) => (
+                      <Button
+                        disabled={evaluation.state === "saving"}
+                        key={String(taskCompleted)}
+                        onClick={() => {
+                          setEvaluation((current) =>
+                            current ? { ...current, state: "saving" } : current,
+                          );
+                          void evaluateTurnAnalytics(
+                            evaluation.sessionId,
+                            taskCompleted,
+                          )
+                            .then(() => {
+                              setEvaluation({
+                                sessionId: evaluation.sessionId,
+                                state: "saved",
+                                taskCompleted,
+                              });
+                            })
+                            .catch(() => {
+                              setEvaluation((current) =>
+                                current
+                                  ? { ...current, state: "error" }
+                                  : current,
+                              );
+                            });
+                        }}
+                        size="sm"
+                        type="button"
+                        variant="outline"
+                      >
+                        {taskCompleted ? "Yes" : "No"}
+                      </Button>
+                    ))}
+                    {evaluation.state === "error" ? (
+                      <span className="text-destructive" role="alert">
+                        Could not save. Try again.
+                      </span>
+                    ) : null}
+                  </>
+                )}
+              </fieldset>
+            ) : null}
             {unreadable > 0 ? (
               <p className="pb-2 text-sm text-muted-foreground" role="status">
                 {unreadable === 1

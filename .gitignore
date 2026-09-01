@@ -17,6 +17,9 @@ node_modules/
 **/dist/
 app/src/lib/generated/application-config.ts
 .logs/
+.backups/
+.copilotkit/
+.codex-adapter-usage.json
 .demo-logs/
 **/.impeccable
 .wave-state.md

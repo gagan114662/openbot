@@ -93,6 +93,8 @@ type PackageFiles = {
    * package had until now.
    */
   skills?: string;
+  /** Optional reviewed memory. Missing means the feature is off. */
+  memory?: string;
   themeCss: string;
 };
 
@@ -192,6 +194,15 @@ export type TenantPackage = {
   }[];
   /** What `skills.yaml` ships, or empty for a package that has none. */
   skills: TenantSkill[];
+  /** Approved entries only. Pending and rejected proposals never reach a model. */
+  reviewedMemory: Array<{
+    id: string;
+    appliesTo: string[];
+    text: string;
+    approvedBy: string;
+    approvedAt: string;
+    source: string;
+  }>;
   themeCss: string;
 };
 
@@ -319,6 +330,10 @@ export function validateTenantPackage(files: PackageFiles): TenantPackage {
   const skillsYaml = files.skills?.trim()
     ? yaml(files.skills, "skills.yaml")
     : {};
+  const memoryYaml = files.memory?.trim()
+    ? yaml(files.memory, "memory.yaml")
+    : {};
+  const reviewedMemory = parseReviewedMemory(memoryYaml.entries);
   const tenant = asRecord(brand.tenant, "brand.tenant");
   const skin =
     brand.skin === undefined ? undefined : asRecord(brand.skin, "brand.skin");
@@ -363,10 +378,15 @@ export function validateTenantPackage(files: PackageFiles): TenantPackage {
           id,
           name: requiredString(agent.name, "agent.name"),
           title: requiredString(agent.title, "agent.title"),
-          roleDescription: requiredString(
-            agent.role_description,
-            "agent.role_description",
-          ),
+          roleDescription: [
+            requiredString(agent.role_description, "agent.role_description"),
+            ...reviewedMemory
+              .filter((entry) => entry.appliesTo.includes(id))
+              .map(
+                (entry) =>
+                  `Reviewed organizational memory (${entry.id}, source: ${entry.source}): ${entry.text}`,
+              ),
+          ].join("\n\n"),
           avatarSeed:
             agent.avatar_seed === undefined
               ? undefined
@@ -392,6 +412,15 @@ export function validateTenantPackage(files: PackageFiles): TenantPackage {
     },
   );
   const agentIds = new Set(agents.map((agent) => agent.id));
+  for (const entry of reviewedMemory) {
+    for (const agentId of entry.appliesTo) {
+      if (!agentIds.has(agentId)) {
+        throw new Error(
+          `memory entry "${entry.id}" references unknown agent "${agentId}"`,
+        );
+      }
+    }
+  }
   const packageSkills = parseTenantSkills(skillsYaml.skills);
   const skillSlugs = new Set(packageSkills.map((skill) => skill.slug));
   for (const agent of agents) {
@@ -474,8 +503,35 @@ export function validateTenantPackage(files: PackageFiles): TenantPackage {
     },
     knowledgeSources: sources,
     skills: packageSkills,
+    reviewedMemory,
     themeCss: files.themeCss,
   };
+}
+
+function parseReviewedMemory(value: unknown): TenantPackage["reviewedMemory"] {
+  if (value === undefined || value === null) return [];
+  return asList(value, "memory.yaml entries").flatMap((candidate) => {
+    const entry = asRecord(candidate, "memory entry");
+    const status = requiredString(entry.status, "memory.status");
+    if (!new Set(["pending", "approved", "rejected"]).has(status)) {
+      throw new Error("memory.status must be pending, approved, or rejected");
+    }
+    if (status !== "approved") return [];
+    const approvedAt = requiredString(entry.approved_at, "memory.approved_at");
+    if (!Number.isFinite(Date.parse(approvedAt))) {
+      throw new Error("memory.approved_at must be an ISO date-time");
+    }
+    return [
+      {
+        id: requiredString(entry.id, "memory.id"),
+        appliesTo: stringArray(entry.applies_to, "memory.applies_to"),
+        text: requiredString(entry.text, "memory.text"),
+        approvedBy: requiredString(entry.approved_by, "memory.approved_by"),
+        approvedAt,
+        source: requiredString(entry.source, "memory.source"),
+      },
+    ];
+  });
 }
 
 /**
@@ -558,6 +614,12 @@ export async function loadTenantPackage(
       if (error.code === "ENOENT") return "";
       throw error;
     });
+  const memory = await readFile(join(sourcePath, "memory.yaml"), "utf8")
+    .then((file) => expandEnvironment(file, "memory.yaml"))
+    .catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return "";
+      throw error;
+    });
   const tenantPackage = validateTenantPackage({
     brand,
     agents,
@@ -565,6 +627,7 @@ export async function loadTenantPackage(
     model,
     knowledge,
     skills,
+    memory,
     themeCss,
   });
 
@@ -574,7 +637,7 @@ export async function loadTenantPackage(
     // `skills` is in the checksum, so editing it is a package change like any other and the
     // deployment notices on the next boot rather than reporting itself unchanged.
     checksum: createHash("sha256")
-      .update([...contents, skills].join("\n"))
+      .update([...contents, skills, memory].join("\n"))
       .digest("hex"),
   };
 }

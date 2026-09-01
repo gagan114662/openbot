@@ -11,6 +11,22 @@ import {
 import { agentAuthHeaders, authFromConfiguration } from "./auth-header";
 import type { AgentActor } from "./profile-types";
 
+/** The managed adapter may serve several profiles through query parameters on one exact endpoint. */
+export function isManagedAgentEndpoint(
+  endpoint: string,
+  managed: URL,
+): boolean {
+  try {
+    const candidate = new URL(endpoint);
+    return (
+      candidate.origin === managed.origin &&
+      candidate.pathname === managed.pathname
+    );
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Read the agents one person may run, on every request.
  *
@@ -50,7 +66,7 @@ export function createRuntimeAgentLoader(
       if (
         agent.type === "remote_ag_ui" &&
         managedAgent &&
-        agent.endpoint === managedAgent.endpoint.toString()
+        isManagedAgentEndpoint(agent.endpoint, managedAgent.endpoint)
       ) {
         agent.headers = {
           ...agent.headers,

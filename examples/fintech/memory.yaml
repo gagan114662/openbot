@@ -1,0 +1,15 @@
+# Long-term context is opt-in by the presence of this file. Only approved entries reach Bots.
+# Proposals remain pending until a named human reviews the source and changes their status.
+entries:
+  - id: policy-source-priority
+    status: approved
+    applies_to: [knowledge, risk-analyst]
+    text: When policy and an exception conflict, identify both and escalate rather than choosing silently.
+    source: governance/playbook#conflicts
+    approved_by: example-compliance-owner
+    approved_at: 2026-09-01T12:00:00Z
+  - id: example-unreviewed-proposal
+    status: pending
+    applies_to: [general-assistant]
+    text: This pending proposal must never reach a model.
+    source: proposal/example

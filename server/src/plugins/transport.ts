@@ -1,4 +1,6 @@
 import * as builtinRoutines from "./builtin-routines";
+import * as builtinRepository from "./builtin-repository";
+import * as builtinWeb from "./builtin-web";
 import type { CatalogueEntry } from "./catalogue";
 import * as driveRest from "./google-drive-rest";
 import type { McpCallResult, McpTool } from "./mcp";
@@ -79,12 +81,19 @@ export type VendorTransport = {
  * A closed union rather than a string, so adding one is a change to this file and to the registry
  * below together. An entry naming a transport that does not exist should not typecheck.
  */
-export type TransportKind = "mcp" | "google-drive-rest" | "builtin-routines";
+export type TransportKind =
+  | "mcp"
+  | "google-drive-rest"
+  | "builtin-routines"
+  | "builtin-web"
+  | "builtin-repository";
 
 const TRANSPORTS: Record<TransportKind, VendorTransport> = {
   mcp,
   "google-drive-rest": driveRest,
   "builtin-routines": builtinRoutines,
+  "builtin-web": builtinWeb,
+  "builtin-repository": builtinRepository,
 };
 
 /**

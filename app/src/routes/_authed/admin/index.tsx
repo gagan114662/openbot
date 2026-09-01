@@ -7,6 +7,7 @@ import {
   IconKey,
   IconLayoutGrid,
   IconListDetails,
+  IconChartDots3,
   IconPuzzle,
   IconShieldCheck,
   IconUsers,
@@ -56,6 +57,13 @@ const SECTIONS: {
     description:
       "Everything a Bot can touch outside this app, and the limits on it.",
     items: [
+      {
+        title: "Agent Analytics",
+        description:
+          "Sessions, traces, quality, cost, model performance, and product outcomes.",
+        icon: IconChartDots3,
+        linkOptions: { to: "/admin/analytics" },
+      },
       {
         title: "Credentials",
         description: "Keys and tokens held for this deployment.",

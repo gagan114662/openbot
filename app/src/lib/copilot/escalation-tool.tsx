@@ -2,7 +2,8 @@ import { useRenderTool } from "@copilotkit/react-core/v2";
 import { z } from "zod";
 import { ToolLine } from "@/components/channels/tool-line";
 import { PUT_TO } from "@/lib/copilot/markers";
-import { saidItWentAhead } from "@/lib/plugins/tool-result";
+import { UNANSWERED_TOOL_RESULT } from "@/lib/copilot/repair-history";
+import { asText, saidItWentAhead } from "@/lib/plugins/tool-result";
 
 /**
  * How a Bot stopping to ask a person reads in the transcript.
@@ -25,8 +26,16 @@ const parameters = z.object({
  * Blocked. A route that could not reach a person is the case worth drawing differently, because the
  * Bot has stopped and nobody has been asked.
  */
-function reached(result: unknown): boolean {
-  return saidItWentAhead(result, PUT_TO);
+export function escalationOutcome(
+  result: unknown,
+): "reached" | "refused" | "unknown" {
+  if (
+    typeof result !== "string" ||
+    asText(result).trim() === "" ||
+    asText(result).trim() === UNANSWERED_TOOL_RESULT
+  )
+    return "unknown";
+  return saidItWentAhead(result, PUT_TO) ? "reached" : "refused";
 }
 
 export function EscalationTool() {
@@ -35,12 +44,15 @@ export function EscalationTool() {
     parameters,
     render: ({ parameters: given, result, status }) => {
       const running = status !== "complete" && result === undefined;
+      const outcome = escalationOutcome(result);
       return (
         <ToolLine
-          label="Asked you"
+          label={
+            outcome === "unknown" ? "Requested your decision" : "Asked you"
+          }
           detail={given?.question}
           running={running}
-          refused={!running && !reached(result)}
+          refused={!running && outcome === "refused"}
         >
           <div className="space-y-1 text-sm">
             {given?.question ? <p>{given.question}</p> : null}

@@ -1,16 +1,228 @@
 import { describe, expect, spyOn, test } from "bun:test";
-import { HttpAgent } from "@ag-ui/client";
+import type { BaseEvent, RunAgentInput } from "@ag-ui/client";
+import { AbstractAgent, HttpAgent } from "@ag-ui/client";
 import { BuiltInAgent } from "@copilotkit/runtime/v2";
-import { PROVENANCE_GUIDANCE } from "../../shared/bot-prompt";
+import { from, lastValueFrom, toArray } from "rxjs";
+import { z } from "zod";
+import {
+  EXECUTION_GUIDANCE,
+  PROVENANCE_GUIDANCE,
+} from "../../shared/bot-prompt";
 import {
   buildAgents,
   builtInAgentConfiguration,
   createRequestAgents,
   registeredAgentFromRow,
+  requiresToolEvidence,
   resolveRuntimeAgents,
+  runWithEvidenceRequirement,
   standingRoleMessage,
 } from "../src/copilot";
 import { grantedToolGuidance } from "../src/plugins/tools";
+
+class ScriptedEvidenceAgent extends AbstractAgent {
+  readonly inputs: RunAgentInput[] = [];
+
+  constructor(private readonly attempts: BaseEvent[][]) {
+    super({ agentId: "researcher", description: "Researcher" });
+  }
+
+  run(input: RunAgentInput) {
+    this.inputs.push(input);
+    return from(this.attempts[this.inputs.length - 1] ?? []);
+  }
+
+  override clone() {
+    return this;
+  }
+}
+
+function evidenceInput(text: string): RunAgentInput {
+  return {
+    threadId: "thread-evidence",
+    runId: "run-evidence",
+    state: {},
+    tools: [],
+    context: [],
+    forwardedProps: {},
+    messages: [{ id: "request", role: "user", content: text }],
+  };
+}
+
+function answerEvents(text: string): BaseEvent[] {
+  return [
+    { type: "RUN_STARTED", threadId: "thread-evidence", runId: "run-evidence" },
+    { type: "TEXT_MESSAGE_START", messageId: "answer", role: "assistant" },
+    { type: "TEXT_MESSAGE_CONTENT", messageId: "answer", delta: text },
+    { type: "TEXT_MESSAGE_END", messageId: "answer" },
+    {
+      type: "RUN_FINISHED",
+      threadId: "thread-evidence",
+      runId: "run-evidence",
+    },
+  ] as BaseEvent[];
+}
+
+describe("retrieved-evidence enforcement", () => {
+  test("classifies explicit evidence requests without gating ordinary work", () => {
+    for (const request of [
+      "Research the latest policy and cite the exact URLs.",
+      "Verify this against official sources.",
+      "Look up the current filing deadline.",
+    ]) {
+      expect(requiresToolEvidence(request)).toBeTrue();
+    }
+    for (const request of [
+      "Draft a launch announcement.",
+      "Summarize the text I pasted above.",
+      "Calculate 19% of 250.",
+    ]) {
+      expect(requiresToolEvidence(request)).toBeFalse();
+    }
+  });
+
+  test("rejects a memory-only draft and publishes the evidence-backed retry", async () => {
+    const unsupported = answerEvents("I verified the official documentation.");
+    const supported = [
+      {
+        type: "RUN_STARTED",
+        threadId: "thread-evidence",
+        runId: "run-evidence",
+      },
+      {
+        type: "TOOL_CALL_START",
+        toolCallId: "search-1",
+        toolCallName: "web_search",
+      },
+      {
+        type: "TOOL_CALL_ARGS",
+        toolCallId: "search-1",
+        delta: '{"query":"official docs"}',
+      },
+      { type: "TOOL_CALL_END", toolCallId: "search-1" },
+      ...answerEvents("The retrieved source says this.").slice(1),
+    ] as BaseEvent[];
+    const agent = new ScriptedEvidenceAgent([unsupported, supported]);
+
+    const events = await lastValueFrom(
+      runWithEvidenceRequirement(agent, evidenceInput("Verify this.")).pipe(
+        toArray(),
+      ),
+    );
+
+    expect(agent.inputs).toHaveLength(2);
+    expect(agent.inputs[1]?.messages[0]).toMatchObject({ role: "system" });
+    expect(JSON.stringify(events)).not.toContain(
+      "I verified the official documentation",
+    );
+    expect(events.some((event) => event.type === "TOOL_CALL_START")).toBeTrue();
+    expect(JSON.stringify(events)).toContain("The retrieved source says this");
+  });
+
+  test("fails honestly when the retry also calls no evidence tool", async () => {
+    const agent = new ScriptedEvidenceAgent([
+      answerEvents("I checked it."),
+      answerEvents("Trust me, it is current."),
+    ]);
+
+    const events = await lastValueFrom(
+      runWithEvidenceRequirement(agent, evidenceInput("Research this.")).pipe(
+        toArray(),
+      ),
+    );
+    const rendered = JSON.stringify(events);
+
+    expect(agent.inputs).toHaveLength(2);
+    expect(rendered).not.toContain("I checked it");
+    expect(rendered).not.toContain("Trust me");
+    expect(rendered).toContain(
+      "I could not verify this request with the tools available",
+    );
+  });
+
+  test("rejects citations that did not appear in any retrieved tool result", async () => {
+    const unsupportedCitation = [
+      {
+        type: "RUN_STARTED",
+        threadId: "thread-evidence",
+        runId: "run-evidence",
+      },
+      {
+        type: "TOOL_CALL_START",
+        toolCallId: "fetch-1",
+        toolCallName: "fetch_web_page",
+      },
+      { type: "TOOL_CALL_END", toolCallId: "fetch-1" },
+      {
+        type: "TOOL_CALL_RESULT",
+        messageId: "result-1",
+        toolCallId: "fetch-1",
+        content: '{"finalUrl":"https://official.example/real-source"}',
+      },
+      ...answerEvents("Source: https://official.example/invented-source").slice(
+        1,
+      ),
+    ] as BaseEvent[];
+    const agent = new ScriptedEvidenceAgent([
+      unsupportedCitation,
+      unsupportedCitation,
+    ]);
+
+    const events = await lastValueFrom(
+      runWithEvidenceRequirement(
+        agent,
+        evidenceInput("Verify this and cite the exact source URL."),
+      ).pipe(toArray()),
+    );
+    const rendered = JSON.stringify(events);
+
+    expect(agent.inputs).toHaveLength(2);
+    expect(rendered).not.toContain("invented-source");
+    expect(rendered).toContain(
+      "I could not verify this request with the tools available",
+    );
+  });
+
+  test("publishes citations that are traceable to retrieved results", async () => {
+    const source = "https://official.example/current";
+    const supported = [
+      {
+        type: "RUN_STARTED",
+        threadId: "thread-evidence",
+        runId: "run-evidence",
+      },
+      {
+        type: "TOOL_CALL_START",
+        toolCallId: "fetch-1",
+        toolCallName: "fetch_web_page",
+      },
+      { type: "TOOL_CALL_END", toolCallId: "fetch-1" },
+      {
+        type: "TOOL_CALL_RESULT",
+        messageId: "result-1",
+        toolCallId: "fetch-1",
+        content: JSON.stringify({
+          finalUrl: `${source}/`,
+          text: "Current instructions",
+        }),
+      },
+      ...answerEvents(`Current instructions. Source: ${source}#sign-in`).slice(
+        1,
+      ),
+    ] as BaseEvent[];
+    const agent = new ScriptedEvidenceAgent([supported]);
+
+    const events = await lastValueFrom(
+      runWithEvidenceRequirement(
+        agent,
+        evidenceInput("Verify this and cite the exact source URL."),
+      ).pipe(toArray()),
+    );
+
+    expect(agent.inputs).toHaveLength(1);
+    expect(JSON.stringify(events)).toContain(source);
+  });
+});
 
 // Every agent row now joins its profile, so the row a coworker is built from always names it.
 const assistantRow = {
@@ -100,9 +312,8 @@ describe("registered Copilot agents", () => {
       ),
     ).toEqual({
       model: "openai/gpt-5.6-terra",
-      // The provenance rule is unconditional, so even a Bot with no tools and no computer carries
-      // it. That Bot needs it most: nothing it says was read anywhere.
-      prompt: `Be helpful.\n\n${PROVENANCE_GUIDANCE}`,
+      // Execution and provenance are unconditional, including for a Bot with no tools or computer.
+      prompt: `Be helpful.\n\n${EXECUTION_GUIDANCE}\n\n${PROVENANCE_GUIDANCE}`,
       apiKey: "openai-secret",
     });
   });
@@ -143,7 +354,7 @@ describe("registered Copilot agents", () => {
     );
   });
 
-  test("constructs built-in and remote agents together", async () => {
+  test("constructs run-enforced built-in and remote agents together", async () => {
     const agents = await buildAgents(
       [
         {
@@ -163,7 +374,10 @@ describe("registered Copilot agents", () => {
       "openai-secret",
     );
 
-    expect(agents["general-assistant"]).toBeInstanceOf(BuiltInAgent);
+    // Built-ins are deliberately wrapped per run so evidence requests cannot bypass enforcement
+    // merely because adaptive selection and handoff are disabled on this deployment.
+    expect(agents["general-assistant"]).toBeInstanceOf(AbstractAgent);
+    expect(agents["general-assistant"]).not.toBeInstanceOf(BuiltInAgent);
     expect(agents.risk).toBeInstanceOf(HttpAgent);
   });
 
@@ -432,6 +646,7 @@ describe("standing agent roles", () => {
         "You are Expense Manager, Finance Operations.",
         "Review receipts, categorize expenses, and prepare reimbursement reports.",
         "This standing role applies in every channel. Treat channel messages as task-specific instructions within it.",
+        EXECUTION_GUIDANCE,
         // For a remote Bot this message is the whole instruction, so the provenance rule has to
         // travel in it or the Bot never hears it. Referenced rather than restated, so the assertion
         // stays exact without pinning the wording twice.
@@ -464,6 +679,27 @@ describe("standing agent roles", () => {
     expect(result?.newMessages?.at(-1)?.content).toBe("Categorized.");
   });
 
+  test("fails a remote Bot's memory-only verification answer closed", async () => {
+    await using endpoint = fakeAgUiEndpoint();
+    const agents = await buildAgents(
+      [remoteAgent(endpoint.url)],
+      { provider: "openai", defaultModel: "gpt-5.6-terra" },
+      null,
+    );
+    const agent = agents.agent_expense;
+    agent?.setMessages([
+      userMessage("Verify the current rule and cite the exact source URL."),
+    ]);
+
+    const result = await agent?.runAgent();
+
+    expect(endpoint.requests).toHaveLength(2);
+    expect(result?.newMessages?.at(-1)?.content).toContain(
+      "I could not verify this request with the tools available",
+    );
+    expect(result?.newMessages?.at(-1)?.content).not.toContain("Categorized");
+  });
+
   test("keeps the standing role out of forwarded props and agent state", async () => {
     await using endpoint = fakeAgUiEndpoint();
     const agents = await buildAgents(
@@ -481,6 +717,43 @@ describe("standing agent roles", () => {
       "standing-role",
     );
     expect(JSON.stringify(sent?.state ?? {})).not.toContain("standing-role");
+  });
+
+  test("offers per-run reach tools to a remote Bot and marks them for callback", async () => {
+    await using endpoint = fakeAgUiEndpoint();
+    const agents = await buildAgents(
+      [remoteAgent(endpoint.url)],
+      { provider: "openai", defaultModel: "gpt-5.6-terra" },
+      null,
+      undefined,
+      async () => [],
+      undefined,
+      undefined,
+      async () => [],
+      undefined,
+      undefined,
+      async () => [
+        {
+          name: "message_bot",
+          ref: "bot/message_bot",
+          description: "Hand work to another Bot.",
+          parameters: z.object({ bot: z.string(), task: z.string() }),
+          execute: async () => "queued",
+        },
+      ],
+    );
+
+    agents.agent_expense?.setMessages([userMessage("Ask Knowledge.")]);
+    await agents.agent_expense?.runAgent();
+
+    const sent = endpoint.requests.at(-1);
+    expect(sent?.tools).toEqual([
+      expect.objectContaining({ name: "message_bot" }),
+    ]);
+    expect(
+      (sent?.forwardedProps as { openbotDeploymentTools?: string[] })
+        ?.openbotDeploymentTools,
+    ).toEqual(["message_bot"]);
   });
 
   test("resolves a deleted coworker as a tombstone that never reaches its endpoint", async () => {
@@ -556,6 +829,7 @@ describe("standing agent roles", () => {
         "You are Expense Manager, Finance Operations.",
         "Reconcile corporate card statements.",
         "This standing role applies in every channel. Treat channel messages as task-specific instructions within it.",
+        EXECUTION_GUIDANCE,
         PROVENANCE_GUIDANCE,
       ].join("\n\n"),
     );
@@ -784,9 +1058,26 @@ describe("where a Bot says its answer came from", () => {
      * answers.
      */
     const guidance = PROVENANCE_GUIDANCE.toLowerCase().replace(/\s+/g, " ");
-    expect(guidance).toContain("this is not an instruction to go looking");
+    expect(guidance).toContain(
+      "otherwise, this is not an instruction to go looking",
+    );
     expect(guidance).toContain("mark it plainly as unverified");
     expect(guidance).toContain("do not go hunting the open web");
+  });
+
+  test("an explicit lookup request cannot be answered with a fabricated verification claim", () => {
+    const guidance = PROVENANCE_GUIDANCE.toLowerCase().replace(/\s+/g, " ");
+    expect(guidance).toContain(
+      "use the relevant granted read tools before answering",
+    );
+    expect(guidance).toContain(
+      "a request for verified or current facts is not satisfied from memory",
+    );
+    expect(guidance).toContain(
+      "unless a tool returned that evidence in this run",
+    );
+    expect(guidance).toContain("cite the exact final urls you actually read");
+    expect(guidance).toContain("say what could not be verified");
   });
 
   test("it names the answers that must not be stated without a source", () => {
@@ -801,5 +1092,36 @@ describe("where a Bot says its answer came from", () => {
     ]) {
       expect(guidance).toContain(kind);
     }
+  });
+});
+
+describe("bounded persistence contract", () => {
+  test("every built-in Bot diagnoses a miss and changes approach", () => {
+    const prompt = builtInAgentConfiguration(
+      {
+        id: "general-assistant",
+        name: "General Assistant",
+        type: "built_in",
+        systemPrompt: "Be helpful.",
+      },
+      { provider: "openai", defaultModel: "gpt-5.6-terra" },
+      "openai-secret",
+    ).prompt as string;
+
+    expect(prompt).toContain(EXECUTION_GUIDANCE);
+    expect(prompt).toContain("Discover before declaring something unavailable");
+    expect(prompt).toContain("materially different approved approach");
+    expect(prompt).toContain("Persistence never means bypassing a control");
+  });
+
+  test("every remote Bot gets the same execution contract", () => {
+    expect(
+      standingRoleMessage({
+        id: "knowledge",
+        name: "Knowledge",
+        title: "Research",
+        roleDescription: "Find grounded answers.",
+      }).content,
+    ).toContain(EXECUTION_GUIDANCE);
   });
 });

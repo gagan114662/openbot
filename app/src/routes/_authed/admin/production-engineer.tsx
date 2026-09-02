@@ -363,7 +363,7 @@ function ProductionEngineerPage() {
                                 {artifact.command} (exit {artifact.exitCode})
                               </dd>
                               <dt>Captured diff</dt>
-                              <dd>{artifact.metadata.diffBytes ?? 0} bytes</dd>
+                              <dd>{artifact.metadata?.diffBytes ?? 0} bytes</dd>
                             </dl>
                           </div>
                         ))}

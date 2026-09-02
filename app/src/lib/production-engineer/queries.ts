@@ -163,7 +163,7 @@ export type SoftwareFactoryDashboard = {
       producerSessionId: string;
       command: string;
       exitCode: number;
-      metadata: { checks?: string[]; diffBytes?: number };
+      metadata: null | { checks?: string[]; diffBytes?: number };
     }>;
     events: Array<{
       id: string;

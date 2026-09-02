@@ -66,6 +66,7 @@ import {
   mountCopilotRuntime,
   resolveRuntimeAgents,
   setContextCapsuleRecorder,
+  setInferenceShadowRecorder,
   setRuntimeEpisodeRecorder,
   type ToolSelection,
 } from "./copilot";
@@ -94,12 +95,13 @@ import { createTurnRunner } from "./routines/run-turn";
 import { createRoutineRunner } from "./routines/runner";
 import { createRoutineStore } from "./routines/store";
 import { createIntentRouter } from "./routing/classify";
-import { createModelCompleter } from "./routing/model";
+import { chatCompletionsUrl, createModelCompleter } from "./routing/model";
 import { installGracefulShutdown } from "./shutdown";
 import { createContextGraph } from "./software-factory/context-graph";
 import { createCodexWorkflowExecutor } from "./software-factory/codex-workflow-executor";
 import { createSoftwareFactoryStore } from "./software-factory/store";
 import { createShadowEvaluator } from "./software-factory/shadow-evaluator";
+import { createInferenceShadowRecorder } from "./software-factory/inference-shadow";
 import { createWorkflowRuntime } from "./software-factory/workflow-runtime";
 import { createWorkflowWorker } from "./software-factory/workflow-worker";
 import {
@@ -321,6 +323,26 @@ const softwareFactoryStore = createSoftwareFactoryStore(
   tenantPackage.tenantId,
 );
 const shadowEvaluator = createShadowEvaluator(database, tenantPackage.tenantId);
+const shadowModel = process.env.SHADOW_MODEL?.trim();
+if (shadowModel) {
+  setInferenceShadowRecorder(
+    createInferenceShadowRecorder({
+      evaluator: shadowEvaluator,
+      primaryModel: tenantPackage.model.defaultModel,
+      shadowModel,
+      rateBasisPoints: Number(process.env.SHADOW_RATE_BASIS_POINTS ?? 500),
+      endpoint: chatCompletionsUrl(process.env),
+      resolveApiKey: () =>
+        resolveModelApiKey({
+          encryptionKey: config.keyEncryptionKey,
+          reader: credentialStore,
+          provider: tenantPackage.model.provider,
+          keyId: tenantPackage.model.credentialSecretRef,
+          environment: process.env,
+        }),
+    }),
+  );
+}
 const workflowRuntime = createWorkflowRuntime(database, tenantPackage.tenantId);
 const workflowWorker = createWorkflowWorker({
   runtime: workflowRuntime,

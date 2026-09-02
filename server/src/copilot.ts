@@ -513,6 +513,17 @@ export function setContextCapsuleRecorder(
   persistContextCapsule = recorder;
 }
 
+let observeInferenceShadow:
+  | ((input: { run: RunAgentInput; primaryOutput: string }) => Promise<void>)
+  | undefined;
+
+/** Install an asynchronous shadow sink. It sees only the final output actually emitted to a user. */
+export function setInferenceShadowRecorder(
+  recorder: typeof observeInferenceShadow,
+) {
+  observeInferenceShadow = recorder;
+}
+
 function recordRuntimeEpisode(
   input: RunAgentInput,
   events: readonly BaseEvent[],
@@ -659,6 +670,33 @@ export function runWithContextCompaction(
           complete: () => recordRuntimeEpisode(prepared.input, observed, false),
         }),
       );
+    }),
+  );
+}
+
+/** Observe the real final stream without delaying or substituting the primary response. */
+export function runWithInferenceShadow(
+  input: RunAgentInput,
+  runPrimary: () => Observable<BaseEvent>,
+): Observable<BaseEvent> {
+  const emitted: BaseEvent[] = [];
+  return runPrimary().pipe(
+    tap((event) => emitted.push(event)),
+    tap({
+      complete: () => {
+        const primaryOutput = textFromEvents(emitted, "TEXT_MESSAGE_CONTENT");
+        if (!primaryOutput || !observeInferenceShadow) return;
+        void observeInferenceShadow({ run: input, primaryOutput }).catch(
+          (error) =>
+            console.error(
+              JSON.stringify({
+                type: "inference-shadow-failed",
+                runId: input.runId,
+                error: error instanceof Error ? error.message : String(error),
+              }),
+            ),
+        );
+      },
     }),
   );
 }
@@ -908,9 +946,8 @@ export async function buildAgents(
   const vendors = await loadVendors().catch(() => [] as readonly string[]);
   return Object.fromEntries(
     await Promise.all(
-      agents.map(async (agent) => [
-        agent.id,
-        await buildAgent(
+      agents.map(async (agent) => {
+        const built = await buildAgent(
           agent,
           model,
           apiKey,
@@ -923,10 +960,27 @@ export async function buildAgents(
           agentFetch,
           handoff,
           runTimeoutMs,
-        ),
-      ]),
+        );
+        return [agent.id, attachInferenceShadow(built)];
+      }),
     ),
   );
+}
+
+const inferenceShadowAttached = Symbol("openbot.inference-shadow-attached");
+
+/** Preserve concrete AG-UI agent identity and state while observing every cloned run. */
+function attachInferenceShadow<T extends AbstractAgent>(agent: T): T {
+  const tagged = agent as T & { [inferenceShadowAttached]?: boolean };
+  if (tagged[inferenceShadowAttached]) return agent;
+  tagged[inferenceShadowAttached] = true;
+  const originalRun = agent.run.bind(agent);
+  const originalClone = agent.clone.bind(agent);
+  agent.run = ((input: RunAgentInput) =>
+    runWithInferenceShadow(input, () => originalRun(input))) as T["run"];
+  agent.clone = (() =>
+    attachInferenceShadow(originalClone() as T)) as T["clone"];
+  return agent;
 }
 
 async function buildAgent(

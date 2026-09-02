@@ -179,42 +179,6 @@ export function createSoftwareFactoryRoutes(
       await webhooks.replayDead(context.req.param("eventId")),
     );
   });
-  routes.post("/shadow/evaluations", async (context) => {
-    if (!shadows) return context.notFound();
-    const body = record(await context.req.json().catch(() => null));
-    const requestKey = nonempty(body?.requestKey);
-    const primaryModel = nonempty(body?.primaryModel);
-    const shadowModel = nonempty(body?.shadowModel);
-    const primaryOutput = nonempty(body?.primaryOutput);
-    const shadowOutput = nonempty(body?.shadowOutput);
-    if (
-      !requestKey ||
-      !primaryModel ||
-      !shadowModel ||
-      !primaryOutput ||
-      !shadowOutput
-    )
-      return context.json(
-        { error: "A request key, both models, and both outputs are required." },
-        400,
-      );
-    if (
-      !shadows.shouldEvaluate(requestKey, Number(body?.rateBasisPoints ?? 500))
-    )
-      return context.json({ sampled: false, primaryUnaffected: true });
-    const evaluation = await shadows.record({
-      requestKey,
-      primaryModel,
-      shadowModel,
-      primaryOutput,
-      shadowOutput,
-      shadowLatencyMs: Number(body?.shadowLatencyMs ?? 0),
-    });
-    return context.json(
-      { sampled: true, primaryUnaffected: true, evaluation },
-      201,
-    );
-  });
   routes.post("/workflows", async (context) => {
     if (!workflows) return context.notFound();
     const body = record(await context.req.json().catch(() => null));

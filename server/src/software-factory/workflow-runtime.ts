@@ -31,6 +31,13 @@ export const stagePlanSchema = z
       requiredContext: z.array(z.string().trim().min(1).max(500)).max(50),
       dependsOn: z.array(z.string().trim().min(1).max(200)).max(50),
       checks: z.array(stageCheckSchema).max(20).default([]),
+      gate: z
+        .object({
+          kind: z.literal("human"),
+          prompt: z.string().trim().min(1).max(4_000),
+          roles: z.array(z.string().trim().min(1).max(100)).max(20).optional(),
+        })
+        .optional(),
     }),
   )
   .min(1)
@@ -65,6 +72,22 @@ export const stageResultSchema = z.object({
 
 const dependencyIds = (value: unknown) =>
   z.object({ ids: z.array(z.string()) }).parse(value).ids;
+
+const stageControl = (value: unknown) =>
+  z
+    .object({
+      items: z.array(stageCheckSchema).default([]),
+      gate: z
+        .object({
+          kind: z.literal("human"),
+          prompt: z.string(),
+          roles: z.array(z.string()).optional(),
+          status: z.enum(["pending", "approved"]).default("pending"),
+          feedback: z.string().optional(),
+        })
+        .optional(),
+    })
+    .parse(value);
 
 const assertDag = (stages: z.infer<typeof stagePlanSchema>) => {
   const ids = new Set(stages.map((stage) => stage.id));
@@ -322,6 +345,14 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
             requiredContext: { keys: stage.requiredContext },
             dependsOn: { ids: stage.dependsOn },
             checks: { items: stage.checks },
+            ...(stage.gate
+              ? {
+                  checks: {
+                    items: stage.checks,
+                    gate: { ...stage.gate, status: "pending" as const },
+                  },
+                }
+              : {}),
             selectedModel: job.selectedModel,
             selectedHarness: job.selectedHarness,
           })),
@@ -360,6 +391,121 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
       ]);
       const snapshot = { run, stages, artifacts, events };
       return { ...snapshot, evidence: verifyWorkflowEvidence(snapshot) };
+    },
+
+    async control(runId: string) {
+      const [run] = await database
+        .select({
+          status: factoryWorkflowRuns.status,
+          pauseRequested: factoryWorkflowRuns.pauseRequested,
+          abortRequested: factoryWorkflowRuns.abortRequested,
+          steering: factoryWorkflowRuns.steering,
+        })
+        .from(factoryWorkflowRuns)
+        .where(
+          and(
+            eq(factoryWorkflowRuns.id, runId),
+            eq(factoryWorkflowRuns.tenantId, tenantId),
+          ),
+        );
+      return run ?? null;
+    },
+
+    async decideStageGate(
+      runId: string,
+      stageId: string,
+      actorId: string,
+      decision: "approve" | "reject",
+      feedback?: string,
+    ) {
+      return database.transaction(async (tx) => {
+        const [stage] = await tx
+          .select()
+          .from(factoryWorkflowStages)
+          .where(
+            and(
+              eq(factoryWorkflowStages.runId, runId),
+              eq(factoryWorkflowStages.stageId, stageId),
+              eq(factoryWorkflowStages.status, "awaiting_approval"),
+            ),
+          )
+          .for("update");
+        if (!stage) return null;
+        const control = stageControl(stage.checks);
+        if (!control.gate) return null;
+        const now = new Date();
+        if (decision === "reject") {
+          const text = feedback?.trim();
+          if (!text) throw new Error("Gate rejection requires feedback.");
+          const producers = dependencyIds(stage.dependsOn);
+          await tx
+            .update(factoryWorkflowStages)
+            .set({
+              status: "pending",
+              completedAt: null,
+              reviewerSessionId: null,
+              verification: {},
+              lastError: `Human gate feedback: ${text}`,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(factoryWorkflowStages.runId, runId),
+                inArray(factoryWorkflowStages.stageId, producers),
+                eq(factoryWorkflowStages.status, "succeeded"),
+              ),
+            );
+          await tx
+            .update(factoryWorkflowArtifacts)
+            .set({
+              metadata: sql`coalesce(${factoryWorkflowArtifacts.metadata}, '{}'::jsonb) || ${JSON.stringify({ attemptStatus: "failed", gateRejected: true })}::jsonb`,
+            })
+            .where(
+              and(
+                eq(factoryWorkflowArtifacts.runId, runId),
+                inArray(factoryWorkflowArtifacts.stageId, producers),
+              ),
+            );
+        }
+        await tx
+          .update(factoryWorkflowStages)
+          .set({
+            status: "pending",
+            checks: {
+              ...control,
+              gate: {
+                ...control.gate,
+                status: decision === "approve" ? "approved" : "pending",
+                ...(feedback ? { feedback: feedback.trim() } : {}),
+              },
+            },
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(factoryWorkflowStages.runId, runId),
+              eq(factoryWorkflowStages.stageId, stageId),
+            ),
+          );
+        await tx.insert(factoryWorkflowEvents).values({
+          runId,
+          stageId,
+          entity: "human_gate",
+          fromStatus: "awaiting_approval",
+          toStatus: decision === "approve" ? "approved" : "rejected",
+          detail: { actorId, feedback: feedback?.trim() ?? null },
+        });
+        await tx
+          .update(factoryWorkflowRuns)
+          .set({
+            status: "queued",
+            leaseOwner: null,
+            leaseExpiresAt: null,
+            updatedAt: now,
+          })
+          .where(eq(factoryWorkflowRuns.id, runId));
+        return { stageId, decision };
+      });
     },
 
     async requestPause(runId: string) {
@@ -620,16 +766,66 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
         (stage) => stage.status === "running",
       ).length;
       const available = Math.max(0, snapshot.run.concurrencyLimit - running);
-      return snapshot.stages
-        .filter(
-          (stage) =>
-            stage.status === "pending" &&
-            stage.attempts < snapshot.run.maximumAttempts &&
-            dependencyIds(stage.dependsOn).every((dependency) =>
-              completed.has(dependency),
-            ),
-        )
+      const eligible = snapshot.stages.filter(
+        (stage) =>
+          stage.status === "pending" &&
+          stage.attempts < snapshot.run.maximumAttempts &&
+          dependencyIds(stage.dependsOn).every((dependency) =>
+            completed.has(dependency),
+          ),
+      );
+      const gated = eligible.filter((stage) => {
+        const gate = stageControl(stage.checks).gate;
+        return gate && gate.status !== "approved";
+      });
+      if (gated.length) {
+        await database.transaction(async (tx) => {
+          for (const stage of gated) {
+            await tx
+              .update(factoryWorkflowStages)
+              .set({ status: "awaiting_approval", updatedAt: new Date() })
+              .where(
+                and(
+                  eq(factoryWorkflowStages.runId, runId),
+                  eq(factoryWorkflowStages.stageId, stage.stageId),
+                  eq(factoryWorkflowStages.status, "pending"),
+                ),
+              );
+            await tx.insert(factoryWorkflowEvents).values({
+              runId,
+              stageId: stage.stageId,
+              entity: "human_gate",
+              fromStatus: "pending",
+              toStatus: "awaiting_approval",
+              detail: { gate: stageControl(stage.checks).gate },
+            });
+          }
+        });
+      }
+      const runnable = eligible
+        .filter((stage) => !gated.includes(stage))
         .slice(0, available);
+      if (
+        runnable.length === 0 &&
+        (gated.length > 0 ||
+          snapshot.stages.some((stage) => stage.status === "awaiting_approval"))
+      ) {
+        await database
+          .update(factoryWorkflowRuns)
+          .set({
+            status: "awaiting_approval",
+            leaseOwner: null,
+            leaseExpiresAt: null,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(factoryWorkflowRuns.id, runId),
+              eq(factoryWorkflowRuns.status, "running"),
+            ),
+          );
+      }
+      return runnable;
     },
 
     async startStage(runId: string, stageId: string, sessionId: string) {

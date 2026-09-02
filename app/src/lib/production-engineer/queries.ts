@@ -182,6 +182,16 @@ export type SoftwareFactoryDashboard = {
         summary?: string;
         checks?: string[];
       };
+      checks: {
+        items?: unknown[];
+        gate?: {
+          kind: "human";
+          prompt: string;
+          roles?: string[];
+          status: "pending" | "approved";
+          feedback?: string;
+        };
+      };
       lastError: string | null;
     }>;
     artifacts: Array<{
@@ -273,6 +283,20 @@ export async function controlWorkflow(input: {
       body: input.instruction ? { instruction: input.instruction } : {},
     },
   );
+  return response.json();
+}
+
+export async function decideWorkflowGate(input: {
+  runId: string;
+  stageId: string;
+  decision: "approve" | "reject";
+  feedback?: string;
+}) {
+  const response = await client(
+    `/api/software-factory/workflows/${encodeURIComponent(input.runId)}/stages/${encodeURIComponent(input.stageId)}/gate`,
+    { method: "POST", body: input },
+  );
+  if (!response.ok) throw new Error(await response.text());
   return response.json();
 }
 

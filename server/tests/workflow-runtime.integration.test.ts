@@ -347,6 +347,115 @@ describe("durable workflow runtime", () => {
     expect(finished?.artifacts).toHaveLength(1);
   });
 
+  test("a human gate rejects its producer with feedback, then approves the repaired path", async () => {
+    const queued = await store.queueJob("admin", {
+      kind: "ci-repair",
+      tier: "managed",
+      objective: "prove stage-level human control",
+      trigger: "human-gate-proof",
+      minimumQuality: 0.8,
+    });
+    const run = await runtime.create({
+      jobId: queued.job.id,
+      maximumAttempts: 3,
+      concurrencyLimit: 2,
+      stages: [
+        {
+          id: "produce",
+          objective: "produce",
+          requiredContext: [],
+          dependsOn: [],
+        },
+        {
+          id: "release",
+          objective: "release",
+          requiredContext: [],
+          dependsOn: ["produce"],
+          gate: {
+            kind: "human",
+            prompt: "Approve the produced change",
+            roles: ["admin"],
+          },
+        },
+      ],
+    });
+    const complete = async (
+      stageId: string,
+      sessionId: string,
+      content: string,
+    ) => {
+      expect(
+        await runtime.startStage(run.id, stageId, sessionId),
+      ).not.toBeNull();
+      await runtime.completeStage(run.id, stageId, {
+        summary: content,
+        sessionId,
+        reviewerSessionId: `${sessionId}-reviewer`,
+        verification: {
+          accepted: true,
+          summary: "independently verified",
+          checks: ["checksum"],
+        },
+        artifacts: [
+          {
+            kind: "proof",
+            uri: `artifact://${stageId}/${sessionId}`,
+            content,
+            checksum: artifactChecksum(content),
+            revision: "deadbeef",
+            producerSessionId: sessionId,
+            exitCode: 0,
+            metadata: {},
+          },
+        ],
+      });
+    };
+
+    expect((await runtime.claim("gate-worker"))?.id).toBe(run.id);
+    await complete("produce", "producer-1", "first candidate");
+    expect(await runtime.readyStages(run.id)).toEqual([]);
+    expect(
+      (await runtime.snapshot(run.id))?.stages.find(
+        (stage) => stage.stageId === "release",
+      )?.status,
+    ).toBe("awaiting_approval");
+
+    await runtime.decideStageGate(
+      run.id,
+      "release",
+      "admin-1",
+      "reject",
+      "Add the missing rollback proof",
+    );
+    expect((await runtime.claim("gate-worker"))?.id).toBe(run.id);
+    expect(
+      (await runtime.readyStages(run.id)).map((stage) => stage.stageId),
+    ).toEqual(["produce"]);
+    await complete("produce", "producer-2", "candidate with rollback proof");
+    expect(await runtime.readyStages(run.id)).toEqual([]);
+    await runtime.decideStageGate(run.id, "release", "admin-1", "approve");
+    expect((await runtime.claim("gate-worker"))?.id).toBe(run.id);
+    expect(
+      (await runtime.readyStages(run.id)).map((stage) => stage.stageId),
+    ).toEqual(["release"]);
+    await complete("release", "release-1", "released");
+    const snapshot = await runtime.snapshot(run.id);
+    expect(
+      snapshot?.stages.find((stage) => stage.stageId === "produce")?.attempts,
+    ).toBe(2);
+    expect(
+      snapshot?.events
+        .filter((event) => event.entity === "human_gate")
+        .map((event) => event.toStatus),
+    ).toEqual([
+      "awaiting_approval",
+      "rejected",
+      "awaiting_approval",
+      "approved",
+    ]);
+    expect(snapshot?.run.status).toBe("awaiting_approval");
+  });
+
   test("failed runtime checks persist evidence, skip review, and feed the bounded repair", async () => {
     const queued = await store.queueJob("admin", {
       kind: "ci-repair",

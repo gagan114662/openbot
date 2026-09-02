@@ -252,6 +252,7 @@ export function createApp(
     workflows?: WorkflowRuntime;
     auditStore?: AuditStore;
     worktreeStats?: () => Promise<{ active: number; diskBytes: number }>;
+    cleanupWorktree?: (runId: string) => Promise<void>;
     provenance?: {
       revision: string;
       branch: string;
@@ -999,6 +1000,7 @@ export function createApp(
         softwareFactory.provenance,
         softwareFactory.auditStore,
         softwareFactory.worktreeStats,
+        softwareFactory.cleanupWorktree,
       ),
     );
   }

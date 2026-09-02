@@ -126,21 +126,22 @@ export function createWorkflowWorker(options: {
       (initialSnapshot?.run.steering as { events?: unknown[] } | undefined)
         ?.events?.length ?? 0;
     const controlWatcher = setInterval(() => {
-      void options.runtime.snapshot(runId).then((current) => {
+      // One narrow control-row read replaces the old four-query snapshot poll.
+      void options.runtime.control(runId).then((current) => {
         const steering =
-          (current?.run.steering as { events?: unknown[] } | undefined)?.events
+          (current?.steering as { events?: unknown[] } | undefined)?.events
             ?.length ?? 0;
         if (
           !current ||
-          current.run.abortRequested ||
-          current.run.pauseRequested ||
+          current.abortRequested ||
+          current.pauseRequested ||
           steering > initialSteering
         )
           controller.abort(
             "Workflow control changed while the stage was running.",
           );
       });
-    }, 250);
+    }, 1_250);
     controlWatcher.unref?.();
     try {
       const snapshot = await options.runtime.snapshot(runId);
@@ -297,6 +298,10 @@ export function createWorkflowWorker(options: {
         options.executor.worktreeStats
         ? options.executor.worktreeStats()
         : { active: 0, diskBytes: 0 };
+    },
+    async cleanup(runId: string) {
+      if ("cleanup" in options.executor)
+        await options.executor.cleanup?.(runId);
     },
   };
 }

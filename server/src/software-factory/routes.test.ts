@@ -41,7 +41,16 @@ describe("managed workflow plans", () => {
         "server-typecheck",
         "repository-lint",
       ]);
+      expect(stages[1]?.gate).toMatchObject({
+        kind: "human",
+        roles: ["admin"],
+      });
     }
+    if (kind === "pull-request-review")
+      expect(stages[1]?.gate).toMatchObject({
+        kind: "human",
+        roles: ["admin"],
+      });
   });
 });
 
@@ -105,4 +114,77 @@ describe("workflow control audit", () => {
       ]);
     },
   );
+});
+
+describe("workflow live control surface", () => {
+  test("streams a terminal workflow snapshot over authenticated SSE", async () => {
+    const routes = createSoftwareFactoryRoutes(
+      {} as never,
+      {} as never,
+      "tenant-1",
+      async (context, next) => {
+        context.set("actor", {
+          id: "admin-1",
+          email: "admin@example.test",
+          role: "admin",
+        });
+        await next();
+      },
+      undefined,
+      undefined,
+      {
+        snapshot: async () => ({
+          run: { id: "run-live", status: "succeeded" },
+          stages: [{ stageId: "verify", status: "succeeded" }],
+          events: [{ id: "event-1", entity: "stage", toStatus: "succeeded" }],
+          artifacts: [{ kind: "runtime-check", content: "1 passed" }],
+        }),
+      } as never,
+    );
+
+    const response = await routes.request("/workflows/run-live/events");
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
+    const body = await response.text();
+    expect(body).toContain("event: snapshot");
+    expect(body).toContain("runtime-check");
+    expect(body).toContain("1 passed");
+  });
+
+  test("routes a stage rejection and its mandatory feedback to the durable runtime", async () => {
+    const calls: unknown[][] = [];
+    const routes = createSoftwareFactoryRoutes(
+      {} as never,
+      {} as never,
+      "tenant-1",
+      async (context, next) => {
+        context.set("actor", {
+          id: "admin-1",
+          email: "admin@example.test",
+          role: "admin",
+        });
+        await next();
+      },
+      undefined,
+      undefined,
+      {
+        decideStageGate: async (...args: unknown[]) => {
+          calls.push(args);
+          return { stageId: "release", decision: "reject" };
+        },
+      } as never,
+    );
+    const response = await routes.request(
+      "/workflows/run-1/stages/release/gate",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ decision: "reject", feedback: "repair this" }),
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(calls).toEqual([
+      ["run-1", "release", "admin-1", "reject", "repair this"],
+    ]);
+  });
 });

@@ -25,12 +25,12 @@ export function createRoutedWorkflowExecutor(
       await Promise.all(executors.map((executor) => executor.interrupt()));
     },
     async cleanup(runId) {
-      await Promise.all(executors.map((executor) => executor.cleanup?.(runId)));
+      // Harnesses share one workspace manager/root. Calling every harness races two
+      // `git worktree remove` processes against the same checkout.
+      await executors[0]?.cleanup?.(runId);
     },
     async sweep(protectedRunIds) {
-      await Promise.all(
-        executors.map((executor) => executor.sweep?.(protectedRunIds)),
-      );
+      await executors[0]?.sweep?.(protectedRunIds);
     },
     async worktreeStats() {
       return (

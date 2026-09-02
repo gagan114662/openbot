@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   PageEmpty,
   PageSection,
@@ -12,6 +12,7 @@ import {
   applyProductionMonitorTuning,
   controlWorkflow,
   createManagedJob,
+  decideWorkflowGate,
   draftProductionFix,
   fetchProductionEngineer,
   fetchSoftwareFactory,
@@ -34,6 +35,8 @@ function ProductionEngineerPage() {
   const [investigationOutcome, setInvestigationOutcome] = useState("");
   const [investigationApproved, setInvestigationApproved] = useState(false);
   const [workflowSteering, setWorkflowSteering] = useState("");
+  const [gateFeedback, setGateFeedback] = useState<Record<string, string>>({});
+  const [streamState, setStreamState] = useState("connecting");
   const [jobObjective, setJobObjective] = useState("");
   const [jobContextKeys, setJobContextKeys] = useState("");
   const [jobKind, setJobKind] = useState<
@@ -50,14 +53,39 @@ function ProductionEngineerPage() {
   const factory = useQuery({
     queryKey: ["software-factory"],
     queryFn: fetchSoftwareFactory,
-    refetchInterval: 5_000,
   });
+  const liveRun = factory.data?.workflows.find(({ run }) =>
+    ["queued", "running", "pausing", "paused", "awaiting_approval"].includes(
+      run.status,
+    ),
+  )?.run.id;
+  useEffect(() => {
+    if (!liveRun) {
+      setStreamState("idle");
+      return;
+    }
+    const events = new EventSource(
+      `/api/software-factory/workflows/${encodeURIComponent(liveRun)}/events`,
+    );
+    events.addEventListener("open", () => setStreamState("live"));
+    events.addEventListener("snapshot", () => {
+      setStreamState("live");
+      void queryClient.invalidateQueries({ queryKey: ["software-factory"] });
+    });
+    events.addEventListener("error", () => setStreamState("reconnecting"));
+    return () => events.close();
+  }, [liveRun, queryClient]);
   const workflowControl = useMutation({
     mutationFn: controlWorkflow,
     onSuccess: () => {
       setWorkflowSteering("");
       return queryClient.invalidateQueries({ queryKey: ["software-factory"] });
     },
+  });
+  const gateControl = useMutation({
+    mutationFn: decideWorkflowGate,
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["software-factory"] }),
   });
   const createJob = useMutation({
     mutationFn: createManagedJob,
@@ -312,6 +340,13 @@ function ProductionEngineerPage() {
         ) : null}
       </PageSection>
       <PageSection title="Inspectable workflow runs">
+        <p
+          className="mb-2 text-muted-foreground text-xs"
+          data-testid="workflow-stream-state"
+        >
+          Durable event stream: {streamState}. Steering is delivered by an
+          explicit interrupt and restart at the next model turn.
+        </p>
         {(factory.data?.workflows.length ?? 0) === 0 ? (
           <PageEmpty>No durable workflow runs exist yet.</PageEmpty>
         ) : (
@@ -448,6 +483,73 @@ function ProductionEngineerPage() {
                         className="rounded-md bg-muted p-2 text-sm"
                         key={stage.stageId}
                       >
+                        {stage.checks?.gate ? (
+                          <div
+                            className="mb-2 rounded border border-amber-500/40 p-2"
+                            data-testid={`stage-gate-${run.id}-${stage.stageId}`}
+                          >
+                            <p className="font-medium">
+                              Human gate: {stage.checks.gate.prompt}
+                            </p>
+                            <p className="text-xs text-muted-foreground">
+                              Status: {stage.checks.gate.status}
+                            </p>
+                            {stage.status === "awaiting_approval" ? (
+                              <div className="mt-2 flex flex-wrap gap-2">
+                                <Input
+                                  aria-label={`Gate feedback for ${stage.stageId}`}
+                                  placeholder="Required feedback when rejecting"
+                                  value={
+                                    gateFeedback[
+                                      `${run.id}:${stage.stageId}`
+                                    ] ?? ""
+                                  }
+                                  onChange={(event) =>
+                                    setGateFeedback((current) => ({
+                                      ...current,
+                                      [`${run.id}:${stage.stageId}`]:
+                                        event.target.value,
+                                    }))
+                                  }
+                                />
+                                <Button
+                                  size="sm"
+                                  onClick={() =>
+                                    gateControl.mutate({
+                                      runId: run.id,
+                                      stageId: stage.stageId,
+                                      decision: "approve",
+                                    })
+                                  }
+                                >
+                                  Approve stage
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="destructive"
+                                  disabled={
+                                    !gateFeedback[
+                                      `${run.id}:${stage.stageId}`
+                                    ]?.trim()
+                                  }
+                                  onClick={() =>
+                                    gateControl.mutate({
+                                      runId: run.id,
+                                      stageId: stage.stageId,
+                                      decision: "reject",
+                                      feedback:
+                                        gateFeedback[
+                                          `${run.id}:${stage.stageId}`
+                                        ],
+                                    })
+                                  }
+                                >
+                                  Reject with feedback
+                                </Button>
+                              </div>
+                            ) : null}
+                          </div>
+                        ) : null}
                         <span className="font-medium">{stage.stageId}</span> ·{" "}
                         {stage.status} · attempt {stage.attempts}/
                         {run.maximumAttempts}

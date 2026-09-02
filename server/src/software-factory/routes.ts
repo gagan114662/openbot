@@ -65,12 +65,14 @@ export function managedWorkflowStages(
     purpose: string,
     dependsOn: string[] = [],
     checks = [diffCheck],
+    gate?: { kind: "human"; prompt: string; roles: string[] },
   ) => ({
     id,
     objective: `${purpose}. Overall objective: ${objective}`,
     requiredContext,
     dependsOn,
     checks,
+    ...(gate ? { gate } : {}),
   });
   switch (kind) {
     case "pull-request-review":
@@ -79,9 +81,17 @@ export function managedWorkflowStages(
           "inspect",
           "Inspect the change and establish revision-bound evidence",
         ),
-        stage("review", "Independently review correctness and risk", [
-          "inspect",
-        ]),
+        stage(
+          "review",
+          "Independently review correctness and risk",
+          ["inspect"],
+          [diffCheck],
+          {
+            kind: "human",
+            prompt: "Approve the inspected revision before final review",
+            roles: ["admin"],
+          },
+        ),
       ];
     case "ci-repair":
       return [
@@ -95,6 +105,12 @@ export function managedWorkflowStages(
           "repair",
           "Implement the smallest evidence-backed repair, or preserve the clean tree when no repair is required",
           ["diagnose"],
+          [diffCheck],
+          {
+            kind: "human",
+            prompt: "Approve diagnosis before the repair changes the candidate",
+            roles: ["admin"],
+          },
         ),
         stage(
           "verify",
@@ -143,6 +159,7 @@ export function createSoftwareFactoryRoutes(
   },
   auditStore?: AuditStore,
   worktreeStats?: () => Promise<{ active: number; diskBytes: number }>,
+  cleanupWorktree?: (runId: string) => Promise<void>,
 ) {
   const routes = new Hono<{ Variables: AppVariables }>();
   routes.use("*", requireUser, async (context, next) => {
@@ -330,6 +347,49 @@ export function createSoftwareFactoryRoutes(
     const snapshot = await workflows.snapshot(context.req.param("runId"));
     return snapshot ? context.json(snapshot) : context.notFound();
   });
+  routes.get("/workflows/:runId/events", async (context) => {
+    if (!workflows) return context.notFound();
+    const runId = context.req.param("runId");
+    const encoder = new TextEncoder();
+    let last = "";
+    const stream = new ReadableStream({
+      async start(controller) {
+        const send = (event: string, value: unknown) =>
+          controller.enqueue(
+            encoder.encode(
+              `event: ${event}\ndata: ${JSON.stringify(value)}\n\n`,
+            ),
+          );
+        while (!context.req.raw.signal.aborted) {
+          const snapshot = await workflows.snapshot(runId);
+          if (!snapshot) {
+            send("error", { error: "Workflow not found." });
+            break;
+          }
+          const signature = JSON.stringify({
+            run: snapshot.run,
+            stages: snapshot.stages,
+            events: snapshot.events,
+          });
+          if (signature !== last) {
+            send("snapshot", snapshot);
+            last = signature;
+          } else send("heartbeat", { at: new Date().toISOString() });
+          if (["succeeded", "failed", "aborted"].includes(snapshot.run.status))
+            break;
+          await new Promise((resolve) => setTimeout(resolve, 1_500));
+        }
+        controller.close();
+      },
+    });
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+      },
+    });
+  });
   routes.get("/workflows/:runId/evidence", async (context) => {
     if (!workflows) return context.notFound();
     const snapshot = await workflows.snapshot(context.req.param("runId"));
@@ -348,6 +408,26 @@ export function createSoftwareFactoryRoutes(
     if (!workflows) return context.notFound();
     const artifact = await workflows.contextCapsule(context.req.param("id"));
     return artifact ? context.json(artifact) : context.notFound();
+  });
+  routes.post("/workflows/:runId/stages/:stageId/gate", async (context) => {
+    if (!workflows) return context.notFound();
+    const body = record(await context.req.json().catch(() => null));
+    const decision = nonempty(body?.decision);
+    if (decision !== "approve" && decision !== "reject")
+      return context.json(
+        { error: "Decision must be approve or reject." },
+        400,
+      );
+    const result = await workflows.decideStageGate(
+      context.req.param("runId"),
+      context.req.param("stageId"),
+      context.var.actor.id,
+      decision,
+      nonempty(body?.feedback) ?? undefined,
+    );
+    return result
+      ? context.json({ gate: result })
+      : context.json({ error: "No pending human gate was found." }, 409);
   });
   routes.post("/workflows/:runId/:action", async (context) => {
     if (!workflows) return context.notFound();
@@ -397,6 +477,7 @@ export function createSoftwareFactoryRoutes(
         { error: "The workflow action is invalid for its current state." },
         409,
       );
+    if (action === "abort") await cleanupWorktree?.(runId);
     if (auditStore) {
       await recordAuditEvent(auditStore, {
         eventType: "workflow.control_applied",

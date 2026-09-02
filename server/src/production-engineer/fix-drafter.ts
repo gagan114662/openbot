@@ -36,6 +36,17 @@ export function createCodexFixDrafter(repository: string): FixDrafter {
       repository,
     );
     if (!baseBranch) throw new Error("Autonomous fixes require a named base branch.");
+    const originUrl = await command(
+      ["git", "remote", "get-url", "origin"],
+      repository,
+    );
+    const originRepository = originUrl
+      .replace(/^git@github\.com:/, "")
+      .replace(/^https:\/\/github\.com\//, "")
+      .replace(/\.git$/, "");
+    if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(originRepository)) {
+      throw new Error("The origin remote is not a GitHub repository.");
+    }
     const branch = `openbot/production-${input.issueId.slice(0, 8)}-${randomUUID().slice(0, 8)}`;
     const worktree = await mkdtemp(join(tmpdir(), "openbot-production-fix-"));
     await command(
@@ -70,6 +81,8 @@ export function createCodexFixDrafter(repository: string): FixDrafter {
           "gh",
           "pr",
           "create",
+          "--repo",
+          originRepository,
           "--head",
           branch,
           "--base",

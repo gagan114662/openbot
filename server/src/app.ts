@@ -254,6 +254,7 @@ export function createApp(
       revision: string;
       branch: string;
       dirty: boolean;
+      workerId?: string;
     };
   },
 ) {

@@ -282,6 +282,7 @@ export const factoryWorkflowStages = pgTable(
     objective: text("objective").notNull(),
     requiredContext: jsonb("required_context").notNull().default({ keys: [] }),
     dependsOn: jsonb("depends_on").notNull().default({ ids: [] }),
+    checks: jsonb("checks").notNull().default({ items: [] }),
     status: text("status").notNull().default("pending"),
     attempts: integer("attempts").notNull().default(0),
     sessionId: text("session_id"),

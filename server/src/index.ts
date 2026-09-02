@@ -180,6 +180,9 @@ const identifyActor: IdentifyActor = async (request) => {
 };
 
 const config = loadConfig();
+const processInstanceId = randomUUID();
+const processOwner = (role: string) =>
+  `${role}/${process.env.HOSTNAME ?? "local"}/${processInstanceId}`;
 const port = Number.parseInt(process.env.PORT ?? "3001", 10);
 const database = createDatabase(config.databaseUrl);
 await initializeDevActorUser(database, config.singleUser);
@@ -383,9 +386,10 @@ if (shadowModel) {
   );
 }
 const workflowRuntime = createWorkflowRuntime(database, tenantPackage.tenantId);
+const workflowWorkerId = processOwner("software-factory");
 const workflowWorker = createWorkflowWorker({
   runtime: workflowRuntime,
-  workerId: `software-factory/${process.env.HOSTNAME ?? randomUUID().slice(0, 8)}`,
+  workerId: workflowWorkerId,
   executor: createCodexWorkflowExecutor(
     process.env.SOFTWARE_FACTORY_REPOSITORY ?? process.cwd(),
     {
@@ -471,7 +475,7 @@ const productionEngineerStore = createProductionEngineerStore(
   },
   { contextGraph: factoryContextGraph, tenantId: tenantPackage.tenantId },
 );
-const webhookWorkerId = `production-webhook/${process.env.HOSTNAME ?? randomUUID().slice(0, 8)}`;
+const webhookWorkerId = processOwner("production-webhook");
 const webhookLoop = repeatAfterEach(async () => {
   const event = await webhookReconciler.claim(webhookWorkerId);
   if (!event) return;
@@ -1175,7 +1179,7 @@ const handoffEvolution = createEvolutionCheckpointGate(database);
 if (config.handoff.maxDepth > 0 && config.handoff.maxPerRun > 0) {
   const runner = createHandoffRunner({
     queue: createWorkQueue(database),
-    owner: `handoff/${process.env.HOSTNAME ?? randomUUID().slice(0, 8)}`,
+    owner: processOwner("handoff"),
     auditStore: bootAuditStore,
     evolution: handoffEvolution,
     /*
@@ -1331,7 +1335,7 @@ if (config.handoff.maxDepth > 0 && config.handoff.maxPerRun > 0) {
  */
 const reaper = createHandoffRunner({
   queue: createWorkQueue(database),
-  owner: `reaper/${process.env.HOSTNAME ?? randomUUID().slice(0, 8)}`,
+  owner: processOwner("reaper"),
   sign: () => ({ lineage: "", toolCalls: [] }),
   auditStore: bootAuditStore,
   // Never called: `reap` deletes rows by age and claims nothing.
@@ -1443,7 +1447,7 @@ const app = createApp(
     webhooks: webhookReconciler,
     shadows: shadowEvaluator,
     workflows: workflowRuntime,
-    provenance: runtimeProvenance,
+    provenance: { ...runtimeProvenance, workerId: workflowWorkerId },
   },
 );
 

@@ -126,6 +126,11 @@ function ProductionEngineerPage() {
               ? `${factory.data.provenance.branch} @ ${factory.data.provenance.revision} · ${factory.data.provenance.dirty ? "DIRTY" : "CLEAN"}`
               : "Unavailable"}
           </p>
+          {factory.data?.provenance?.workerId ? (
+            <p className="break-all font-mono text-xs text-muted-foreground">
+              Worker {factory.data.provenance.workerId}
+            </p>
+          ) : null}
         </div>
         <p className="mb-3 text-muted-foreground text-sm">
           Benchmark-routed managed agents use a judging orchestrator, bounded
@@ -473,6 +478,20 @@ function ProductionEngineerPage() {
                               </dd>
                               <dt>Captured diff</dt>
                               <dd>{artifact.metadata?.diffBytes ?? 0} bytes</dd>
+                              {artifact.kind === "runtime-check" ? (
+                                <>
+                                  <dt>Evidence source</dt>
+                                  <dd>{artifact.metadata?.evidenceSource}</dd>
+                                  <dt>Check</dt>
+                                  <dd>
+                                    {artifact.metadata?.checkId} ·{" "}
+                                    {artifact.metadata?.durationMs} ms ·{" "}
+                                    {artifact.metadata?.required
+                                      ? "required"
+                                      : "optional"}
+                                  </dd>
+                                </>
+                              ) : null}
                               <dt>Debt gate</dt>
                               <dd>
                                 {artifact.metadata?.debt

@@ -104,12 +104,17 @@ describe("durable workflow runtime", () => {
         artifacts: [],
       }),
     ).rejects.toThrow();
-    expect(await runtime.failStage(run.id, "implement", "test failed")).toEqual(
-      {
-        terminal: false,
-        attempts: 1,
-      },
-    );
+    expect(
+      await runtime.failStage(
+        run.id,
+        "implement",
+        "fresh-worker-1",
+        "test failed",
+      ),
+    ).toEqual({
+      terminal: false,
+      attempts: 1,
+    });
 
     expect(
       await runtime.startStage(run.id, "implement", "fresh-worker-2"),
@@ -393,17 +398,17 @@ describe("durable workflow runtime", () => {
     await first;
     await runtime.claim("controlled-worker");
     expect((await runtime.snapshot(run.id))?.run.status).toBe("paused");
-    expect((await runtime.snapshot(run.id))?.stages[0]?.attempts).toBe(1);
+    expect((await runtime.snapshot(run.id))?.stages[0]?.attempts).toBe(0);
 
     await runtime.resume(run.id);
     const second = worker.runOnce();
-    while ((await runtime.snapshot(run.id))?.stages[0]?.attempts !== 2)
+    while ((await runtime.snapshot(run.id))?.stages[0]?.attempts !== 1)
       await Bun.sleep(10);
     await runtime.steer(run.id, "human-admin", "also run the regression test");
     await second;
     expect((await runtime.snapshot(run.id))?.stages[0]).toMatchObject({
       status: "pending",
-      attempts: 2,
+      attempts: 0,
       lastError: "Restarted to apply new operator steering.",
     });
 
@@ -411,8 +416,120 @@ describe("durable workflow runtime", () => {
     expect((await runtime.snapshot(run.id))?.run.status).toBe(
       "awaiting_approval",
     );
-    expect((await runtime.snapshot(run.id))?.stages[0]?.attempts).toBe(3);
+    expect((await runtime.snapshot(run.id))?.stages[0]?.attempts).toBe(1);
     await worker.drain();
+  });
+
+  test("same-owner crash recovery resets an expired stage and stale sessions cannot mutate it", async () => {
+    const queued = await store.queueJob("admin", {
+      kind: "ci-repair",
+      tier: "managed",
+      objective: "bind writes to the live session",
+      trigger: "session-race-proof",
+      minimumQuality: 0.8,
+    });
+    const run = await runtime.create({
+      jobId: queued.job.id,
+      maximumAttempts: 2,
+      concurrencyLimit: 1,
+      stages: [
+        {
+          id: "owned",
+          objective: "survive the same host restarting",
+          requiredContext: [],
+          dependsOn: [],
+        },
+      ],
+    });
+    expect((await runtime.claim("same-host", 20))?.id).toBe(run.id);
+    expect(
+      await runtime.startStage(run.id, "owned", "stale-session"),
+    ).not.toBeNull();
+    await Bun.sleep(30);
+    expect((await runtime.claim("same-host", 1_000))?.id).toBe(run.id);
+    expect((await runtime.snapshot(run.id))?.stages[0]).toMatchObject({
+      status: "pending",
+      attempts: 1,
+    });
+    expect(
+      await runtime.startStage(run.id, "owned", "live-session"),
+    ).not.toBeNull();
+    expect(
+      await runtime.failStage(run.id, "owned", "stale-session", "late failure"),
+    ).toBeNull();
+    expect(
+      await runtime.interruptStage(
+        run.id,
+        "owned",
+        "stale-session",
+        "late interrupt",
+      ),
+    ).toBeNull();
+    const content = "live result";
+    await runtime.completeStage(run.id, "owned", {
+      summary: content,
+      sessionId: "live-session",
+      reviewerSessionId: "fresh-reviewer",
+      verification: {
+        accepted: true,
+        summary: "session ownership verified",
+        checks: ["race test"],
+      },
+      artifacts: [
+        {
+          kind: "race-proof",
+          uri: `workflow://${run.id}/race`,
+          content,
+          checksum: artifactChecksum(content),
+          revision: "deadbeef",
+          producerSessionId: "live-session",
+          command: "bun test",
+          exitCode: 0,
+        },
+      ],
+    });
+    expect((await runtime.snapshot(run.id))?.run.status).toBe(
+      "awaiting_approval",
+    );
+  });
+
+  test("an expired final attempt terminates instead of being reclaimed forever", async () => {
+    const queued = await store.queueJob("admin", {
+      kind: "ci-repair",
+      tier: "managed",
+      objective: "terminate an exhausted crash",
+      trigger: "terminal-crash-proof",
+      minimumQuality: 0.8,
+    });
+    const run = await runtime.create({
+      jobId: queued.job.id,
+      maximumAttempts: 1,
+      concurrencyLimit: 1,
+      stages: [
+        {
+          id: "last-attempt",
+          objective: "fail closed after a crash",
+          requiredContext: [],
+          dependsOn: [],
+        },
+      ],
+    });
+    expect((await runtime.claim("same-host", 20))?.id).toBe(run.id);
+    expect(
+      await runtime.startStage(run.id, "last-attempt", "dead-session"),
+    ).not.toBeNull();
+    await Bun.sleep(30);
+    expect(await runtime.claim("same-host", 1_000)).toBeNull();
+    expect(await runtime.snapshot(run.id)).toMatchObject({
+      run: { status: "failed" },
+      stages: [
+        {
+          status: "failed",
+          attempts: 1,
+          lastError: "Worker lease expired before a result was committed.",
+        },
+      ],
+    });
   });
 
   test("a slow stage renews its lease so another replica cannot reclaim it", async () => {

@@ -25,11 +25,44 @@ export function managedWorkflowStages(
   objective: string,
   requiredContext: string[],
 ) {
-  const stage = (id: string, purpose: string, dependsOn: string[] = []) => ({
+  const diffCheck = {
+    id: "diff-integrity",
+    command: ["git", "diff", "--check"],
+    timeoutMs: 30_000,
+    required: true,
+  };
+  const focusedFactoryChecks = [
+    diffCheck,
+    {
+      id: "factory-focused-tests",
+      command: [
+        "bun",
+        "test",
+        "server/src/software-factory/orchestrator.test.ts",
+        "server/src/software-factory/routes.test.ts",
+        "server/src/software-factory/workflow-evidence.test.ts",
+      ],
+      timeoutMs: 120_000,
+      required: true,
+    },
+    {
+      id: "server-typecheck",
+      command: ["bun", "run", "--cwd", "server", "typecheck"],
+      timeoutMs: 120_000,
+      required: true,
+    },
+  ];
+  const stage = (
+    id: string,
+    purpose: string,
+    dependsOn: string[] = [],
+    checks = [diffCheck],
+  ) => ({
     id,
     objective: `${purpose}. Overall objective: ${objective}`,
     requiredContext,
     dependsOn,
+    checks,
   });
   switch (kind) {
     case "pull-request-review":
@@ -48,7 +81,12 @@ export function managedWorkflowStages(
         stage("repair", "Implement the smallest evidence-backed repair", [
           "diagnose",
         ]),
-        stage("verify", "Run deterministic regression checks", ["repair"]),
+        stage(
+          "verify",
+          "Run deterministic regression checks",
+          ["repair"],
+          focusedFactoryChecks,
+        ),
       ];
     case "bug-triage":
       return [
@@ -78,7 +116,12 @@ export function createSoftwareFactoryRoutes(
   webhooks?: WebhookReconciler,
   shadows?: ShadowEvaluator,
   workflows?: WorkflowRuntime,
-  provenance?: { revision: string; branch: string; dirty: boolean },
+  provenance?: {
+    revision: string;
+    branch: string;
+    dirty: boolean;
+    workerId?: string;
+  },
 ) {
   const routes = new Hono<{ Variables: AppVariables }>();
   routes.use("*", requireUser, async (context, next) => {

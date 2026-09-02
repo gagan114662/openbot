@@ -302,6 +302,13 @@
       "when": 1788373008704,
       "tag": "0042_keen_warbound",
       "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1788375139178,
+      "tag": "0043_parallel_kat_farrell",
+      "breakpoints": true
     }
   ]
 }

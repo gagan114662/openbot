@@ -82,6 +82,7 @@ export type SoftwareFactoryDashboard = {
     revision: string;
     branch: string;
     dirty: boolean;
+    workerId?: string;
   };
   executionTiers: string[];
   managedJobKinds: string[];
@@ -183,6 +184,10 @@ export type SoftwareFactoryDashboard = {
       metadata: null | {
         checks?: string[];
         diffBytes?: number;
+        checkId?: string;
+        durationMs?: number;
+        required?: boolean;
+        evidenceSource?: string;
         trustedContext?: Array<{
           key: string;
           sourceSystem: string;

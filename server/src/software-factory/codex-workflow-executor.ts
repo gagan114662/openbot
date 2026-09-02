@@ -1,11 +1,11 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { spawn } from "bun";
 import {
   assessTechnicalDebt,
   debtBudgetFromEnvironment,
 } from "../../../agent-codex/src/debt";
-import { artifactChecksum } from "./workflow-runtime";
+import { artifactChecksum, stageCheckSchema } from "./workflow-runtime";
 import type { WorkflowStageExecutor } from "./workflow-worker";
 
 async function command(args: string[], cwd: string, signal?: AbortSignal) {
@@ -48,6 +48,22 @@ const REVIEW_SCHEMA = {
   additionalProperties: false,
 };
 
+export async function persistReviewMaterial(
+  directory: string,
+  sessionId: string,
+  content: string,
+) {
+  const checksum = artifactChecksum(content);
+  const path = join(
+    directory,
+    ".openbot-evidence",
+    `${sessionId}.${checksum.slice(0, 16)}.artifact.json`,
+  );
+  await mkdir(join(directory, ".openbot-evidence"), { recursive: true });
+  await writeFile(path, content, { mode: 0o600 });
+  return { path, checksum };
+}
+
 /** A real subscription-backed executor. Every run keeps its Git worktree across process restarts. */
 export function createCodexWorkflowExecutor(
   repository: string,
@@ -77,7 +93,93 @@ export function createCodexWorkflowExecutor(
         root,
       );
     }
+    try {
+      await access(join(directory, "node_modules"));
+    } catch {
+      try {
+        await access(join(root, "node_modules"));
+        await symlink(
+          join(root, "node_modules"),
+          join(directory, "node_modules"),
+          "dir",
+        );
+      } catch {
+        // A dependency-free repository remains valid. Declared checks will fail with their real
+        // command output if dependencies are required but unavailable.
+      }
+    }
     return directory;
+  }
+
+  async function runCheck(
+    cwd: string,
+    check: ReturnType<typeof stageCheckSchema.parse>,
+    sessionId: string,
+    signal: AbortSignal,
+  ) {
+    const checkCwd = resolve(cwd, check.cwd ?? ".");
+    if (checkCwd !== cwd && !checkCwd.startsWith(`${cwd}/`))
+      throw new Error(
+        `Declared check ${check.id} escapes the workflow worktree.`,
+      );
+    const started = performance.now();
+    const controller = new AbortController();
+    const abort = () => controller.abort(signal.reason);
+    signal.addEventListener("abort", abort, { once: true });
+    const timeout = setTimeout(
+      () =>
+        controller.abort(`Check ${check.id} exceeded ${check.timeoutMs} ms.`),
+      check.timeoutMs,
+    );
+    const child = spawn(check.command, {
+      cwd: checkCwd,
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const cancel = () => child.kill("SIGTERM");
+    controller.signal.addEventListener("abort", cancel, { once: true });
+    const [stdout, stderr, exitCode] = await Promise.all([
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+      child.exited,
+    ]);
+    clearTimeout(timeout);
+    signal.removeEventListener("abort", abort);
+    const result = {
+      id: check.id,
+      command: check.command,
+      cwd: check.cwd ?? ".",
+      required: check.required,
+      exitCode,
+      durationMs: Math.round(performance.now() - started),
+      stdout: stdout.slice(-100_000),
+      stderr: stderr.slice(-100_000),
+      interrupted: controller.signal.aborted,
+    };
+    const content = JSON.stringify(result);
+    const material = await persistReviewMaterial(
+      cwd,
+      `${sessionId}.check`,
+      content,
+    );
+    return {
+      result,
+      artifact: {
+        kind: "runtime-check",
+        uri: `workflow-check://${sessionId}/${check.id}`,
+        content,
+        checksum: material.checksum,
+        command: check.command.join(" "),
+        exitCode,
+        metadata: {
+          checkId: check.id,
+          durationMs: result.durationMs,
+          required: check.required,
+          evidenceSource: "runtime-executed",
+          reviewMaterialPath: material.path,
+        },
+      },
+    };
   }
 
   async function codexJson(
@@ -188,13 +290,24 @@ export function createCodexWorkflowExecutor(
           command(["git", "diff", "--binary", "--no-ext-diff"], cwd),
         ),
       ]);
+      const checks = stageCheckSchema
+        .array()
+        .parse((stage.checks as { items?: unknown }).items ?? []);
+      const executedChecks = [];
+      for (const check of checks) {
+        const executed = await runCheck(cwd, check, sessionId, signal);
+        executedChecks.push(executed);
+        if (check.required && executed.result.exitCode !== 0)
+          throw new Error(
+            `Required runtime check ${check.id} failed (${executed.result.exitCode}): ${(executed.result.stderr || executed.result.stdout).slice(-4_000)}`,
+          );
+      }
       const content = JSON.stringify({ result, diff: diff.stdout });
-      const reviewMaterialPath = join(
+      const reviewMaterial = await persistReviewMaterial(
         cwd,
-        ".openbot-evidence",
-        `${sessionId}.artifact.json`,
+        sessionId,
+        content,
       );
-      await writeFile(reviewMaterialPath, content, { mode: 0o600 });
       const debt = await assessTechnicalDebt({
         cwd,
         before: [],
@@ -213,7 +326,7 @@ export function createCodexWorkflowExecutor(
             kind: "codex-stage-result",
             uri: `workflow://${runId}/${stage.stageId}/${sessionId}.json`,
             content,
-            checksum: artifactChecksum(content),
+            checksum: reviewMaterial.checksum,
             revision: revision.stdout.trim(),
             producerSessionId: sessionId,
             command: "codex exec --ephemeral --approve-for-me",
@@ -229,9 +342,14 @@ export function createCodexWorkflowExecutor(
                 checksum: node.checksum,
               })),
               debt,
-              reviewMaterialPath,
+              reviewMaterialPath: reviewMaterial.path,
             },
           },
+          ...executedChecks.map(({ artifact }) => ({
+            ...artifact,
+            revision: revision.stdout.trim(),
+            producerSessionId: sessionId,
+          })),
         ],
       };
     },

@@ -150,6 +150,7 @@ export function createWorkflowWorker(options: {
         await options.runtime.interruptStage(
           runId,
           stage.stageId,
+          workerSessionId,
           current?.run.pauseRequested
             ? "Paused by an operator while running."
             : "Restarted to apply new operator steering.",
@@ -159,6 +160,7 @@ export function createWorkflowWorker(options: {
         const failure = await options.runtime.failStage(
           runId,
           stage.stageId,
+          workerSessionId,
           message,
         );
         if (failure?.terminal)

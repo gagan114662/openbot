@@ -10,6 +10,18 @@ import {
   factoryWorkflowStages,
 } from "../db/schema";
 
+export const stageCheckSchema = z.object({
+  id: z.string().trim().min(1).max(100),
+  command: z.array(z.string().min(1).max(1_000)).min(1).max(50),
+  cwd: z.string().trim().min(1).max(1_000).optional(),
+  timeoutMs: z
+    .number()
+    .int()
+    .min(1_000)
+    .max(15 * 60_000),
+  required: z.boolean(),
+});
+
 export const stagePlanSchema = z
   .array(
     z.object({
@@ -17,6 +29,7 @@ export const stagePlanSchema = z
       objective: z.string().trim().min(1).max(4_000),
       requiredContext: z.array(z.string().trim().min(1).max(500)).max(50),
       dependsOn: z.array(z.string().trim().min(1).max(200)).max(50),
+      checks: z.array(stageCheckSchema).max(20).default([]),
     }),
   )
   .min(1)
@@ -264,6 +277,7 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
             objective: stage.objective,
             requiredContext: { keys: stage.requiredContext },
             dependsOn: { ids: stage.dependsOn },
+            checks: { items: stage.checks },
           })),
         );
         return run;
@@ -458,19 +472,26 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
           .limit(1)
           .for("update", { skipLocked: true });
         if (!run) return null;
-        if (
-          run.leaseOwner &&
-          run.leaseOwner !== workerId &&
-          run.leaseExpiresAt &&
-          run.leaseExpiresAt < now
-        ) {
+        if (run.leaseExpiresAt && run.leaseExpiresAt < now) {
           // The prior process died after starting work. Its uncommitted stage has no trustworthy
           // completion artifact, so make that same bounded attempt runnable again. The attempt is
           // not refunded: repeated crashes still reach the configured terminal stop.
+          const expiredStages = await tx
+            .select()
+            .from(factoryWorkflowStages)
+            .where(
+              and(
+                eq(factoryWorkflowStages.runId, run.id),
+                eq(factoryWorkflowStages.status, "running"),
+              ),
+            );
+          const exhausted = expiredStages.some(
+            (stage) => stage.attempts >= run.maximumAttempts,
+          );
           await tx
             .update(factoryWorkflowStages)
             .set({
-              status: "pending",
+              status: exhausted ? "failed" : "pending",
               sessionId: null,
               lastError: "Worker lease expired before a result was committed.",
               updatedAt: now,
@@ -481,6 +502,19 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
                 eq(factoryWorkflowStages.status, "running"),
               ),
             );
+          if (exhausted) {
+            await tx
+              .update(factoryWorkflowRuns)
+              .set({
+                status: "failed",
+                completedAt: now,
+                leaseOwner: null,
+                leaseExpiresAt: null,
+                updatedAt: now,
+              })
+              .where(eq(factoryWorkflowRuns.id, run.id));
+            return null;
+          }
         }
         if (run.pauseRequested) {
           await tx
@@ -544,6 +578,7 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
         .filter(
           (stage) =>
             stage.status === "pending" &&
+            stage.attempts < snapshot.run.maximumAttempts &&
             dependencyIds(stage.dependsOn).every((dependency) =>
               completed.has(dependency),
             ),
@@ -622,6 +657,7 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
               eq(factoryWorkflowStages.runId, runId),
               eq(factoryWorkflowStages.stageId, stageId),
               eq(factoryWorkflowStages.status, "running"),
+              eq(factoryWorkflowStages.sessionId, result.sessionId),
             ),
           )
           .returning();
@@ -659,7 +695,12 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
       });
     },
 
-    async failStage(runId: string, stageId: string, error: string) {
+    async failStage(
+      runId: string,
+      stageId: string,
+      sessionId: string,
+      error: string,
+    ) {
       return database.transaction(async (tx) => {
         const [run] = await tx
           .select()
@@ -681,7 +722,13 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
             ),
           )
           .for("update");
-        if (!run || !stage || stage.status !== "running") return null;
+        if (
+          !run ||
+          !stage ||
+          stage.status !== "running" ||
+          stage.sessionId !== sessionId
+        )
+          return null;
         const terminal = stage.attempts >= run.maximumAttempts;
         await tx
           .update(factoryWorkflowStages)
@@ -695,6 +742,7 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
             and(
               eq(factoryWorkflowStages.runId, runId),
               eq(factoryWorkflowStages.stageId, stageId),
+              eq(factoryWorkflowStages.sessionId, sessionId),
             ),
           );
         if (terminal)
@@ -712,11 +760,17 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
       });
     },
 
-    async interruptStage(runId: string, stageId: string, reason: string) {
+    async interruptStage(
+      runId: string,
+      stageId: string,
+      sessionId: string,
+      reason: string,
+    ) {
       const [stage] = await database
         .update(factoryWorkflowStages)
         .set({
           status: "pending",
+          attempts: sql`greatest(${factoryWorkflowStages.attempts} - 1, 0)`,
           sessionId: null,
           lastError: reason.slice(0, 4_000),
           updatedAt: new Date(),
@@ -726,6 +780,7 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
             eq(factoryWorkflowStages.runId, runId),
             eq(factoryWorkflowStages.stageId, stageId),
             eq(factoryWorkflowStages.status, "running"),
+            eq(factoryWorkflowStages.sessionId, sessionId),
           ),
         )
         .returning();

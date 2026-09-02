@@ -83,6 +83,7 @@ export function createWorkflowWorker(options: {
   leaseMs?: number;
   heartbeatMs?: number;
   stageTimeoutMs?: number;
+  reviewAttempts?: number;
   onTerminalFailure?: (input: {
     runId: string;
     error: string;
@@ -156,17 +157,31 @@ export function createWorkflowWorker(options: {
         throw new Error(
           "Worker result was not produced by the claimed session.",
         );
-      const reviewerSessionId = sessionId();
-      if (reviewerSessionId === workerSessionId)
-        throw new Error("Reviewer session id was not fresh.");
-      const verification = await options.executor.review({
-        runId,
-        stage: started,
-        snapshot,
-        candidate,
-        sessionId: reviewerSessionId,
-        signal: controller.signal,
-      });
+      const reviewAttempts = Math.max(1, options.reviewAttempts ?? 2);
+      let reviewerSessionId = "";
+      let verification:
+        | Awaited<ReturnType<WorkflowExecutor["review"]>>
+        | undefined;
+      let reviewError: unknown;
+      for (let attempt = 0; attempt < reviewAttempts; attempt += 1) {
+        reviewerSessionId = sessionId();
+        if (reviewerSessionId === workerSessionId)
+          throw new Error("Reviewer session id was not fresh.");
+        try {
+          verification = await options.executor.review({
+            runId,
+            stage: started,
+            snapshot,
+            candidate,
+            sessionId: reviewerSessionId,
+            signal: controller.signal,
+          });
+          break;
+        } catch (error) {
+          reviewError = error;
+        }
+      }
+      if (!verification) throw reviewError;
       if (!verification.accepted)
         throw new Error(
           `Independent verification rejected the candidate: ${verification.summary}`,

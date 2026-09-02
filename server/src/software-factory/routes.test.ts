@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { managedWorkflowStages } from "./routes";
+import { createSoftwareFactoryRoutes, managedWorkflowStages } from "./routes";
 
 describe("managed workflow plans", () => {
   test.each([
@@ -43,4 +43,66 @@ describe("managed workflow plans", () => {
       ]);
     }
   });
+});
+
+describe("workflow control audit", () => {
+  test.each([
+    ["approve", "awaiting_approval", "succeeded"],
+    ["abort", "running", "aborting"],
+  ] as const)(
+    "records %s with its state transition",
+    async (action, from, to) => {
+      const events: Array<Record<string, unknown>> = [];
+      const run = { id: "run-1", jobId: "job-1", status: to, approvedBy: null };
+      const routes = createSoftwareFactoryRoutes(
+        {
+          completeJob: async () => ({}),
+        } as never,
+        {} as never,
+        "tenant-1",
+        async (context, next) => {
+          context.set("actor", {
+            id: "admin-1",
+            email: "admin@example.test",
+            role: "admin",
+          });
+          await next();
+        },
+        undefined,
+        undefined,
+        {
+          snapshot: async () => ({ run: { ...run, status: from } }),
+          approve: async () => (action === "approve" ? run : null),
+          requestAbort: async () => (action === "abort" ? run : null),
+        } as never,
+        undefined,
+        {
+          insert: async (event) => {
+            events.push(event);
+          },
+        },
+      );
+
+      const response = await routes.request(`/workflows/run-1/${action}`, {
+        method: "POST",
+        body: "{}",
+        headers: { "content-type": "application/json" },
+      });
+
+      expect(response.status).toBe(200);
+      expect(events).toEqual([
+        expect.objectContaining({
+          eventType: "workflow.control_applied",
+          targetId: "run-1",
+          actorUserId: "admin-1",
+          payload: expect.objectContaining({
+            action,
+            jobId: "job-1",
+            fromStatus: from,
+            toStatus: to,
+          }),
+        }),
+      ]);
+    },
+  );
 });

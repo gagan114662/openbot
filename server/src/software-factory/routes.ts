@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import type { MiddlewareHandler } from "hono";
 import { Hono } from "hono";
+import { type AuditStore, recordAuditEvent } from "../audit";
 import { type AppVariables, requireAdmin } from "../auth/guards";
 import type { WebhookReconciler } from "../webhooks/reconciler";
 import type { ContextGraph, ContextNodeInput } from "./context-graph";
@@ -139,6 +141,7 @@ export function createSoftwareFactoryRoutes(
     dirty: boolean;
     workerId?: string;
   },
+  auditStore?: AuditStore,
 ) {
   const routes = new Hono<{ Variables: AppVariables }>();
   routes.use("*", requireUser, async (context, next) => {
@@ -347,6 +350,7 @@ export function createSoftwareFactoryRoutes(
     const runId = context.req.param("runId");
     const action = context.req.param("action");
     const body = record(await context.req.json().catch(() => null));
+    const before = await workflows.snapshot(runId);
     const approve = async () => {
       const actorId = context.var.actor.id;
       const approved = await workflows.approve(runId, actorId);
@@ -389,6 +393,27 @@ export function createSoftwareFactoryRoutes(
         { error: "The workflow action is invalid for its current state." },
         409,
       );
+    if (auditStore) {
+      await recordAuditEvent(auditStore, {
+        eventType: "workflow.control_applied",
+        targetType: "factory_workflow_run",
+        targetId: runId,
+        actorUserId: context.var.actor.id,
+        payload: {
+          action,
+          jobId: result.jobId,
+          fromStatus: before?.run.status ?? null,
+          toStatus: result.status,
+          ...(action === "steer"
+            ? {
+                instructionHash: createHash("sha256")
+                  .update(nonempty(body?.instruction) ?? "")
+                  .digest("hex"),
+              }
+            : {}),
+        },
+      });
+    }
     return context.json({ run: result });
   });
   return routes;

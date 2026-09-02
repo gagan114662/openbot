@@ -269,6 +269,8 @@ export function createCodexWorkflowExecutor(
         `${prompt}\nReturn only JSON matching this schema: ${JSON.stringify(schema)}`,
         "--output-format",
         "json",
+        "--json-schema",
+        JSON.stringify(schema),
         "--model",
         model,
         "--permission-mode",
@@ -277,7 +279,16 @@ export function createCodexWorkflowExecutor(
       cwd,
       signal,
     );
-    const envelope = JSON.parse(response.stdout) as { result?: unknown };
+    const envelope = JSON.parse(response.stdout) as {
+      result?: unknown;
+      structured_output?: unknown;
+    };
+    if (
+      envelope.structured_output &&
+      typeof envelope.structured_output === "object" &&
+      !Array.isArray(envelope.structured_output)
+    )
+      return envelope.structured_output as Record<string, unknown>;
     const payload =
       typeof envelope.result === "string" ? envelope.result : response.stdout;
     return parseJsonPayload(payload);

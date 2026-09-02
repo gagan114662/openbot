@@ -272,6 +272,81 @@ describe("durable workflow runtime", () => {
     await worker.drain();
   });
 
+  test("a malformed reviewer reply is retried without burning the worker attempt", async () => {
+    const queued = await store.queueJob("admin", {
+      kind: "ci-repair",
+      tier: "managed",
+      objective: "keep a valid candidate while retrying its reviewer",
+      trigger: "review-schema-retry",
+      minimumQuality: 0.8,
+    });
+    const run = await runtime.create({
+      jobId: queued.job.id,
+      maximumAttempts: 1,
+      concurrencyLimit: 1,
+      stages: [
+        {
+          id: "repair",
+          objective: "produce one candidate",
+          requiredContext: [],
+          dependsOn: [],
+        },
+      ],
+    });
+    let nextSession = 0;
+    let executions = 0;
+    let reviews = 0;
+    const reviewerSessions: string[] = [];
+    const worker = createWorkflowWorker({
+      runtime,
+      workerId: "review-schema-worker",
+      sessionId: () => `schema-session-${++nextSession}`,
+      executor: {
+        async execute({ sessionId }) {
+          executions += 1;
+          const content = "candidate retained across reviewer retry";
+          return {
+            sessionId,
+            summary: content,
+            artifacts: [
+              {
+                kind: "patch",
+                uri: `artifact://${run.id}/candidate`,
+                content,
+                checksum: artifactChecksum(content),
+                revision: "deadbeef",
+                producerSessionId: sessionId,
+              },
+            ],
+          };
+        },
+        async review({ sessionId }) {
+          reviewerSessions.push(sessionId);
+          reviews += 1;
+          if (reviews === 1)
+            throw new SyntaxError("Unexpected identifier Confirmed");
+          return {
+            accepted: true,
+            summary: "structured reviewer reply",
+            checks: ["schema"],
+          };
+        },
+      },
+    });
+
+    expect(await worker.runOnce()).toMatchObject({ claimed: true, stages: 1 });
+    const finished = await runtime.snapshot(run.id);
+    expect(executions).toBe(1);
+    expect(reviewerSessions).toEqual(["schema-session-2", "schema-session-3"]);
+    expect(finished?.stages[0]).toMatchObject({
+      status: "succeeded",
+      attempts: 1,
+      sessionId: "schema-session-1",
+      reviewerSessionId: "schema-session-3",
+    });
+    expect(finished?.artifacts).toHaveLength(1);
+  });
+
   test("failed runtime checks persist evidence, skip review, and feed the bounded repair", async () => {
     const queued = await store.queueJob("admin", {
       kind: "ci-repair",

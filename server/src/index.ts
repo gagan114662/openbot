@@ -1469,6 +1469,7 @@ const app = createApp(
     webhooks: webhookReconciler,
     shadows: shadowEvaluator,
     workflows: workflowRuntime,
+    auditStore: bootAuditStore,
     provenance: { ...runtimeProvenance, workerId: workflowWorkerId },
   },
 );

@@ -82,6 +82,7 @@ import {
   contextCompactionArtifacts,
   intelligenceChannelMappings,
 } from "./db/schema";
+import { listeningHost, listeningUrl } from "./listening-address";
 import { createOnboardingStore } from "./people/onboarding";
 import { createPeopleStore } from "./people/store";
 import { useRoutineTools } from "./plugins/builtin-routines";
@@ -1549,9 +1550,11 @@ const isProxiedStream = (data: SocketData): data is StreamData =>
 const asChannelSocket = (ws: { data: SocketData }) =>
   ws as unknown as ChannelSocket;
 
+const hostname = listeningHost(process.env);
+
 const server = serve<SocketData>({
   port,
-  hostname: process.env.SERVER_HOST ?? "localhost",
+  hostname,
   async fetch(request, server) {
     const url = new URL(request.url);
     const streamBotId = streamPathBotId(url.pathname);
@@ -1682,4 +1685,4 @@ installGracefulShutdown({
   },
 });
 
-console.info(`OpenBot server listening on http://localhost:${port}`);
+console.info(`OpenBot server listening on ${listeningUrl(hostname, port)}`);

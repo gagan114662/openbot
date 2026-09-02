@@ -3,6 +3,7 @@ import type { MiddlewareHandler } from "hono";
 import { Hono } from "hono";
 import type { AppVariables } from "../auth/guards";
 import { requireAdmin } from "../auth/guards";
+import type { WebhookReconciler } from "../webhooks/reconciler";
 import type { ProductionEngineerStore } from "./store";
 
 const text = (value: unknown, maximum = 2_000) =>
@@ -18,6 +19,7 @@ export function createProductionEngineerRoutes(
     alertmanagerWebhookSecret?: string;
     githubToken?: string;
     fetch?: typeof fetch;
+    reconciler?: WebhookReconciler;
   } = {
     githubWebhookSecret: process.env.PRODUCTION_ENGINEER_GITHUB_WEBHOOK_SECRET,
     alertmanagerWebhookSecret:
@@ -57,27 +59,46 @@ export function createProductionEngineerRoutes(
       }>;
     };
     const results = [];
-    for (const alert of (payload.alerts ?? []).slice(0, 100)) {
+    for (const [index, alert] of (payload.alerts ?? [])
+      .slice(0, 100)
+      .entries()) {
       if (alert.status !== "firing") continue;
       const monitorKey = text(alert.labels?.monitor_key, 200);
       const value = Number(alert.annotations?.openbot_value);
       if (!monitorKey || !Number.isFinite(value)) continue;
-      results.push(
-        await store.triageAlert("alertmanager:webhook", {
-          monitorKey,
-          value,
-          labels: Object.fromEntries(
-            Object.entries(alert.labels ?? {})
-              .slice(0, 50)
-              .flatMap(([key, item]) =>
-                typeof item === "string" ? [[key, item]] : [],
-              ),
-          ),
-          ...(text(alert.startsAt, 100)
-            ? { firedAt: text(alert.startsAt, 100) as string }
-            : {}),
-        }),
-      );
+      const input = {
+        monitorKey,
+        value,
+        labels: Object.fromEntries(
+          Object.entries(alert.labels ?? {})
+            .slice(0, 50)
+            .flatMap(([key, item]) =>
+              typeof item === "string" ? [[key, item]] : [],
+            ),
+        ),
+        ...(text(alert.startsAt, 100)
+          ? { firedAt: text(alert.startsAt, 100) as string }
+          : {}),
+      };
+      if (options.reconciler) {
+        results.push(
+          await options.reconciler.ingest({
+            provider: "alertmanager",
+            eventId: createHmac("sha256", options.alertmanagerWebhookSecret)
+              .update(`${raw}:${index}`)
+              .digest("hex"),
+            aggregateKey: `${monitorKey}:${text(alert.startsAt, 100) ?? "firing"}:${index}`,
+            sequence: 1,
+            payload: {
+              kind: "alertmanager-firing",
+              actorId: "alertmanager:webhook",
+              input,
+            },
+          }),
+        );
+      } else {
+        results.push(await store.triageAlert("alertmanager:webhook", input));
+      }
     }
     return context.json({ accepted: results.length, results }, 202);
   });
@@ -163,22 +184,31 @@ export function createProductionEngineerRoutes(
     const intent = [text(pullRequest.title, 500), text(pullRequest.body, 1_500)]
       .filter(Boolean)
       .join("\n");
-    return context.json(
-      await store.monitorsFromMerge(
-        `github:${text(payload.sender?.login, 100) ?? "webhook"}`,
-        {
-          pullRequest:
-            text(pullRequest.html_url, 500) ??
-            `${repository}#${pullRequest.number}`,
-          intent: intent || "Merged pull request",
-          changedPaths,
-          ...(text(pullRequest.merged_at, 100)
-            ? { deployedAt: text(pullRequest.merged_at, 100) as string }
-            : {}),
-        },
-      ),
-      201,
-    );
+    const actorId = `github:${text(payload.sender?.login, 100) ?? "webhook"}`;
+    const input = {
+      pullRequest:
+        text(pullRequest.html_url, 500) ??
+        `${repository}#${pullRequest.number}`,
+      intent: intent || "Merged pull request",
+      changedPaths,
+      ...(text(pullRequest.merged_at, 100)
+        ? { deployedAt: text(pullRequest.merged_at, 100) as string }
+        : {}),
+    };
+    if (options.reconciler) {
+      const delivery = text(context.req.header("x-github-delivery"), 500);
+      if (!delivery)
+        return context.json({ error: "GitHub delivery id is required." }, 400);
+      const event = await options.reconciler.ingest({
+        provider: "github",
+        eventId: delivery,
+        aggregateKey: `${repository}#${pullRequest.number}`,
+        sequence: 1,
+        payload: { kind: "github-merge", actorId, input },
+      });
+      return context.json({ accepted: true, event }, 202);
+    }
+    return context.json(await store.monitorsFromMerge(actorId, input), 201);
   });
   routes.use("*", requireUser, async (context, next) => {
     const denied = requireAdmin(context);
@@ -330,4 +360,34 @@ export function createProductionEngineerRoutes(
     );
   });
   return routes;
+}
+
+export async function processProductionWebhook(
+  store: ProductionEngineerStore,
+  event: { payload: unknown },
+) {
+  const payload = event.payload as {
+    kind?: unknown;
+    actorId?: unknown;
+    input?: unknown;
+  };
+  if (
+    typeof payload.actorId !== "string" ||
+    !payload.input ||
+    typeof payload.input !== "object"
+  )
+    throw new Error("Reconciled production webhook payload is malformed.");
+  if (payload.kind === "alertmanager-firing")
+    return store.triageAlert(
+      payload.actorId,
+      payload.input as Parameters<ProductionEngineerStore["triageAlert"]>[1],
+    );
+  if (payload.kind === "github-merge")
+    return store.monitorsFromMerge(
+      payload.actorId,
+      payload.input as Parameters<
+        ProductionEngineerStore["monitorsFromMerge"]
+      >[1],
+    );
+  throw new Error("Reconciled production webhook kind is unsupported.");
 }

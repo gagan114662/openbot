@@ -88,6 +88,7 @@ import { redirectUriFor } from "./plugins/oauth";
 import { createPluginStore } from "./plugins/store";
 import { grantedSkills, grantedTools, REFUSAL_MARKER } from "./plugins/tools";
 import { createCodexFixDrafter } from "./production-engineer/fix-drafter";
+import { processProductionWebhook } from "./production-engineer/routes";
 import { createProductionEngineerStore } from "./production-engineer/store";
 import { createTurnRunner } from "./routines/run-turn";
 import { createRoutineRunner } from "./routines/runner";
@@ -391,6 +392,21 @@ const productionEngineerStore = createProductionEngineerStore(
   },
   { contextGraph: factoryContextGraph, tenantId: tenantPackage.tenantId },
 );
+const webhookWorkerId = `production-webhook/${process.env.HOSTNAME ?? randomUUID().slice(0, 8)}`;
+const webhookLoop = repeatAfterEach(async () => {
+  const event = await webhookReconciler.claim(webhookWorkerId);
+  if (!event) return;
+  try {
+    await processProductionWebhook(productionEngineerStore, event);
+    await webhookReconciler.complete(event.id, webhookWorkerId);
+  } catch (error) {
+    await webhookReconciler.fail(
+      event.id,
+      webhookWorkerId,
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}, 1_000);
 setRuntimeEpisodeRecorder(
   async ({ run, episode, scored, toolCalls, usage }) => {
     const forwarded = run.forwardedProps as
@@ -1212,6 +1228,7 @@ if (config.handoff.maxDepth > 0 && config.handoff.maxPerRun > 0) {
     stopping = true;
     handoffLoop?.stop();
     workflowLoop?.stop();
+    webhookLoop.stop();
     await activeSweep;
   };
 }

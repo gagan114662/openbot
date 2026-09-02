@@ -962,7 +962,14 @@ export function createApp(
   if (productionEngineerStore) {
     app.route(
       "/api/production-engineer",
-      createProductionEngineerRoutes(productionEngineerStore, requireUser),
+      createProductionEngineerRoutes(productionEngineerStore, requireUser, {
+        githubWebhookSecret:
+          process.env.PRODUCTION_ENGINEER_GITHUB_WEBHOOK_SECRET,
+        alertmanagerWebhookSecret:
+          process.env.PRODUCTION_ENGINEER_ALERTMANAGER_WEBHOOK_SECRET,
+        githubToken: process.env.GITHUB_TOKEN,
+        reconciler: softwareFactory?.webhooks,
+      }),
     );
   }
   if (softwareFactory) {

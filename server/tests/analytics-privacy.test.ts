@@ -57,8 +57,13 @@ describe("agent analytics privacy", () => {
   });
 
   test("does not corrupt UUID correlation keys while redacting phone numbers", () => {
-    const threadId = "journey-ccf97633-8f87-486b-9705-1512156cf56e";
-    expect(redactAnalyticsText(threadId)).toBe(threadId);
+    const threadIds = [
+      "journey-ccf97633-8f87-486b-9705-1512156cf56e",
+      "journey-d44ef6c0-8165-4218-ab6e-412ab53ffe4e",
+    ];
+    for (const threadId of threadIds) {
+      expect(redactAnalyticsText(threadId)).toBe(threadId);
+    }
     expect(redactAnalyticsText("call +1 (416) 555-0199")).toBe(
       "call [PHONE_REDACTED]",
     );

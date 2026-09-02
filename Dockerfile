@@ -111,6 +111,8 @@ COPY --from=deps /src/agent-computer/node_modules agent-computer/node_modules
 COPY server server
 COPY shared shared
 COPY examples examples
+COPY agent-codex/src agent-codex/src
+COPY agent-codex/package.json agent-codex/package.json
 COPY agent-computer/src agent-computer/src
 COPY agent-computer/package.json agent-computer/package.json
 
@@ -208,6 +210,7 @@ ENV EMBEDDED_POSTGRES=off
 ENV DATABASE_URL=postgres://openbot@127.0.0.1:5432/openbot
 
 ENV NODE_ENV=production
+ENV SERVER_HOST=0.0.0.0
 ENV PORT=3001
 EXPOSE 3001
 

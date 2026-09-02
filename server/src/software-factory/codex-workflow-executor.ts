@@ -189,6 +189,12 @@ export function createCodexWorkflowExecutor(
         ),
       ]);
       const content = JSON.stringify({ result, diff: diff.stdout });
+      const reviewMaterialPath = join(
+        cwd,
+        ".openbot-evidence",
+        `${sessionId}.artifact.json`,
+      );
+      await writeFile(reviewMaterialPath, content, { mode: 0o600 });
       const debt = await assessTechnicalDebt({
         cwd,
         before: [],
@@ -223,6 +229,7 @@ export function createCodexWorkflowExecutor(
                 checksum: node.checksum,
               })),
               debt,
+              reviewMaterialPath,
             },
           },
         ],
@@ -239,7 +246,17 @@ export function createCodexWorkflowExecutor(
           "Independently review this managed-agent stage from fresh context.",
           `Objective: ${stage.objective}`,
           `Candidate summary: ${candidate.summary}`,
-          `Artifacts: ${JSON.stringify(candidate.artifacts.map(({ uri, checksum, revision }) => ({ uri, checksum, revision })))}`,
+          `Artifacts: ${JSON.stringify(
+            candidate.artifacts.map(
+              ({ uri, checksum, revision, metadata }) => ({
+                uri,
+                checksum,
+                revision,
+                reviewMaterialPath: metadata?.reviewMaterialPath,
+              }),
+            ),
+          )}`,
+          "Before accepting, hash each reviewMaterialPath and require it to equal the supplied checksum. The durable workflow URI is committed only after your verdict.",
           "Inspect the actual uncommitted diff and run focused checks yourself. Reject on missing evidence, weakened tests, unverifiable behavior, or unmet objective.",
           "Return JSON with accepted, summary, and exact checks you independently ran.",
         ].join("\n"),

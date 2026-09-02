@@ -444,6 +444,11 @@ export function createCodexWorkflowExecutor(
       const model = stage.selectedModel;
       if (!model || stage.selectedHarness !== harness)
         throw new Error("Reviewer harness does not match the persisted route.");
+      const scopedDiff = await command(
+        ["git", "diff", "--binary", "--no-ext-diff"],
+        cwd,
+        signal,
+      );
       const result = await codexJson(
         cwd,
         sessionId,
@@ -452,6 +457,7 @@ export function createCodexWorkflowExecutor(
           "Independently review this managed-agent stage from fresh context.",
           `Objective: ${stage.objective}`,
           `Candidate summary: ${candidate.summary}`,
+          `Runtime-scoped candidate diff (runtime dependency/evidence paths excluded): ${scopedDiff.stdout || "empty"}`,
           `Artifacts: ${JSON.stringify(
             candidate.artifacts.map(
               ({ uri, checksum, revision, metadata }) => ({
@@ -464,7 +470,8 @@ export function createCodexWorkflowExecutor(
           )}`,
           "Before accepting, run `shasum -a 256` on each exact reviewMaterialPath and require it to equal the supplied checksum. The durable workflow URI is committed only after your verdict.",
           "Ignore the runtime-only node_modules symlink and .openbot-evidence directory when assessing the candidate diff.",
-          "Inspect the actual uncommitted diff and run focused checks yourself. Reject on missing evidence, weakened tests, unverifiable behavior, or unmet objective.",
+          "Only artifacts with kind runtime-check are authoritative executed gates. Checks named inside the model result are explicitly model-reported and must not be treated as required runtime evidence.",
+          "Inspect the supplied runtime-scoped diff and independently validate the runtime-check artifacts. Do not rerun commands that require writes from this read-only reviewer. Reject on missing evidence, weakened tests, unverifiable runtime-check artifacts, or unmet stage objective.",
           "Return JSON with accepted, summary, and exact checks you independently ran.",
         ].join("\n"),
         "read-only",

@@ -96,6 +96,9 @@ async function finish(status: number): Promise<never> {
 const proc = Bun.spawn(["bun", "run", "test"], {
   env: {
     ...process.env,
+    // The real two-process drill has its own required CI job. Running it inside Bun's broad,
+    // concurrent file registration starves process startup and tests scheduler contention instead.
+    OPENBOT_FULL_SUITE: "true",
     ...(testDatabase ? { DATABASE_URL: testDatabase.url } : {}),
   },
   stdout: "inherit",

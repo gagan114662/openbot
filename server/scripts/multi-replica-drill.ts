@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+
 const ports = (process.env.OPENBOT_REPLICA_DRILL_PORTS ?? "3101,3102")
   .split(",")
   .map((value) => Number.parseInt(value, 10));
@@ -24,12 +26,21 @@ if (!Number.isInteger(concurrency) || concurrency < 1) {
   );
 }
 const processes = ports.map((port) =>
-  Bun.spawn(["bun", "--env-file=../.env", "src/index.ts"], {
-    cwd: "server",
-    env: { ...process.env, PORT: String(port) },
-    stdout: "pipe",
-    stderr: "pipe",
-  }),
+  Bun.spawn(
+    [
+      "bun",
+      ...(existsSync(".env") || existsSync("../.env")
+        ? ["--env-file=../.env"]
+        : []),
+      "src/index.ts",
+    ],
+    {
+      cwd: "server",
+      env: { ...process.env, PORT: String(port) },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  ),
 );
 
 async function waitFor(port: number): Promise<void> {
@@ -99,5 +110,3 @@ try {
   for (const process of processes) process.kill();
   await Promise.all(processes.map((process) => process.exited));
 }
-
-export {};

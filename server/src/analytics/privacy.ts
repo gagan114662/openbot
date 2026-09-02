@@ -18,11 +18,26 @@ const REDACTORS: readonly [string, RegExp][] = [
   ["SECRET", /\b(?:sk|pk|rk|xox[abprs]|gh[opusr])[_-]?[A-Za-z0-9_-]{12,}\b/g],
 ];
 
+const UUID = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/giu;
+
 export function redactAnalyticsText(value: string): string {
-  return REDACTORS.reduce(
+  // Protect complete UUIDs before the phone/card regexes inspect their numeric
+  // runs. Looking only at a run's immediate hex boundary is insufficient: a
+  // UUID such as `...-8165-4218-ab6e-...` contains a phone-shaped substring
+  // bounded by hyphens. Corrupting it breaks session/thread joins.
+  const uuids: string[] = [];
+  const protectedValue = value.replace(UUID, (uuid) => {
+    const index = uuids.push(uuid) - 1;
+    return `[OPENBOT_CORRELATION_UUID_${index}]`;
+  });
+  const redacted = REDACTORS.reduce(
     (redacted, [label, pattern]) =>
       redacted.replace(pattern, `[${label}_REDACTED]`),
-    value,
+    protectedValue,
+  );
+  return redacted.replace(
+    /\[OPENBOT_CORRELATION_UUID_(\d+)\]/g,
+    (placeholder, index) => uuids[Number(index)] ?? placeholder,
   );
 }
 

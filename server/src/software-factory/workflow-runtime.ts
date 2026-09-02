@@ -121,7 +121,12 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
         .limit(Math.max(1, Math.min(100, limit)));
       return Promise.all(
         runs.map(async (run) => {
-          const [stages, events] = await Promise.all([
+          const [stages, artifacts, events] = await Promise.all([
+            database
+              .select()
+              .from(factoryWorkflowArtifacts)
+              .where(eq(factoryWorkflowArtifacts.runId, run.id))
+              .orderBy(asc(factoryWorkflowArtifacts.createdAt)),
             database
               .select()
               .from(factoryWorkflowStages)
@@ -133,7 +138,7 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
               .where(eq(factoryWorkflowEvents.runId, run.id))
               .orderBy(asc(factoryWorkflowEvents.createdAt)),
           ]);
-          return { run, stages, events };
+          return { run, stages, artifacts, events };
         }),
       );
     },

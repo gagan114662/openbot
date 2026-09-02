@@ -153,6 +153,18 @@ export type SoftwareFactoryDashboard = {
       sessionId: string | null;
       lastError: string | null;
     }>;
+    artifacts: Array<{
+      id: string;
+      stageId: string;
+      kind: string;
+      uri: string;
+      checksum: string;
+      revision: string;
+      producerSessionId: string;
+      command: string;
+      exitCode: number;
+      metadata: { checks?: string[]; diffBytes?: number };
+    }>;
     events: Array<{
       id: string;
       stageId: string | null;

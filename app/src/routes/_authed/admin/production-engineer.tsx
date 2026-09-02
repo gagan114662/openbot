@@ -224,143 +224,185 @@ function ProductionEngineerPage() {
           <PageEmpty>No durable workflow runs exist yet.</PageEmpty>
         ) : (
           <div className="space-y-3">
-            {factory.data?.workflows.map(({ run, stages, events }) => (
-              <div className="rounded-md border p-3" key={run.id}>
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <p className="font-medium">Run {run.id.slice(0, 8)}</p>
-                    <p className="text-muted-foreground text-sm">
-                      {run.status} ·{" "}
-                      {
-                        stages.filter((stage) => stage.status === "succeeded")
-                          .length
-                      }
-                      /{stages.length} stages · concurrency{" "}
-                      {run.concurrencyLimit} · repair cap {run.maximumAttempts}
-                    </p>
-                  </div>
-                  <div className="flex flex-wrap gap-2">
-                    {run.status === "running" || run.status === "queued" ? (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() =>
-                          workflowControl.mutate({
-                            runId: run.id,
-                            action: "pause",
-                          })
+            {factory.data?.workflows.map(
+              ({ run, stages, artifacts, events }) => (
+                <div className="rounded-md border p-3" key={run.id}>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <p className="font-medium">Run {run.id.slice(0, 8)}</p>
+                      <p className="text-muted-foreground text-sm">
+                        {run.status} ·{" "}
+                        {
+                          stages.filter((stage) => stage.status === "succeeded")
+                            .length
                         }
-                      >
-                        Pause
-                      </Button>
-                    ) : null}
-                    {run.status === "paused" || run.status === "pausing" ? (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() =>
-                          workflowControl.mutate({
-                            runId: run.id,
-                            action: "resume",
-                          })
-                        }
-                      >
-                        Resume
-                      </Button>
-                    ) : null}
-                    {run.status === "awaiting_approval" ? (
-                      <Button
-                        size="sm"
-                        onClick={() =>
-                          workflowControl.mutate({
-                            runId: run.id,
-                            action: "approve",
-                          })
-                        }
-                      >
-                        Approve
-                      </Button>
-                    ) : null}
-                    {!["succeeded", "failed", "aborted"].includes(
-                      run.status,
-                    ) ? (
-                      <Button
-                        size="sm"
-                        variant="destructive"
-                        onClick={() =>
-                          workflowControl.mutate({
-                            runId: run.id,
-                            action: "abort",
-                          })
-                        }
-                      >
-                        Abort
-                      </Button>
-                    ) : null}
-                  </div>
-                </div>
-                <details className="mt-3 text-sm">
-                  <summary className="cursor-pointer font-medium">
-                    Durable transition timeline ({events.length})
-                  </summary>
-                  <ol className="mt-2 space-y-1 border-l pl-4 text-muted-foreground">
-                    {events.map((event) => (
-                      <li key={event.id}>
-                        {event.entity}
-                        {event.stageId ? ` ${event.stageId}` : ""}:{" "}
-                        {event.fromStatus ?? "created"}
-                        {" → "}
-                        {event.toStatus} ·{" "}
-                        {new Date(event.createdAt).toLocaleString()}
-                      </li>
-                    ))}
-                  </ol>
-                </details>
-                <div className="mt-3 grid gap-2 md:grid-cols-2">
-                  {stages.map((stage) => (
-                    <div
-                      className="rounded-md bg-muted p-2 text-sm"
-                      key={stage.stageId}
-                    >
-                      <span className="font-medium">{stage.stageId}</span> ·{" "}
-                      {stage.status} · attempt {stage.attempts}/
-                      {run.maximumAttempts}
-                      <p className="text-muted-foreground">{stage.objective}</p>
+                        /{stages.length} stages · concurrency{" "}
+                        {run.concurrencyLimit} · repair cap{" "}
+                        {run.maximumAttempts}
+                      </p>
                     </div>
-                  ))}
-                </div>
-                {![
-                  "succeeded",
-                  "failed",
-                  "aborted",
-                  "awaiting_approval",
-                ].includes(run.status) ? (
-                  <div className="mt-3 flex gap-2">
-                    <Input
-                      aria-label={`Steer run ${run.id}`}
-                      value={workflowSteering}
-                      onChange={(event) =>
-                        setWorkflowSteering(event.target.value)
-                      }
-                      placeholder="Steer this run without stopping it"
-                    />
-                    <Button
-                      disabled={!workflowSteering.trim()}
-                      variant="outline"
-                      onClick={() =>
-                        workflowControl.mutate({
-                          runId: run.id,
-                          action: "steer",
-                          instruction: workflowSteering,
-                        })
-                      }
-                    >
-                      Steer
-                    </Button>
+                    <div className="flex flex-wrap gap-2">
+                      {run.status === "running" || run.status === "queued" ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() =>
+                            workflowControl.mutate({
+                              runId: run.id,
+                              action: "pause",
+                            })
+                          }
+                        >
+                          Pause
+                        </Button>
+                      ) : null}
+                      {run.status === "paused" || run.status === "pausing" ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          onClick={() =>
+                            workflowControl.mutate({
+                              runId: run.id,
+                              action: "resume",
+                            })
+                          }
+                        >
+                          Resume
+                        </Button>
+                      ) : null}
+                      {run.status === "awaiting_approval" ? (
+                        <Button
+                          size="sm"
+                          onClick={() =>
+                            workflowControl.mutate({
+                              runId: run.id,
+                              action: "approve",
+                            })
+                          }
+                        >
+                          Approve
+                        </Button>
+                      ) : null}
+                      {!["succeeded", "failed", "aborted"].includes(
+                        run.status,
+                      ) ? (
+                        <Button
+                          size="sm"
+                          variant="destructive"
+                          onClick={() =>
+                            workflowControl.mutate({
+                              runId: run.id,
+                              action: "abort",
+                            })
+                          }
+                        >
+                          Abort
+                        </Button>
+                      ) : null}
+                    </div>
                   </div>
-                ) : null}
-              </div>
-            ))}
+                  <details className="mt-3 text-sm">
+                    <summary className="cursor-pointer font-medium">
+                      Durable transition timeline ({events.length})
+                    </summary>
+                    <ol className="mt-2 space-y-1 border-l pl-4 text-muted-foreground">
+                      {events.map((event) => (
+                        <li key={event.id}>
+                          {event.entity}
+                          {event.stageId ? ` ${event.stageId}` : ""}:{" "}
+                          {event.fromStatus ?? "created"}
+                          {" → "}
+                          {event.toStatus} ·{" "}
+                          {new Date(event.createdAt).toLocaleString()}
+                        </li>
+                      ))}
+                    </ol>
+                  </details>
+                  <div className="mt-3 grid gap-2 md:grid-cols-2">
+                    {stages.map((stage) => (
+                      <div
+                        className="rounded-md bg-muted p-2 text-sm"
+                        key={stage.stageId}
+                      >
+                        <span className="font-medium">{stage.stageId}</span> ·{" "}
+                        {stage.status} · attempt {stage.attempts}/
+                        {run.maximumAttempts}
+                        <p className="text-muted-foreground">
+                          {stage.objective}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                  {artifacts.length > 0 ? (
+                    <details className="mt-3 text-sm">
+                      <summary className="cursor-pointer font-medium">
+                        Provenance-bound artifacts ({artifacts.length})
+                      </summary>
+                      <div className="mt-2 space-y-2">
+                        {artifacts.map((artifact) => (
+                          <div
+                            className="rounded-md border p-2"
+                            key={artifact.id}
+                          >
+                            <p className="font-medium">{artifact.kind}</p>
+                            <dl className="grid gap-x-2 text-xs md:grid-cols-[110px_1fr]">
+                              <dt>Revision</dt>
+                              <dd className="break-all font-mono">
+                                {artifact.revision}
+                              </dd>
+                              <dt>Checksum</dt>
+                              <dd className="break-all font-mono">
+                                {artifact.checksum}
+                              </dd>
+                              <dt>Producer</dt>
+                              <dd className="break-all font-mono">
+                                {artifact.producerSessionId}
+                              </dd>
+                              <dt>Command</dt>
+                              <dd className="font-mono">
+                                {artifact.command} (exit {artifact.exitCode})
+                              </dd>
+                              <dt>Captured diff</dt>
+                              <dd>{artifact.metadata.diffBytes ?? 0} bytes</dd>
+                            </dl>
+                          </div>
+                        ))}
+                      </div>
+                    </details>
+                  ) : null}
+                  {![
+                    "succeeded",
+                    "failed",
+                    "aborted",
+                    "awaiting_approval",
+                  ].includes(run.status) ? (
+                    <div className="mt-3 flex gap-2">
+                      <Input
+                        aria-label={`Steer run ${run.id}`}
+                        value={workflowSteering}
+                        onChange={(event) =>
+                          setWorkflowSteering(event.target.value)
+                        }
+                        placeholder="Steer this run without stopping it"
+                      />
+                      <Button
+                        disabled={!workflowSteering.trim()}
+                        variant="outline"
+                        onClick={() =>
+                          workflowControl.mutate({
+                            runId: run.id,
+                            action: "steer",
+                            instruction: workflowSteering,
+                          })
+                        }
+                      >
+                        Steer
+                      </Button>
+                    </div>
+                  ) : null}
+                </div>
+              ),
+            )}
           </div>
         )}
       </PageSection>

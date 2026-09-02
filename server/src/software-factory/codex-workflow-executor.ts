@@ -128,7 +128,9 @@ export function createCodexWorkflowExecutor(
       );
       const [revision, diff] = await Promise.all([
         command(["git", "rev-parse", "HEAD"], cwd),
-        command(["git", "diff", "--binary", "--no-ext-diff"], cwd),
+        command(["git", "add", "--intent-to-add", "--all"], cwd).then(() =>
+          command(["git", "diff", "--binary", "--no-ext-diff"], cwd),
+        ),
       ]);
       const content = JSON.stringify({ result, diff: diff.stdout });
       return {

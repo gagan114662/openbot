@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -16,7 +16,10 @@ afterAll(async () => {
 
 async function fixture(harness: "codex" | "claude") {
   const root = await mkdtemp(join(tmpdir(), `openbot-${harness}-contract-`));
-  roots.push(root);
+  const workspaceRoot = await mkdtemp(
+    join(tmpdir(), `openbot-${harness}-workspaces-`),
+  );
+  roots.push(root, workspaceRoot);
   const run = (...args: string[]) => {
     const result = Bun.spawnSync(args, {
       cwd: root,
@@ -45,24 +48,25 @@ if (${JSON.stringify(harness)} === "codex") {
   const output = args[args.indexOf("--output-last-message") + 1];
   await Bun.write(output, JSON.stringify(payload));
 } else {
-  process.stdout.write(JSON.stringify({ result: JSON.stringify(payload) }));
+  if (!args.includes("--json-schema")) process.exit(42);
+  process.stdout.write(JSON.stringify({ structured_output: payload }));
 }
 `,
     { mode: 0o700 },
   );
   await chmod(binary, 0o700);
-  return { root, binary };
+  return { root, binary, workspaceRoot };
 }
 
 describe.each(["codex", "claude"] as const)(
   "%s workflow harness",
   (harness) => {
     test("honours the persisted model and satisfies the shared executor contract", async () => {
-      const { root, binary } = await fixture(harness);
+      const { root, binary, workspaceRoot } = await fixture(harness);
       const executor =
         harness === "codex"
-          ? createCodexWorkflowExecutor(root, { binary })
-          : createClaudeWorkflowExecutor(root, { binary });
+          ? createCodexWorkflowExecutor(root, { binary, workspaceRoot })
+          : createClaudeWorkflowExecutor(root, { binary, workspaceRoot });
       const runId = crypto.randomUUID();
       const stage = {
         stageId: "verify",
@@ -120,6 +124,14 @@ describe.each(["codex", "claude"] as const)(
         signal: new AbortController().signal,
       } as never);
       expect(review).toMatchObject({ accepted: true, checks: ["contract"] });
+      const evidencePath = String(
+        candidate.artifacts[1]?.metadata?.reviewMaterialPath,
+      );
+      await executor.cleanup?.(runId);
+      await expect(
+        access(join(workspaceRoot, "worktrees", runId)),
+      ).rejects.toThrow();
+      await access(evidencePath);
       await executor.interrupt();
     });
   },

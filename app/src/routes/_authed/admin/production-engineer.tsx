@@ -131,6 +131,14 @@ function ProductionEngineerPage() {
               Worker {factory.data.provenance.workerId}
             </p>
           ) : null}
+          <p
+            className="text-muted-foreground text-sm"
+            data-testid="worktree-usage"
+          >
+            Active worktrees {factory.data?.worktrees.active ?? 0} · disk{" "}
+            {Math.ceil((factory.data?.worktrees.diskBytes ?? 0) / 1024 / 1024)}{" "}
+            MiB
+          </p>
         </div>
         <p className="mb-3 text-muted-foreground text-sm">
           Benchmark-routed managed agents use a judging orchestrator, bounded

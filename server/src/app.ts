@@ -251,6 +251,7 @@ export function createApp(
     shadows?: ShadowEvaluator;
     workflows?: WorkflowRuntime;
     auditStore?: AuditStore;
+    worktreeStats?: () => Promise<{ active: number; diskBytes: number }>;
     provenance?: {
       revision: string;
       branch: string;
@@ -997,6 +998,7 @@ export function createApp(
         softwareFactory.workflows,
         softwareFactory.provenance,
         softwareFactory.auditStore,
+        softwareFactory.worktreeStats,
       ),
     );
   }

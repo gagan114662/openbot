@@ -1470,6 +1470,7 @@ const app = createApp(
     shadows: shadowEvaluator,
     workflows: workflowRuntime,
     auditStore: bootAuditStore,
+    worktreeStats: () => workflowWorker.worktreeStats(),
     provenance: { ...runtimeProvenance, workerId: workflowWorkerId },
   },
 );

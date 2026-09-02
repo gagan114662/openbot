@@ -55,6 +55,9 @@ export type WorkflowExecutor = {
     checks: string[];
   }>;
   interrupt(): Promise<void>;
+  cleanup?(runId: string): Promise<void>;
+  sweep?(protectedRunIds: Set<string>): Promise<void>;
+  worktreeStats?(): Promise<{ active: number; diskBytes: number }>;
 };
 
 export type WorkflowHarnessExecutor = WorkflowExecutor & {
@@ -94,6 +97,7 @@ export function createWorkflowWorker(options: {
   const heartbeatMs = options.heartbeatMs ?? Math.max(250, leaseMs / 3);
   const stageTimeoutMs = options.stageTimeoutMs ?? 10 * 60_000;
   let draining = false;
+  let swept = false;
   const active = new Set<Promise<void>>();
   const controllers = new Map<string, Set<AbortController>>();
 
@@ -234,6 +238,12 @@ export function createWorkflowWorker(options: {
   return {
     async runOnce() {
       if (draining) return { claimed: false, stages: 0 };
+      if (!swept && "sweep" in options.executor && options.executor.sweep) {
+        await options.executor.sweep(
+          new Set(await options.runtime.activeRunIds()),
+        );
+        swept = true;
+      }
       const run = await options.runtime.claim(options.workerId, leaseMs);
       if (!run) return { claimed: false, stages: 0 };
       let renewing = false;
@@ -265,12 +275,28 @@ export function createWorkflowWorker(options: {
         return task;
       });
       await Promise.all(tasks).finally(() => clearInterval(heartbeat));
+      const completed = await options.runtime.snapshot(run.id);
+      if (
+        completed &&
+        ["awaiting_approval", "succeeded", "failed", "aborted"].includes(
+          completed.run.status,
+        )
+      ) {
+        if ("cleanup" in options.executor)
+          await options.executor.cleanup?.(run.id);
+      }
       return { claimed: true, stages: tasks.length, runId: run.id };
     },
     async drain() {
       draining = true;
       if ("interrupt" in options.executor) await options.executor.interrupt();
       await Promise.allSettled(active);
+    },
+    async worktreeStats() {
+      return "worktreeStats" in options.executor &&
+        options.executor.worktreeStats
+        ? options.executor.worktreeStats()
+        : { active: 0, diskBytes: 0 };
     },
   };
 }

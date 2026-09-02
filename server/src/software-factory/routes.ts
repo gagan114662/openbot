@@ -142,6 +142,7 @@ export function createSoftwareFactoryRoutes(
     workerId?: string;
   },
   auditStore?: AuditStore,
+  worktreeStats?: () => Promise<{ active: number; diskBytes: number }>,
 ) {
   const routes = new Hono<{ Variables: AppVariables }>();
   routes.use("*", requireUser, async (context, next) => {
@@ -160,6 +161,9 @@ export function createSoftwareFactoryRoutes(
       workflows: workflows ? await workflows.list() : [],
       contextCapsules: workflows ? await workflows.listContextCapsules() : [],
       provenance: provenance ?? null,
+      worktrees: worktreeStats
+        ? await worktreeStats()
+        : { active: 0, diskBytes: 0 },
     }),
   );
   routes.post("/benchmarks", async (context) => {

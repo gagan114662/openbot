@@ -3,6 +3,7 @@ import {
   mkdir,
   readdir,
   readFile,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -35,6 +36,35 @@ async function command(args: string[], cwd: string, signal?: AbortSignal) {
       `${args[0]} failed (${exitCode}): ${(stderr || stdout).slice(-4_000)}`,
     );
   return { stdout, exitCode };
+}
+
+const retentionMs = (
+  value = process.env.SOFTWARE_FACTORY_WORKTREE_RETENTION,
+) => {
+  if (!value) return 24 * 60 * 60 * 1_000;
+  const match = value.trim().match(/^(\d+)(ms|s|m|h|d)?$/);
+  if (!match) throw new Error("Invalid SOFTWARE_FACTORY_WORKTREE_RETENTION.");
+  const unit = match[2] ?? "ms";
+  const multiplier = {
+    ms: 1,
+    s: 1_000,
+    m: 60_000,
+    h: 3_600_000,
+    d: 86_400_000,
+  }[unit];
+  return Number(match[1]) * (multiplier ?? 1);
+};
+
+async function directoryBytes(directory: string): Promise<number> {
+  let total = 0;
+  for (const entry of await readdir(directory, { withFileTypes: true }).catch(
+    () => [],
+  )) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) total += await directoryBytes(path);
+    else if (entry.isFile()) total += (await stat(path)).size;
+  }
+  return total;
 }
 
 const RESULT_SCHEMA = {
@@ -107,10 +137,12 @@ export function createCodexWorkflowExecutor(
     options.workspaceRoot ??
       join(dirname(root), ".openbot-workflows", basename(root)),
   );
+  const worktreeRoot = join(workspaces, "worktrees");
+  const evidenceRoot = join(workspaces, "evidence");
 
   async function workspace(runId: string) {
-    const directory = join(workspaces, runId);
-    await mkdir(workspaces, { recursive: true });
+    const directory = join(worktreeRoot, runId);
+    await mkdir(worktreeRoot, { recursive: true });
     try {
       await readFile(join(directory, ".git"));
     } catch {
@@ -153,8 +185,24 @@ export function createCodexWorkflowExecutor(
     return directory;
   }
 
+  const durableEvidence = (runId: string) => join(evidenceRoot, runId);
+
+  async function removeWorktree(runId: string) {
+    const directory = join(worktreeRoot, runId);
+    if (!directory.startsWith(`${worktreeRoot}/`))
+      throw new Error("Refusing to remove an unresolved workflow worktree.");
+    try {
+      await access(directory);
+    } catch {
+      return;
+    }
+    await command(["git", "worktree", "remove", "--force", directory], root);
+    await command(["git", "worktree", "prune"], root);
+  }
+
   async function runCheck(
     cwd: string,
+    evidenceDirectory: string,
     check: ReturnType<typeof stageCheckSchema.parse>,
     sessionId: string,
     signal: AbortSignal,
@@ -200,7 +248,7 @@ export function createCodexWorkflowExecutor(
     };
     const content = JSON.stringify({ kind: "runtime-check", ...result });
     const material = await persistReviewMaterial(
-      cwd,
+      evidenceDirectory,
       `${sessionId}.check`,
       content,
     );
@@ -298,6 +346,7 @@ export function createCodexWorkflowExecutor(
     harness,
     async run({ runId, stage, snapshot, sessionId, signal }) {
       const cwd = await workspace(runId);
+      const evidenceDirectory = durableEvidence(runId);
       const model = stage.selectedModel;
       if (!model || stage.selectedHarness !== harness)
         throw new Error(
@@ -385,7 +434,13 @@ export function createCodexWorkflowExecutor(
         .parse((stage.checks as { items?: unknown }).items ?? []);
       const executedChecks = [];
       for (const check of checks) {
-        const executed = await runCheck(cwd, check, sessionId, signal);
+        const executed = await runCheck(
+          cwd,
+          evidenceDirectory,
+          check,
+          sessionId,
+          signal,
+        );
         executedChecks.push(executed);
         if (check.required && executed.result.exitCode !== 0) {
           const failedArtifacts = executedChecks.map(({ artifact }) => ({
@@ -402,7 +457,7 @@ export function createCodexWorkflowExecutor(
       }
       const content = JSON.stringify({ result, diff: diff.stdout });
       const reviewMaterial = await persistReviewMaterial(
-        cwd,
+        evidenceDirectory,
         sessionId,
         content,
       );
@@ -519,6 +574,23 @@ export function createCodexWorkflowExecutor(
     },
     async interrupt() {
       // Active subprocesses are bound to the worker-owned AbortSignal and receive SIGTERM there.
+    },
+    cleanup: removeWorktree,
+    async sweep(protectedRunIds) {
+      const cutoff = Date.now() - retentionMs();
+      for (const entry of await readdir(worktreeRoot, {
+        withFileTypes: true,
+      }).catch(() => [])) {
+        if (!entry.isDirectory() || protectedRunIds.has(entry.name)) continue;
+        const details = await stat(join(worktreeRoot, entry.name));
+        if (details.mtimeMs <= cutoff) await removeWorktree(entry.name);
+      }
+    },
+    async worktreeStats() {
+      const active = (
+        await readdir(worktreeRoot, { withFileTypes: true }).catch(() => [])
+      ).filter((entry) => entry.isDirectory()).length;
+      return { active, diskBytes: await directoryBytes(worktreeRoot) };
     },
   };
 }

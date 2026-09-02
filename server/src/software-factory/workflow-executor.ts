@@ -24,5 +24,21 @@ export function createRoutedWorkflowExecutor(
     async interrupt() {
       await Promise.all(executors.map((executor) => executor.interrupt()));
     },
+    async cleanup(runId) {
+      await Promise.all(executors.map((executor) => executor.cleanup?.(runId)));
+    },
+    async sweep(protectedRunIds) {
+      await Promise.all(
+        executors.map((executor) => executor.sweep?.(protectedRunIds)),
+      );
+    },
+    async worktreeStats() {
+      return (
+        (await executors[0]?.worktreeStats?.()) ?? {
+          active: 0,
+          diskBytes: 0,
+        }
+      );
+    },
   };
 }

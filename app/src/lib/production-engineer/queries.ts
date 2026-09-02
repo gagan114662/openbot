@@ -86,6 +86,7 @@ export async function fetchProductionEngineer() {
 }
 
 export type SoftwareFactoryDashboard = {
+  worktrees: { active: number; diskBytes: number };
   provenance: null | {
     revision: string;
     branch: string;

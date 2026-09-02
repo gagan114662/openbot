@@ -175,6 +175,24 @@ export function verifyWorkflowEvidence(snapshot: {
 
 export function createWorkflowRuntime(database: Database, tenantId: string) {
   return {
+    async activeRunIds() {
+      const rows = await database
+        .select({ id: factoryWorkflowRuns.id })
+        .from(factoryWorkflowRuns)
+        .where(
+          and(
+            eq(factoryWorkflowRuns.tenantId, tenantId),
+            inArray(factoryWorkflowRuns.status, [
+              "queued",
+              "running",
+              "paused",
+              "pausing",
+              "aborting",
+            ]),
+          ),
+        );
+      return rows.map((row) => row.id);
+    },
     async listContextCapsules(limit = 50) {
       return database
         .select({

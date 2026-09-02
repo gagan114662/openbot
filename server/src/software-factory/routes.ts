@@ -9,8 +9,8 @@ import {
   type ModelBenchmark,
 } from "./model-router";
 import { type ManagedJobKind, managedJobKinds } from "./orchestrator";
-import type { SoftwareFactoryStore } from "./store";
 import type { ShadowEvaluator } from "./shadow-evaluator";
+import type { SoftwareFactoryStore } from "./store";
 import type { WorkflowRuntime } from "./workflow-runtime";
 
 const record = (value: unknown): Record<string, unknown> | null =>
@@ -51,6 +51,12 @@ export function managedWorkflowStages(
       timeoutMs: 120_000,
       required: true,
     },
+    {
+      id: "repository-lint",
+      command: ["bun", "run", "lint"],
+      timeoutMs: 120_000,
+      required: true,
+    },
   ];
   const stage = (
     id: string,
@@ -77,10 +83,17 @@ export function managedWorkflowStages(
       ];
     case "ci-repair":
       return [
-        stage("diagnose", "Reproduce and diagnose the failing CI checks"),
-        stage("repair", "Implement the smallest evidence-backed repair", [
+        stage(
           "diagnose",
-        ]),
+          "Reproduce the reported CI state and diagnose any failing checks",
+          [],
+          focusedFactoryChecks,
+        ),
+        stage(
+          "repair",
+          "Implement the smallest evidence-backed repair, or preserve the clean tree when no repair is required",
+          ["diagnose"],
+        ),
         stage(
           "verify",
           "Run deterministic regression checks",
@@ -92,9 +105,12 @@ export function managedWorkflowStages(
       return [
         stage("reproduce", "Reproduce the reported behavior"),
         stage("diagnose", "Identify the causal root issue", ["reproduce"]),
-        stage("recommend", "Produce a bounded remediation with evidence", [
-          "diagnose",
-        ]),
+        stage(
+          "recommend",
+          "Produce a bounded remediation with evidence",
+          ["diagnose"],
+          focusedFactoryChecks,
+        ),
       ];
     case "visual-delivery":
       return [
@@ -103,6 +119,7 @@ export function managedWorkflowStages(
           "visual-verify",
           "Verify the rendered behavior and regression checks",
           ["implement"],
+          focusedFactoryChecks,
         ),
       ];
   }
@@ -146,9 +163,14 @@ export function createSoftwareFactoryRoutes(
     const body = record(await context.req.json().catch(() => null));
     const model = nonempty(body?.model);
     const task = nonempty(body?.task);
-    if (!model || !task)
-      return context.json({ error: "Model and task are required." }, 400);
+    const harness = nonempty(body?.harness) ?? "codex";
+    if (!model || !task || !["codex", "claude"].includes(harness))
+      return context.json(
+        { error: "Model, task, and a valid harness are required." },
+        400,
+      );
     await store.benchmark({
+      harness: harness as "codex" | "claude",
       model,
       task,
       quality: Number(body?.quality),

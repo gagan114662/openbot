@@ -12,6 +12,7 @@ import type { ManagedJobKind } from "./orchestrator";
 const benchmarkFromRow = (
   row: typeof factoryModelBenchmarks.$inferSelect,
 ): ModelBenchmark => ({
+  harness: row.harness === "claude" ? "claude" : "codex",
   model: row.model,
   task: row.task,
   quality: row.qualityBasisPoints / 10_000,
@@ -53,6 +54,7 @@ export function createSoftwareFactoryStore(
         .insert(factoryModelBenchmarks)
         .values({
           tenantId,
+          harness: input.harness ?? "codex",
           model: input.model,
           task: input.task,
           qualityBasisPoints: Math.round(input.quality * 10_000),
@@ -64,6 +66,7 @@ export function createSoftwareFactoryStore(
         .onConflictDoUpdate({
           target: [
             factoryModelBenchmarks.tenantId,
+            factoryModelBenchmarks.harness,
             factoryModelBenchmarks.model,
             factoryModelBenchmarks.task,
           ],
@@ -112,6 +115,7 @@ export function createSoftwareFactoryStore(
           objective: input.objective,
           trigger: input.trigger,
           selectedModel: decision.model,
+          selectedHarness: decision.harness,
           createdBy: actorId,
         })
         .returning();
@@ -146,6 +150,10 @@ export function createSoftwareFactoryStore(
           .where(
             and(
               eq(factoryModelBenchmarks.tenantId, tenantId),
+              eq(
+                factoryModelBenchmarks.harness,
+                job.selectedHarness ?? "codex",
+              ),
               eq(factoryModelBenchmarks.model, job.selectedModel),
               eq(factoryModelBenchmarks.task, job.kind),
             ),
@@ -168,6 +176,10 @@ export function createSoftwareFactoryStore(
           .where(
             and(
               eq(factoryModelBenchmarks.tenantId, tenantId),
+              eq(
+                factoryModelBenchmarks.harness,
+                job.selectedHarness ?? "codex",
+              ),
               eq(factoryModelBenchmarks.model, job.selectedModel),
               eq(factoryModelBenchmarks.task, job.kind),
             ),

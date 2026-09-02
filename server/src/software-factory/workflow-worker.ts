@@ -20,22 +20,54 @@ export type StageCandidate = {
   }>;
 };
 
+export class StageExecutionFailure extends Error {
+  constructor(
+    message: string,
+    readonly artifacts: StageCandidate["artifacts"] = [],
+  ) {
+    super(message);
+    this.name = "StageExecutionFailure";
+  }
+}
+
+type RunInput = {
+  runId: string;
+  stage: Stage;
+  snapshot: Snapshot;
+  sessionId: string;
+  signal: AbortSignal;
+};
+type ReviewInput = {
+  runId: string;
+  stage: Stage;
+  snapshot: Snapshot;
+  candidate: StageCandidate;
+  sessionId: string;
+  signal: AbortSignal;
+};
+
+export type WorkflowExecutor = {
+  harness: "codex" | "claude" | "routed";
+  run(input: RunInput): Promise<StageCandidate>;
+  review(input: ReviewInput): Promise<{
+    accepted: boolean;
+    summary: string;
+    checks: string[];
+  }>;
+  interrupt(): Promise<void>;
+};
+
+export type WorkflowHarnessExecutor = WorkflowExecutor & {
+  harness: "codex" | "claude";
+};
+
 export type WorkflowStageExecutor = {
-  execute(input: {
-    runId: string;
-    stage: Stage;
-    snapshot: Snapshot;
-    sessionId: string;
-    signal: AbortSignal;
-  }): Promise<StageCandidate>;
-  review(input: {
-    runId: string;
-    stage: Stage;
-    snapshot: Snapshot;
-    candidate: StageCandidate;
-    sessionId: string;
-    signal: AbortSignal;
-  }): Promise<{ accepted: boolean; summary: string; checks: string[] }>;
+  execute(input: RunInput): Promise<StageCandidate>;
+  review(input: ReviewInput): Promise<{
+    accepted: boolean;
+    summary: string;
+    checks: string[];
+  }>;
 };
 
 /**
@@ -45,7 +77,7 @@ export type WorkflowStageExecutor = {
  */
 export function createWorkflowWorker(options: {
   runtime: WorkflowRuntime;
-  executor: WorkflowStageExecutor;
+  executor: WorkflowExecutor | WorkflowStageExecutor;
   workerId: string;
   sessionId?: () => string;
   leaseMs?: number;
@@ -109,7 +141,11 @@ export function createWorkflowWorker(options: {
       const snapshot = await options.runtime.snapshot(runId);
       if (!snapshot)
         throw new Error("Workflow disappeared after its stage was claimed.");
-      const candidate = await options.executor.execute({
+      const execute =
+        "run" in options.executor
+          ? options.executor.run.bind(options.executor)
+          : options.executor.execute.bind(options.executor);
+      const candidate = await execute({
         runId,
         stage: started,
         snapshot,
@@ -162,6 +198,12 @@ export function createWorkflowWorker(options: {
           stage.stageId,
           workerSessionId,
           message,
+          error instanceof StageExecutionFailure
+            ? error.artifacts.map((artifact) => ({
+                ...artifact,
+                metadata: artifact.metadata ?? {},
+              }))
+            : [],
         );
         if (failure?.terminal)
           await options.onTerminalFailure?.({ runId, error: message });
@@ -212,6 +254,7 @@ export function createWorkflowWorker(options: {
     },
     async drain() {
       draining = true;
+      if ("interrupt" in options.executor) await options.executor.interrupt();
       await Promise.allSettled(active);
     },
   };

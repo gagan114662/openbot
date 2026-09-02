@@ -96,6 +96,7 @@ export type SoftwareFactoryDashboard = {
   managedJobKinds: string[];
   contextGraph: { nodes: number; edges: number; sourceSystems: number };
   benchmarks: Array<{
+    harness: "codex" | "claude";
     model: string;
     task: string;
     quality: number;
@@ -111,6 +112,7 @@ export type SoftwareFactoryDashboard = {
     objective: string;
     status: string;
     selectedModel: string | null;
+    selectedHarness: string | null;
     costMicros: number;
   }>;
   webhooks: null | {
@@ -172,6 +174,8 @@ export type SoftwareFactoryDashboard = {
       attempts: number;
       sessionId: string | null;
       reviewerSessionId: string | null;
+      selectedModel: string | null;
+      selectedHarness: string | null;
       verification: null | {
         accepted?: boolean;
         summary?: string;
@@ -196,6 +200,8 @@ export type SoftwareFactoryDashboard = {
         durationMs?: number;
         required?: boolean;
         evidenceSource?: string;
+        harness?: string;
+        model?: string;
         trustedContext?: Array<{
           key: string;
           sourceSystem: string;

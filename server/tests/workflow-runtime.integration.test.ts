@@ -13,7 +13,10 @@ import {
   artifactChecksum,
   createWorkflowRuntime,
 } from "../src/software-factory/workflow-runtime";
-import { createWorkflowWorker } from "../src/software-factory/workflow-worker";
+import {
+  createWorkflowWorker,
+  StageExecutionFailure,
+} from "../src/software-factory/workflow-worker";
 import { TEST_POOL } from "./support/database";
 
 const database = createDatabase(
@@ -266,6 +269,120 @@ describe("durable workflow runtime", () => {
       reviewerSessionId: "session-4",
     });
     expect(finished?.artifacts[0]?.content).toBe("candidate two");
+    await worker.drain();
+  });
+
+  test("failed runtime checks persist evidence, skip review, and feed the bounded repair", async () => {
+    const queued = await store.queueJob("admin", {
+      kind: "ci-repair",
+      tier: "managed",
+      objective: "repair a runtime check failure",
+      trigger: "runtime-check-proof",
+      minimumQuality: 0.8,
+    });
+    const run = await runtime.create({
+      jobId: queued.job.id,
+      maximumAttempts: 2,
+      concurrencyLimit: 1,
+      stages: [
+        {
+          id: "checked",
+          objective: "pass the declared command",
+          requiredContext: [],
+          dependsOn: [],
+          checks: [
+            {
+              id: "focused",
+              command: ["bun", "test", "focused.test.ts"],
+              timeoutMs: 30_000,
+              required: true,
+            },
+          ],
+        },
+      ],
+    });
+    let executions = 0;
+    let reviews = 0;
+    const worker = createWorkflowWorker({
+      runtime,
+      workerId: "runtime-check-worker",
+      sessionId: () => `check-session-${++executions}`,
+      executor: {
+        async execute({ sessionId, stage, snapshot }) {
+          if (stage.attempts === 1) {
+            expect(snapshot.artifacts).toHaveLength(0);
+            const content = JSON.stringify({
+              exitCode: 1,
+              stderr: "expected 1, received 2",
+            });
+            throw new StageExecutionFailure("required check failed", [
+              {
+                kind: "runtime-check",
+                uri: `workflow-check://${sessionId}/focused`,
+                content,
+                checksum: artifactChecksum(content),
+                revision: "deadbeef",
+                producerSessionId: sessionId,
+                command: "bun test focused.test.ts",
+                exitCode: 1,
+                metadata: {
+                  evidenceSource: "runtime-executed",
+                  attemptStatus: "failed",
+                },
+              },
+            ]);
+          }
+          expect(stage.lastError).toContain("required check failed");
+          expect(snapshot.artifacts[0]).toMatchObject({
+            kind: "runtime-check",
+            exitCode: 1,
+          });
+          const content = "repair passed";
+          return {
+            sessionId,
+            summary: content,
+            artifacts: [
+              {
+                kind: "runtime-check",
+                uri: `workflow-check://${sessionId}/focused`,
+                content,
+                checksum: artifactChecksum(content),
+                revision: "deadbeef",
+                producerSessionId: sessionId,
+                command: "bun test focused.test.ts",
+                exitCode: 0,
+                metadata: { evidenceSource: "runtime-executed" },
+              },
+            ],
+          };
+        },
+        async review() {
+          reviews += 1;
+          return {
+            accepted: true,
+            summary: "runtime evidence accepted",
+            checks: ["runtime-check checksum"],
+          };
+        },
+      },
+    });
+
+    await worker.runOnce();
+    expect(reviews).toBe(0);
+    expect((await runtime.snapshot(run.id))?.artifacts[0]).toMatchObject({
+      kind: "runtime-check",
+      exitCode: 1,
+    });
+    await worker.runOnce();
+    expect(reviews).toBe(1);
+    const snapshot = await runtime.snapshot(run.id);
+    expect(snapshot?.run.status).toBe("awaiting_approval");
+    expect(snapshot?.artifacts).toHaveLength(2);
+    expect(snapshot?.evidence.checks).toMatchObject({
+      artifactChecksums: true,
+      producerBound: true,
+      commandsSucceeded: true,
+    });
     await worker.drain();
   });
 

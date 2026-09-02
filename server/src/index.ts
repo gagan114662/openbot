@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import {
   CopilotKitIntelligence,
   IntelligenceAgentRunner,
@@ -97,17 +98,21 @@ import { createRoutineStore } from "./routines/store";
 import { createIntentRouter } from "./routing/classify";
 import { chatCompletionsUrl, createModelCompleter } from "./routing/model";
 import { installGracefulShutdown } from "./shutdown";
+import {
+  createClaudeWorkflowExecutor,
+  createCodexWorkflowExecutor,
+} from "./software-factory/codex-workflow-executor";
 import { createContextGraph } from "./software-factory/context-graph";
-import { createCodexWorkflowExecutor } from "./software-factory/codex-workflow-executor";
-import { createSoftwareFactoryStore } from "./software-factory/store";
-import { createShadowEvaluator } from "./software-factory/shadow-evaluator";
 import {
   createInferenceShadowRecorder,
   invokeCodexSubscriptionShadow,
 } from "./software-factory/inference-shadow";
+import { createShadowEvaluator } from "./software-factory/shadow-evaluator";
+import { createSoftwareFactoryStore } from "./software-factory/store";
+import { createVerifiedValueStore } from "./software-factory/verified-value";
+import { createRoutedWorkflowExecutor } from "./software-factory/workflow-executor";
 import { createWorkflowRuntime } from "./software-factory/workflow-runtime";
 import { createWorkflowWorker } from "./software-factory/workflow-worker";
-import { createVerifiedValueStore } from "./software-factory/verified-value";
 import {
   createPackageStatusReader,
   loadTenantPackage,
@@ -398,16 +403,22 @@ if (shadowModel) {
 }
 const workflowRuntime = createWorkflowRuntime(database, tenantPackage.tenantId);
 const workflowWorkerId = processOwner("software-factory");
+const softwareFactoryRepository =
+  process.env.SOFTWARE_FACTORY_REPOSITORY ??
+  fileURLToPath(new URL("../..", import.meta.url));
 const workflowWorker = createWorkflowWorker({
   runtime: workflowRuntime,
   workerId: workflowWorkerId,
-  executor: createCodexWorkflowExecutor(
-    process.env.SOFTWARE_FACTORY_REPOSITORY ?? process.cwd(),
-    {
+  executor: createRoutedWorkflowExecutor([
+    createCodexWorkflowExecutor(softwareFactoryRepository, {
       groundContext: (keys) =>
         factoryContextGraph.ground(tenantPackage.tenantId, keys),
-    },
-  ),
+    }),
+    createClaudeWorkflowExecutor(softwareFactoryRepository, {
+      groundContext: (keys) =>
+        factoryContextGraph.ground(tenantPackage.tenantId, keys),
+    }),
+  ]),
   onTerminalFailure: async ({ runId, error }) => {
     const run = (await workflowRuntime.snapshot(runId))?.run;
     if (!run) return;

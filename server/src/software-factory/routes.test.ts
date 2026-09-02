@@ -20,5 +20,27 @@ describe("managed workflow plans", () => {
         index === 0 ? [] : [stages[index - 1]!.id],
       );
     }
+    const terminal = stages.at(-1)!;
+    if (
+      kind === "ci-repair" ||
+      kind === "bug-triage" ||
+      kind === "visual-delivery"
+    ) {
+      expect(terminal.checks.map((check) => check.id)).toEqual([
+        "diff-integrity",
+        "factory-focused-tests",
+        "server-typecheck",
+        "repository-lint",
+      ]);
+      expect(terminal.checks.every((check) => check.required)).toBe(true);
+    }
+    if (kind === "ci-repair") {
+      expect(stages[0]?.checks.map((check) => check.id)).toEqual([
+        "diff-integrity",
+        "factory-focused-tests",
+        "server-typecheck",
+        "repository-lint",
+      ]);
+    }
   });
 });

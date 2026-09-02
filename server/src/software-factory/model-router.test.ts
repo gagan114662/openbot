@@ -32,7 +32,21 @@ describe("benchmark-driven model routing", () => {
       ],
     });
     expect(decision.model).toBe("worker-small");
+    expect(decision.harness).toBe("codex");
     expect(decision.expectedCostPerOutcomeMicros).toBe(100);
+  });
+
+  test("routes a benchmarked model and harness as one measured configuration", () => {
+    const decision = chooseModel({
+      task: "ci-repair",
+      tier: "managed",
+      minimumQuality: 0.8,
+      candidates: [
+        model({ harness: "codex", model: "gpt", totalCostMicros: 1_800 }),
+        model({ harness: "claude", model: "sonnet", totalCostMicros: 900 }),
+      ],
+    });
+    expect(decision).toMatchObject({ harness: "claude", model: "sonnet" });
   });
 
   test("removes a model dominated on both quality and outcome cost", () => {

@@ -112,6 +112,20 @@ export type SoftwareFactoryDashboard = {
       lastError: string | null;
     }>;
   };
+  shadowTraffic: null | {
+    completed: number;
+    averageAgreement: number;
+    averageLatencyMs: number;
+    recent: Array<{
+      id: string;
+      requestKey: string;
+      primaryModel: string;
+      shadowModel: string;
+      agreementBasisPoints: number;
+      shadowLatencyMs: number;
+      createdAt: string;
+    }>;
+  };
 };
 
 export async function fetchSoftwareFactory() {

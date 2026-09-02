@@ -10,6 +10,7 @@ import {
 } from "./model-router";
 import { type ManagedJobKind, managedJobKinds } from "./orchestrator";
 import type { SoftwareFactoryStore } from "./store";
+import type { ShadowEvaluator } from "./shadow-evaluator";
 
 const record = (value: unknown): Record<string, unknown> | null =>
   value && typeof value === "object" && !Array.isArray(value)
@@ -24,6 +25,7 @@ export function createSoftwareFactoryRoutes(
   tenantId: string,
   requireUser: MiddlewareHandler<{ Variables: AppVariables }>,
   webhooks?: WebhookReconciler,
+  shadows?: ShadowEvaluator,
 ) {
   const routes = new Hono<{ Variables: AppVariables }>();
   routes.use("*", requireUser, async (context, next) => {
@@ -38,6 +40,7 @@ export function createSoftwareFactoryRoutes(
       executionTiers,
       managedJobKinds,
       webhooks: webhooks ? await webhooks.dashboard() : null,
+      shadowTraffic: shadows ? await shadows.dashboard() : null,
     }),
   );
   routes.post("/benchmarks", async (context) => {
@@ -157,6 +160,42 @@ export function createSoftwareFactoryRoutes(
     if (!webhooks) return context.notFound();
     return context.json(
       await webhooks.replayDead(context.req.param("eventId")),
+    );
+  });
+  routes.post("/shadow/evaluations", async (context) => {
+    if (!shadows) return context.notFound();
+    const body = record(await context.req.json().catch(() => null));
+    const requestKey = nonempty(body?.requestKey);
+    const primaryModel = nonempty(body?.primaryModel);
+    const shadowModel = nonempty(body?.shadowModel);
+    const primaryOutput = nonempty(body?.primaryOutput);
+    const shadowOutput = nonempty(body?.shadowOutput);
+    if (
+      !requestKey ||
+      !primaryModel ||
+      !shadowModel ||
+      !primaryOutput ||
+      !shadowOutput
+    )
+      return context.json(
+        { error: "A request key, both models, and both outputs are required." },
+        400,
+      );
+    if (
+      !shadows.shouldEvaluate(requestKey, Number(body?.rateBasisPoints ?? 500))
+    )
+      return context.json({ sampled: false, primaryUnaffected: true });
+    const evaluation = await shadows.record({
+      requestKey,
+      primaryModel,
+      shadowModel,
+      primaryOutput,
+      shadowOutput,
+      shadowLatencyMs: Number(body?.shadowLatencyMs ?? 0),
+    });
+    return context.json(
+      { sampled: true, primaryUnaffected: true, evaluation },
+      201,
     );
   });
   return routes;

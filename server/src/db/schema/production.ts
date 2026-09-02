@@ -203,3 +203,32 @@ export const reconciledWebhookEvents = pgTable(
     ),
   ],
 );
+
+export const shadowEvaluations = pgTable(
+  "shadow_evaluations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: text("tenant_id").notNull(),
+    requestKey: text("request_key").notNull(),
+    primaryModel: text("primary_model").notNull(),
+    shadowModel: text("shadow_model").notNull(),
+    primaryOutputHash: text("primary_output_hash").notNull(),
+    shadowOutputHash: text("shadow_output_hash").notNull(),
+    agreementBasisPoints: integer("agreement_basis_points").notNull(),
+    shadowLatencyMs: integer("shadow_latency_ms").notNull(),
+    status: text("status").notNull().default("completed"),
+    error: text("error"),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("shadow_evaluations_request_uidx").on(
+      table.tenantId,
+      table.requestKey,
+      table.shadowModel,
+    ),
+    index("shadow_evaluations_tenant_created_idx").on(
+      table.tenantId,
+      table.createdAt,
+    ),
+  ],
+);

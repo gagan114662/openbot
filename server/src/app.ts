@@ -52,6 +52,7 @@ import type { ProductionEngineerStore } from "./production-engineer/store";
 import type { ContextGraph } from "./software-factory/context-graph";
 import { createSoftwareFactoryRoutes } from "./software-factory/routes";
 import type { SoftwareFactoryStore } from "./software-factory/store";
+import type { ShadowEvaluator } from "./software-factory/shadow-evaluator";
 import type { WebhookReconciler } from "./webhooks/reconciler";
 
 export type AgentCallbackToolResolver = (input: {
@@ -76,9 +77,7 @@ async function recordPersonEvent(
   auditStore: AuditStore | undefined,
   context: { var: AppVariables },
   eventType:
-    | "person.role_changed"
-    | "person.access_revoked"
-    | "person.access_restored",
+    "person.role_changed" | "person.access_revoked" | "person.access_restored",
   person: { id: string; email: string },
   payload: Record<string, unknown>,
 ) {
@@ -246,6 +245,7 @@ export function createApp(
     contextGraph: ContextGraph;
     tenantId: string;
     webhooks?: WebhookReconciler;
+    shadows?: ShadowEvaluator;
   },
 ) {
   const app = new Hono<{ Variables: AppVariables }>();
@@ -379,8 +379,7 @@ export function createApp(
     }
 
     const body = (await context.req.json().catch(() => undefined)) as
-      | { step?: unknown; completed?: unknown }
-      | undefined;
+      { step?: unknown; completed?: unknown } | undefined;
 
     if (body?.completed === true) {
       await onboardingStore.complete(context.var.actor.id);
@@ -973,6 +972,7 @@ export function createApp(
         softwareFactory.tenantId,
         requireUser,
         softwareFactory.webhooks,
+        softwareFactory.shadows,
       ),
     );
   }

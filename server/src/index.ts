@@ -95,6 +95,7 @@ import { createModelCompleter } from "./routing/model";
 import { installGracefulShutdown } from "./shutdown";
 import { createContextGraph } from "./software-factory/context-graph";
 import { createSoftwareFactoryStore } from "./software-factory/store";
+import { createShadowEvaluator } from "./software-factory/shadow-evaluator";
 import {
   createPackageStatusReader,
   loadTenantPackage,
@@ -301,6 +302,7 @@ const softwareFactoryStore = createSoftwareFactoryStore(
   database,
   tenantPackage.tenantId,
 );
+const shadowEvaluator = createShadowEvaluator(database, tenantPackage.tenantId);
 const webhookReconciler = createWebhookReconciler(database, {
   tenantId: tenantPackage.tenantId,
 });
@@ -357,8 +359,7 @@ const productionEngineerStore = createProductionEngineerStore(
 setRuntimeEpisodeRecorder(
   async ({ run, episode, scored, toolCalls, usage }) => {
     const forwarded = run.forwardedProps as
-      | { openbotRun?: unknown; openbotBotId?: unknown }
-      | undefined;
+      { openbotRun?: unknown; openbotBotId?: unknown } | undefined;
     const signed = readRunAssertion(
       forwarded?.openbotRun,
       config.keyEncryptionKey,
@@ -1303,6 +1304,7 @@ const app = createApp(
     contextGraph: factoryContextGraph,
     tenantId: tenantPackage.tenantId,
     webhooks: webhookReconciler,
+    shadows: shadowEvaluator,
   },
 );
 

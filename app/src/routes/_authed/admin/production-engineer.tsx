@@ -131,6 +131,14 @@ function ProductionEngineerPage() {
                 : "Unavailable"
             }
           />
+          <FactoryCard
+            label="Shadow traffic"
+            value={
+              factory.data?.shadowTraffic
+                ? `${factory.data.shadowTraffic.completed} comparisons · ${(factory.data.shadowTraffic.averageAgreement / 100).toFixed(1)}% agreement · ${factory.data.shadowTraffic.averageLatencyMs} ms`
+                : "Unavailable"
+            }
+          />
         </div>
       </PageSection>
       <PageSection title="Monitors">

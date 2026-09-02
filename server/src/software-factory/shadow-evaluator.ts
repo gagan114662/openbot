@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { desc, eq, sql } from "drizzle-orm";
 import type { Database } from "../db/client";
 import { shadowEvaluations } from "../db/schema";
 
@@ -60,6 +60,35 @@ export function createShadowEvaluator(database: Database, tenantId: string) {
             input.shadowOutput,
           ),
           shadowLatencyMs: Math.max(0, Math.round(input.shadowLatencyMs)),
+          evaluatorVersion: "token-jaccard/v1",
+        })
+        .onConflictDoNothing()
+        .returning();
+      return row ?? null;
+    },
+
+    async recordFailure(input: {
+      requestKey: string;
+      primaryModel: string;
+      shadowModel: string;
+      primaryOutput: string;
+      shadowLatencyMs: number;
+      error: string;
+    }) {
+      const [row] = await database
+        .insert(shadowEvaluations)
+        .values({
+          tenantId,
+          requestKey: input.requestKey,
+          primaryModel: input.primaryModel,
+          shadowModel: input.shadowModel,
+          primaryOutputHash: digest(input.primaryOutput),
+          shadowOutputHash: digest(""),
+          agreementBasisPoints: 0,
+          shadowLatencyMs: Math.max(0, Math.round(input.shadowLatencyMs)),
+          evaluatorVersion: "token-jaccard/v1",
+          status: "failed",
+          error: input.error.slice(0, 2_000),
         })
         .onConflictDoNothing()
         .returning();
@@ -69,21 +98,17 @@ export function createShadowEvaluator(database: Database, tenantId: string) {
     async dashboard() {
       const [summary] = await database
         .select({
-          completed: sql<number>`count(*)::int`,
-          averageAgreement: sql<number>`coalesce(round(avg(${shadowEvaluations.agreementBasisPoints})), 0)::int`,
-          averageLatencyMs: sql<number>`coalesce(round(avg(${shadowEvaluations.shadowLatencyMs})), 0)::int`,
+          completed: sql<number>`count(*) filter (where ${shadowEvaluations.status} = 'completed')::int`,
+          failed: sql<number>`count(*) filter (where ${shadowEvaluations.status} = 'failed')::int`,
+          averageAgreement: sql<number>`coalesce(round(avg(${shadowEvaluations.agreementBasisPoints}) filter (where ${shadowEvaluations.status} = 'completed')), 0)::int`,
+          averageLatencyMs: sql<number>`coalesce(round(avg(${shadowEvaluations.shadowLatencyMs}) filter (where ${shadowEvaluations.status} = 'completed')), 0)::int`,
         })
         .from(shadowEvaluations)
         .where(eq(shadowEvaluations.tenantId, tenantId));
       const recent = await database
         .select()
         .from(shadowEvaluations)
-        .where(
-          and(
-            eq(shadowEvaluations.tenantId, tenantId),
-            eq(shadowEvaluations.status, "completed"),
-          ),
-        )
+        .where(eq(shadowEvaluations.tenantId, tenantId))
         .orderBy(desc(shadowEvaluations.createdAt))
         .limit(20);
       return { ...summary, recent };

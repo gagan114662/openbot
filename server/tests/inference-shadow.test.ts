@@ -22,6 +22,9 @@ describe("real inference shadow path", () => {
           records.push(input);
           return null;
         },
+        async recordFailure() {
+          return null;
+        },
       },
       primaryModel: "primary-live",
       shadowModel: "shadow-candidate",
@@ -85,6 +88,9 @@ describe("real inference shadow path", () => {
           records.push(input);
           return null;
         },
+        async recordFailure() {
+          return null;
+        },
       },
       primaryModel: "primary-live",
       shadowModel: "gpt-5.6-luna",
@@ -146,5 +152,48 @@ describe("real inference shadow path", () => {
     ]);
     await Bun.sleep(0);
     setInferenceShadowRecorder(undefined);
+  });
+
+  test("persists a failed shadow attempt with primary lineage", async () => {
+    const failures: unknown[] = [];
+    const recorder = createInferenceShadowRecorder({
+      evaluator: {
+        shouldEvaluate: () => true,
+        async record() {
+          throw new Error("successful record must not run");
+        },
+        async recordFailure(input) {
+          failures.push(input);
+          return null;
+        },
+      },
+      primaryModel: "primary-live",
+      shadowModel: "gpt-5.6-luna",
+      rateBasisPoints: 10_000,
+      async invokeShadow() {
+        throw new Error("shadow deadline exceeded");
+      },
+    });
+    await expect(
+      recorder({
+        run: {
+          runId: "failed-shadow-run",
+          threadId: "thread-1",
+          messages: [],
+          state: {},
+          tools: [],
+          context: [],
+          forwardedProps: {},
+        } as RunAgentInput,
+        primaryOutput: "primary still completed",
+      }),
+    ).rejects.toThrow("shadow deadline exceeded");
+    expect(failures).toEqual([
+      expect.objectContaining({
+        requestKey: "failed-shadow-run",
+        primaryOutput: "primary still completed",
+        error: "shadow deadline exceeded",
+      }),
+    ]);
   });
 });

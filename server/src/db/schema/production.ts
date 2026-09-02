@@ -217,6 +217,9 @@ export const shadowEvaluations = pgTable(
     shadowOutputHash: text("shadow_output_hash").notNull(),
     agreementBasisPoints: integer("agreement_basis_points").notNull(),
     shadowLatencyMs: integer("shadow_latency_ms").notNull(),
+    evaluatorVersion: text("evaluator_version")
+      .notNull()
+      .default("token-jaccard/v1"),
     status: text("status").notNull().default("completed"),
     error: text("error"),
     createdAt: createdAt(),

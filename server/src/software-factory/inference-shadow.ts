@@ -1,7 +1,7 @@
-import type { RunAgentInput } from "@ag-ui/client";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { RunAgentInput } from "@ag-ui/client";
 import { spawn } from "bun";
 import type { ShadowEvaluator } from "./shadow-evaluator";
 
@@ -60,7 +60,10 @@ export async function invokeCodexSubscriptionShadow(
 }
 
 export function createInferenceShadowRecorder(options: {
-  evaluator: Pick<ShadowEvaluator, "shouldEvaluate" | "record">;
+  evaluator: Pick<
+    ShadowEvaluator,
+    "shouldEvaluate" | "record" | "recordFailure"
+  >;
   primaryModel: string;
   shadowModel: string;
   rateBasisPoints: number;
@@ -89,31 +92,43 @@ export function createInferenceShadowRecorder(options: {
     const signal = AbortSignal.timeout(options.timeoutMs ?? 60_000);
     const started = performance.now();
     let shadowOutput: string;
-    if (options.invokeShadow) {
-      shadowOutput = await options.invokeShadow(messages, signal);
-    } else {
-      const key = await options.resolveApiKey?.();
-      if (!key) throw new Error("Shadow inference has no model credential.");
-      if (!options.endpoint)
-        throw new Error("Shadow inference has no model endpoint.");
-      const response = await (options.fetch ?? fetch)(options.endpoint, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${key}`,
-        },
-        body: JSON.stringify({ model: options.shadowModel, messages }),
-        signal,
+    try {
+      if (options.invokeShadow) {
+        shadowOutput = await options.invokeShadow(messages, signal);
+      } else {
+        const key = await options.resolveApiKey?.();
+        if (!key) throw new Error("Shadow inference has no model credential.");
+        if (!options.endpoint)
+          throw new Error("Shadow inference has no model endpoint.");
+        const response = await (options.fetch ?? fetch)(options.endpoint, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            authorization: `Bearer ${key}`,
+          },
+          body: JSON.stringify({ model: options.shadowModel, messages }),
+          signal,
+        });
+        if (!response.ok)
+          throw new Error(`Shadow model answered ${response.status}.`);
+        const body = (await response.json()) as {
+          choices?: Array<{ message?: { content?: unknown } }>;
+        };
+        const content = body.choices?.[0]?.message?.content;
+        if (typeof content !== "string")
+          throw new Error("Shadow model returned no text.");
+        shadowOutput = content;
+      }
+    } catch (error) {
+      await options.evaluator.recordFailure({
+        requestKey: input.run.runId,
+        primaryModel: options.primaryModel,
+        shadowModel: options.shadowModel,
+        primaryOutput: input.primaryOutput,
+        shadowLatencyMs: performance.now() - started,
+        error: error instanceof Error ? error.message : String(error),
       });
-      if (!response.ok)
-        throw new Error(`Shadow model answered ${response.status}.`);
-      const body = (await response.json()) as {
-        choices?: Array<{ message?: { content?: unknown } }>;
-      };
-      const content = body.choices?.[0]?.message?.content;
-      if (typeof content !== "string")
-        throw new Error("Shadow model returned no text.");
-      shadowOutput = content;
+      throw error;
     }
     await options.evaluator.record({
       requestKey: input.run.runId,

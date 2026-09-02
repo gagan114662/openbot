@@ -119,6 +119,7 @@ export type SoftwareFactoryDashboard = {
   };
   shadowTraffic: null | {
     completed: number;
+    failed: number;
     averageAgreement: number;
     averageLatencyMs: number;
     recent: Array<{
@@ -128,6 +129,11 @@ export type SoftwareFactoryDashboard = {
       shadowModel: string;
       agreementBasisPoints: number;
       shadowLatencyMs: number;
+      primaryOutputHash: string;
+      shadowOutputHash: string;
+      evaluatorVersion: string;
+      status: string;
+      error: string | null;
       createdAt: string;
     }>;
   };

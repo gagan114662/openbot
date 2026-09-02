@@ -295,6 +295,13 @@
       "when": 1788369270626,
       "tag": "0041_ordinary_dazzler",
       "breakpoints": true
+    },
+    {
+      "idx": 42,
+      "version": "7",
+      "when": 1788373008704,
+      "tag": "0042_keen_warbound",
+      "breakpoints": true
     }
   ]
 }

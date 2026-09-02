@@ -173,6 +173,55 @@ function ProductionEngineerPage() {
           />
         </div>
       </PageSection>
+      <PageSection title="Shadow execution evidence">
+        <p className="mb-3 text-muted-foreground text-sm">
+          Asynchronous comparisons are linked to the real primary run. Output is
+          represented by SHA-256 hashes; evaluator failures remain visible and
+          cannot replace or delay the primary response.
+        </p>
+        {(factory.data?.shadowTraffic?.recent.length ?? 0) === 0 ? (
+          <PageEmpty>No primary request has been shadowed yet.</PageEmpty>
+        ) : (
+          <div className="space-y-2">
+            {factory.data?.shadowTraffic?.recent.map((comparison) => (
+              <div
+                className="rounded-md border p-3 text-sm"
+                key={comparison.id}
+              >
+                <div className="flex flex-wrap justify-between gap-2">
+                  <span className="font-medium">
+                    {comparison.status} · {comparison.primaryModel} →{" "}
+                    {comparison.shadowModel}
+                  </span>
+                  <span>{comparison.shadowLatencyMs} ms</span>
+                </div>
+                <dl className="mt-2 grid gap-x-2 text-xs md:grid-cols-[120px_1fr]">
+                  <dt>Primary run</dt>
+                  <dd className="break-all font-mono">
+                    {comparison.requestKey}
+                  </dd>
+                  <dt>Primary SHA-256</dt>
+                  <dd className="break-all font-mono">
+                    {comparison.primaryOutputHash}
+                  </dd>
+                  <dt>Shadow SHA-256</dt>
+                  <dd className="break-all font-mono">
+                    {comparison.shadowOutputHash}
+                  </dd>
+                  <dt>Evaluator</dt>
+                  <dd>{comparison.evaluatorVersion}</dd>
+                  {comparison.error ? (
+                    <>
+                      <dt>Failure</dt>
+                      <dd className="text-destructive">{comparison.error}</dd>
+                    </>
+                  ) : null}
+                </dl>
+              </div>
+            ))}
+          </div>
+        )}
+      </PageSection>
       <PageSection title="Launch a managed workflow">
         <p className="mb-3 text-muted-foreground text-sm">
           This creates a durable production run. A separate Codex worker

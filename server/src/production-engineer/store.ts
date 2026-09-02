@@ -269,6 +269,23 @@ export function createProductionEngineerStore(
         issues,
         investigations,
         fixAutomationEnabled: Boolean(fixDrafter),
+        runtimeBudgets: {
+          evaluatorConcurrency: Math.max(
+            1,
+            Math.floor(Number(process.env.EVALUATOR_CONCURRENCY ?? 4)),
+          ),
+          evaluatorInflight: evaluatorRuntimeMetrics().inflight,
+          shadowConcurrency: Math.max(
+            1,
+            Math.floor(Number(process.env.SHADOW_CONCURRENCY ?? 2)),
+          ),
+          shadowQueueCapacity: Math.max(
+            0,
+            Math.floor(Number(process.env.SHADOW_QUEUE_CAPACITY ?? 32)),
+          ),
+          shadowInflight: inferenceShadowMetrics().inflight,
+          shadowDropped: inferenceShadowMetrics().dropped,
+        },
         factory: {
           executionTiers,
           managedJobKinds,

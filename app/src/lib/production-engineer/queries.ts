@@ -34,6 +34,14 @@ export function fixAutomationMessage(enabled: boolean): string {
 
 export type ProductionEngineerDashboard = {
   fixAutomationEnabled: boolean;
+  runtimeBudgets: {
+    evaluatorConcurrency: number;
+    evaluatorInflight: number;
+    shadowConcurrency: number;
+    shadowQueueCapacity: number;
+    shadowInflight: number;
+    shadowDropped: number;
+  };
   factory: {
     executionTiers: Array<"chat" | "assisted" | "managed" | "autonomous">;
     managedJobKinds: Array<

@@ -178,6 +178,22 @@ function ProductionEngineerPage() {
                 : "Unavailable"
             }
           />
+          <FactoryCard
+            label="Evaluator budget"
+            value={
+              dashboard.data?.runtimeBudgets
+                ? `${dashboard.data.runtimeBudgets.evaluatorInflight}/${dashboard.data.runtimeBudgets.evaluatorConcurrency} in flight`
+                : "Loading…"
+            }
+          />
+          <FactoryCard
+            label="Shadow process budget"
+            value={
+              dashboard.data?.runtimeBudgets
+                ? `${dashboard.data.runtimeBudgets.shadowInflight}/${dashboard.data.runtimeBudgets.shadowConcurrency} in flight · queue ${dashboard.data.runtimeBudgets.shadowQueueCapacity} · ${dashboard.data.runtimeBudgets.shadowDropped} dropped`
+                : "Loading…"
+            }
+          />
         </div>
       </PageSection>
       <PageSection title="Shadow execution evidence">

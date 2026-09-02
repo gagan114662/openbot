@@ -31,6 +31,11 @@ async function command(args: string[], cwd: string) {
  */
 export function createCodexFixDrafter(repository: string): FixDrafter {
   return async (input) => {
+    const baseBranch = await command(
+      ["git", "branch", "--show-current"],
+      repository,
+    );
+    if (!baseBranch) throw new Error("Autonomous fixes require a named base branch.");
     const branch = `openbot/production-${input.issueId.slice(0, 8)}-${randomUUID().slice(0, 8)}`;
     const worktree = await mkdtemp(join(tmpdir(), "openbot-production-fix-"));
     await command(
@@ -67,6 +72,8 @@ export function createCodexFixDrafter(repository: string): FixDrafter {
           "create",
           "--head",
           branch,
+          "--base",
+          baseBranch,
           "--title",
           `fix: ${input.title}`,
           "--body",

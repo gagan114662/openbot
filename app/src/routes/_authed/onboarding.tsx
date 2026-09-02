@@ -63,40 +63,11 @@ function ComputerUseStep() {
   );
 }
 
-/** What a roster card needs — placeholders carry these three fields and nothing more. */
-type RosterCard = Pick<AgentProfile, "id" | "name" | "avatarSeed">;
-
-/**
- * Stand-ins for a deployment that has fewer than three public agents to show. Invented names on
- * purpose: they illustrate what a roster looks like without claiming any of these exist here.
- */
-const AGENTS_PLACEHOLDER: RosterCard[] = [
-  {
-    id: "placeholder-research",
-    name: "Research Analyst",
-    avatarSeed: "research-analyst",
-  },
-  { id: "placeholder-data", name: "Data Analyst", avatarSeed: "data-analyst" },
-  {
-    id: "placeholder-support",
-    name: "Support Agent",
-    avatarSeed: "support-agent",
-  },
-];
-
 function RosterStep() {
   const { data: agents } = useQuery(agentListQueryOptions());
   const explore =
     agents?.filter((a) => !a.mine && a.visibility === "public") ?? [];
-  // Always three cards: real public agents first, placeholders topping up a sparse deployment.
-  // slice past the end is just [], so a roster of three or more takes no placeholders at all.
-  const roster: Array<RosterCard & { example?: boolean }> = [
-    ...explore.slice(0, 3),
-    ...AGENTS_PLACEHOLDER.slice(explore.length).map((placeholder) => ({
-      ...placeholder,
-      example: true,
-    })),
-  ];
+  const roster: AgentProfile[] = explore.slice(0, 3);
 
   return (
     <div className="w-full flex flex-col items-center justify-center">
@@ -109,17 +80,14 @@ function RosterStep() {
           return (
             <div
               key={a.id}
-              // Dimmed and labelled, so an invented name never reads as a Bot this deployment has.
-              className={`bg-card p-4 rounded-lg flex flex-row gap-4 items-center ${a.example ? "opacity-70" : ""}`}
+              className="bg-card p-4 rounded-lg flex flex-row gap-4 items-center"
             >
               <Avatar name={a.avatarSeed} size={40} />
               <div className="flex min-w-0 flex-col">
                 <h3 className="line-clamp-1 text-base font-medium tracking-tight">
                   {a.name}
                 </h3>
-                {a.example ? (
-                  <span className="text-xs text-muted-foreground">Example</span>
-                ) : null}
+                <span className="text-xs text-muted-foreground">Available now</span>
               </div>
             </div>
           );

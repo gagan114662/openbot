@@ -50,6 +50,8 @@ COMPUTER_TOKEN="$(setting COMPUTER_TOKEN openbot-dev-computer-token)"
 # persisted for AGENT_TOOL_TOKEN (see the SECRETS_ROTATED block) but not for this one — production
 # must set a real WORKER_SHARED_SECRET.
 WORKER_SHARED_SECRET="$(setting WORKER_SHARED_SECRET openbot-dev-worker-secret)"
+PRODUCTION_ENGINEER_ALERTMANAGER_WEBHOOK_SECRET="$(setting PRODUCTION_ENGINEER_ALERTMANAGER_WEBHOOK_SECRET openbot-dev-alertmanager-secret)"
+export PRODUCTION_ENGINEER_ALERTMANAGER_WEBHOOK_SECRET
 
 # The secret the server sends to a managed Bot, generated and written back on first run.
 #

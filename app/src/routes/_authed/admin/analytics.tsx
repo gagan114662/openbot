@@ -277,7 +277,7 @@ export function AgentAnalyticsPage() {
               value={(totals?.totalTokens ?? 0).toLocaleString()}
             />
             <Metric
-              label="Spend"
+              label="Allocated cost"
               loading={overview.isPending}
               value={`$${((totals?.costMicros ?? 0) / 1_000_000).toFixed(2)}`}
             />
@@ -299,7 +299,7 @@ export function AgentAnalyticsPage() {
                   <th className="px-4 py-2">Sessions</th>
                   <th className="px-4 py-2">Active latency</th>
                   <th className="px-4 py-2">Failure</th>
-                  <th className="px-4 py-2">Spend</th>
+                  <th className="px-4 py-2">Allocated cost</th>
                 </tr>
               </thead>
               <tbody>
@@ -572,7 +572,7 @@ export function AgentAnalyticsPage() {
         <div className="grid gap-4 lg:grid-cols-2">
           <AnalyticsTable
             empty="No tool calls have been metered yet."
-            headers={["Bot", "Tool", "Calls", "Cost"]}
+            headers={["Bot", "Tool", "Calls", "Allocated cost"]}
             loading={governance.isPending}
             rows={(governance.data?.toolUsage ?? []).map((item) => [
               item.agentId ?? "Unknown",
@@ -750,7 +750,7 @@ export function AgentAnalyticsPage() {
                   <th className="px-4 py-2">Tool proof</th>
                   <th className="px-4 py-2">Human gate</th>
                   <th className="px-4 py-2">Privacy</th>
-                  <th className="px-4 py-2">Cost</th>
+                  <th className="px-4 py-2">Allocated cost</th>
                   <th className="px-4 py-2">Review</th>
                 </tr>
               </thead>

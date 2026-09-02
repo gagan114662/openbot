@@ -117,6 +117,28 @@ export type AnalyticsQuery = {
 
 export type AnalyticsStore = ReturnType<typeof createAnalyticsStore>;
 
+/**
+ * Allocate model usage to an internal chargeback rate when the provider cannot report a bill.
+ * Rates are USD per million tokens; the result uses the existing millionths-of-a-dollar column.
+ * An explicit provider-reported cost always wins, so chargeback can never overwrite real spend.
+ */
+export function analyticsCostMicros(
+  usage: { inputTokens?: number; outputTokens?: number; costMicros?: number },
+  environment: NodeJS.ProcessEnv = process.env,
+) {
+  if (usage.costMicros !== undefined) return Math.max(0, usage.costMicros);
+  const rate = (name: string) => {
+    const parsed = Number(environment[name] ?? 0);
+    return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+  };
+  return Math.round(
+    Math.max(0, usage.inputTokens ?? 0) *
+      rate("ANALYTICS_CHARGEBACK_INPUT_USD_PER_MILLION_TOKENS") +
+      Math.max(0, usage.outputTokens ?? 0) *
+        rate("ANALYTICS_CHARGEBACK_OUTPUT_USD_PER_MILLION_TOKENS"),
+  );
+}
+
 function date(value: string | undefined): Date | undefined {
   if (!value) return undefined;
   const parsed = new Date(value);
@@ -328,6 +350,7 @@ export function createAnalyticsStore(database: Database) {
               model: input.usage.model,
               inputTokens: input.usage.inputTokens,
               outputTokens: input.usage.outputTokens,
+              costMicros: analyticsCostMicros(input.usage),
               success: input.episode.terminatedBecause === "success",
               properties: { totalTokens: input.usage.totalTokens },
               occurredAt,
@@ -623,6 +646,7 @@ export function createAnalyticsStore(database: Database) {
         let acceptedEvents = 0;
         const acceptedEventValues: typeof events = [];
         for (const event of events) {
+          const costMicros = analyticsCostMicros(event);
           const inserted = await tx
             .insert(analyticsEvents)
             .values({
@@ -640,7 +664,7 @@ export function createAnalyticsStore(database: Database) {
               latencyMs: event.latencyMs,
               inputTokens: event.inputTokens,
               outputTokens: event.outputTokens,
-              costMicros: event.costMicros,
+              costMicros,
               success: event.success,
               errorType: event.errorType?.slice(0, 200),
               properties: redactAnalyticsProperties(event.properties),
@@ -649,11 +673,13 @@ export function createAnalyticsStore(database: Database) {
             .onConflictDoNothing()
             .returning({ id: analyticsEvents.id });
           acceptedEvents += inserted.length;
-          if (inserted.length) acceptedEventValues.push(event);
+          if (inserted.length)
+            acceptedEventValues.push({ ...event, costMicros });
         }
 
         let acceptedSpans = 0;
         for (const span of spans) {
+          const costMicros = analyticsCostMicros(span);
           const inserted = await tx
             .insert(analyticsSpans)
             .values({
@@ -671,7 +697,7 @@ export function createAnalyticsStore(database: Database) {
               latencyMs: span.latencyMs,
               inputTokens: span.inputTokens,
               outputTokens: span.outputTokens,
-              costMicros: span.costMicros,
+              costMicros,
               attributes: redactAnalyticsProperties(span.attributes),
               startedAt: date(span.startedAt) ?? now,
               endedAt: date(span.endedAt),

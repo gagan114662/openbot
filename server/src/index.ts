@@ -1336,6 +1336,7 @@ const asChannelSocket = (ws: { data: SocketData }) =>
 
 const server = serve<SocketData>({
   port,
+  hostname: process.env.SERVER_HOST ?? "localhost",
   async fetch(request, server) {
     const url = new URL(request.url);
     const streamBotId = streamPathBotId(url.pathname);

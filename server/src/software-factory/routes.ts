@@ -85,13 +85,15 @@ export function managedWorkflowStages(
       return [
         stage(
           "diagnose",
-          "Reproduce and diagnose the failing CI checks",
+          "Reproduce the reported CI state and diagnose any failing checks",
           [],
           focusedFactoryChecks,
         ),
-        stage("repair", "Implement the smallest evidence-backed repair", [
-          "diagnose",
-        ]),
+        stage(
+          "repair",
+          "Implement the smallest evidence-backed repair, or preserve the clean tree when no repair is required",
+          ["diagnose"],
+        ),
         stage(
           "verify",
           "Run deterministic regression checks",

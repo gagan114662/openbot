@@ -1,4 +1,11 @@
-import { access, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  readFile,
+  readdir,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { spawn } from "bun";
 import {
@@ -118,6 +125,22 @@ export function createCodexWorkflowExecutor(
       } catch {
         // A dependency-free repository remains valid. Declared checks will fail with their real
         // command output if dependencies are required but unavailable.
+      }
+    }
+    for (const entry of await readdir(root, { withFileTypes: true })) {
+      if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+      const source = join(root, entry.name, "node_modules");
+      const destination = join(directory, entry.name, "node_modules");
+      try {
+        await access(source);
+        await access(destination);
+      } catch {
+        try {
+          await access(source);
+          await symlink(source, destination, "dir");
+        } catch {
+          // This repository child has no installed workspace dependency tree.
+        }
       }
     }
     return directory;
@@ -316,7 +339,10 @@ export function createCodexWorkflowExecutor(
       );
       const [revision, diff] = await Promise.all([
         command(["git", "rev-parse", "HEAD"], cwd),
-        command(["git", "reset", "--mixed", "HEAD", "--", "node_modules"], cwd)
+        command(
+          ["git", "reset", "--mixed", "HEAD", "--", ":(glob)**/node_modules"],
+          cwd,
+        )
           .then(() =>
             command(
               [
@@ -327,7 +353,7 @@ export function createCodexWorkflowExecutor(
                 "--",
                 ".",
                 ":(exclude).openbot-evidence/**",
-                ":(exclude)node_modules",
+                ":(exclude,glob)**/node_modules",
               ],
               cwd,
             ),

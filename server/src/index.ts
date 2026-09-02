@@ -65,6 +65,7 @@ import {
   type IdentifyUser,
   mountCopilotRuntime,
   resolveRuntimeAgents,
+  setContextCapsuleRecorder,
   setRuntimeEpisodeRecorder,
   type ToolSelection,
 } from "./copilot";
@@ -76,6 +77,7 @@ import {
 import { createDatabase } from "./db/client";
 import {
   agentToolAssertionUses,
+  contextCompactionArtifacts,
   intelligenceChannelMappings,
 } from "./db/schema";
 import { createOnboardingStore } from "./people/onboarding";
@@ -300,6 +302,18 @@ const retentionSweeps = startRetentionSweeps(
   pageFrameStore,
 );
 const analyticsStore = createAnalyticsStore(database);
+setContextCapsuleRecorder(async ({ runId, threadId, checksum, messages }) => {
+  await database
+    .insert(contextCompactionArtifacts)
+    .values({
+      tenantId: tenantPackage.tenantId,
+      runId,
+      threadId,
+      checksum,
+      content: { version: 1, messages },
+    })
+    .onConflictDoNothing();
+});
 const factoryContextGraph = createContextGraph(database);
 const softwareFactoryStore = createSoftwareFactoryStore(
   database,

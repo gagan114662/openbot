@@ -3,6 +3,7 @@ import { and, asc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Database } from "../db/client";
 import {
+  contextCompactionArtifacts,
   factoryWorkflowArtifacts,
   factoryWorkflowRuns,
   factoryWorkflowStages,
@@ -82,6 +83,34 @@ export const artifactChecksum = (content: string | Uint8Array) =>
 
 export function createWorkflowRuntime(database: Database, tenantId: string) {
   return {
+    async listContextCapsules(limit = 50) {
+      return database
+        .select({
+          id: contextCompactionArtifacts.id,
+          runId: contextCompactionArtifacts.runId,
+          threadId: contextCompactionArtifacts.threadId,
+          checksum: contextCompactionArtifacts.checksum,
+          createdAt: contextCompactionArtifacts.createdAt,
+        })
+        .from(contextCompactionArtifacts)
+        .where(eq(contextCompactionArtifacts.tenantId, tenantId))
+        .orderBy(asc(contextCompactionArtifacts.createdAt))
+        .limit(Math.max(1, Math.min(100, limit)));
+    },
+
+    async contextCapsule(id: string) {
+      const [artifact] = await database
+        .select()
+        .from(contextCompactionArtifacts)
+        .where(
+          and(
+            eq(contextCompactionArtifacts.id, id),
+            eq(contextCompactionArtifacts.tenantId, tenantId),
+          ),
+        );
+      return artifact ?? null;
+    },
+
     async list(limit = 50) {
       const runs = await database
         .select()

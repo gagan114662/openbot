@@ -328,3 +328,28 @@ export const factoryWorkflowArtifacts = pgTable(
     ),
   ],
 );
+
+export const contextCompactionArtifacts = pgTable(
+  "context_compaction_artifacts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: text("tenant_id").notNull(),
+    runId: text("run_id").notNull(),
+    threadId: text("thread_id").notNull(),
+    checksum: text("checksum").notNull(),
+    content: jsonb("content").notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("context_compaction_artifact_run_checksum_uidx").on(
+      table.tenantId,
+      table.runId,
+      table.checksum,
+    ),
+    index("context_compaction_artifact_thread_idx").on(
+      table.tenantId,
+      table.threadId,
+      table.createdAt,
+    ),
+  ],
+);

@@ -149,6 +149,13 @@ export type SoftwareFactoryDashboard = {
       lastError: string | null;
     }>;
   }>;
+  contextCapsules: Array<{
+    id: string;
+    runId: string;
+    threadId: string;
+    checksum: string;
+    createdAt: string;
+  }>;
 };
 
 export async function fetchSoftwareFactory() {

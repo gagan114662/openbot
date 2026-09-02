@@ -278,6 +278,32 @@ function ProductionEngineerPage() {
           </div>
         )}
       </PageSection>
+
+      <PageSection title="Retrievable context capsules">
+        {(factory.data?.contextCapsules.length ?? 0) === 0 ? (
+          <p className="text-sm text-muted-foreground">
+            No long run has compacted context yet. Compacted messages are stored
+            verbatim before they leave the active model window.
+          </p>
+        ) : (
+          <div className="grid gap-2">
+            {factory.data?.contextCapsules.map((capsule) => (
+              <a
+                className="rounded-md border p-3 text-sm hover:bg-muted/50"
+                href={`/api/software-factory/context-capsules/${encodeURIComponent(capsule.id)}`}
+                key={capsule.id}
+                rel="noreferrer"
+                target="_blank"
+              >
+                <span className="font-medium">{capsule.threadId}</span>
+                <span className="ml-2 font-mono text-xs text-muted-foreground">
+                  {capsule.checksum.slice(0, 16)}…
+                </span>
+              </a>
+            ))}
+          </div>
+        )}
+      </PageSection>
       <PageSection title="Monitors">
         {(dashboard.data?.monitors.length ?? 0) === 0 ? (
           <PageEmpty>No merged-change monitors exist yet.</PageEmpty>

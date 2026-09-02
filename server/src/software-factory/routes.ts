@@ -44,6 +44,7 @@ export function createSoftwareFactoryRoutes(
       webhooks: webhooks ? await webhooks.dashboard() : null,
       shadowTraffic: shadows ? await shadows.dashboard() : null,
       workflows: workflows ? await workflows.list() : [],
+      contextCapsules: workflows ? await workflows.listContextCapsules() : [],
     }),
   );
   routes.post("/benchmarks", async (context) => {
@@ -233,6 +234,11 @@ export function createSoftwareFactoryRoutes(
     if (!workflows) return context.notFound();
     const snapshot = await workflows.snapshot(context.req.param("runId"));
     return snapshot ? context.json(snapshot) : context.notFound();
+  });
+  routes.get("/context-capsules/:id", async (context) => {
+    if (!workflows) return context.notFound();
+    const artifact = await workflows.contextCapsule(context.req.param("id"));
+    return artifact ? context.json(artifact) : context.notFound();
   });
   routes.post("/workflows/:runId/:action", async (context) => {
     if (!workflows) return context.notFound();

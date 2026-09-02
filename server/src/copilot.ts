@@ -96,9 +96,7 @@ type RegisteredUnavailableAgent = {
 };
 
 export type RegisteredAgent =
-  | RegisteredBuiltInAgent
-  | RegisteredRemoteAgent
-  | RegisteredUnavailableAgent;
+  RegisteredBuiltInAgent | RegisteredRemoteAgent | RegisteredUnavailableAgent;
 
 type AgentRunInput = Parameters<AbstractAgent["run"]>[0];
 type AgentMessage = AgentRunInput["messages"][number];
@@ -490,14 +488,29 @@ export type RuntimeEpisodeRecord = {
 };
 
 let persistRuntimeEpisode:
-  | ((record: RuntimeEpisodeRecord) => Promise<void>)
-  | undefined;
+  ((record: RuntimeEpisodeRecord) => Promise<void>) | undefined;
 
 /** Install the deployment-owned durable sink once at boot. Tests and embedded runtimes may omit it. */
 export function setRuntimeEpisodeRecorder(
   recorder: ((record: RuntimeEpisodeRecord) => Promise<void>) | undefined,
 ) {
   persistRuntimeEpisode = recorder;
+}
+
+let persistContextCapsule:
+  | ((input: {
+      runId: string;
+      threadId: string;
+      checksum: string;
+      messages: unknown[];
+    }) => Promise<void>)
+  | undefined;
+
+/** Install the durable store that makes compacted verbatim history retrievable by checksum. */
+export function setContextCapsuleRecorder(
+  recorder: typeof persistContextCapsule,
+) {
+  persistContextCapsule = recorder;
 }
 
 function recordRuntimeEpisode(
@@ -541,8 +554,7 @@ function recordRuntimeEpisode(
   const finished = [...events]
     .reverse()
     .find((event) => event.type === "RUN_FINISHED") as
-    | (BaseEvent & { result?: { openbotAnalytics?: unknown } })
-    | undefined;
+    (BaseEvent & { result?: { openbotAnalytics?: unknown } }) | undefined;
   const rawUsage = finished?.result?.openbotAnalytics;
   const usage =
     rawUsage && typeof rawUsage === "object" && !Array.isArray(rawUsage)
@@ -580,9 +592,19 @@ function endedWithRunError(events: readonly BaseEvent[]): boolean {
   return events.some((event) => event.type === "RUN_ERROR");
 }
 
-function compactRun(input: RunAgentInput) {
+async function compactRun(input: RunAgentInput) {
   const compacted = compactMessages(input.messages);
   if (compacted.compacted) {
+    if (!persistContextCapsule)
+      throw new Error(
+        "Context compaction requires a durable verbatim capsule recorder.",
+      );
+    await persistContextCapsule({
+      runId: input.runId,
+      threadId: input.threadId,
+      checksum: compacted.capsuleChecksum,
+      messages: compacted.omittedArtifact,
+    });
     console.info(
       JSON.stringify({
         type: "context-compacted",
@@ -625,19 +647,20 @@ export function runWithContextCompaction(
   input: RunAgentInput,
   runAttempt: (input: RunAgentInput) => Observable<BaseEvent>,
 ): Observable<BaseEvent> {
-  return defer(() => {
-    const prepared = compactRun(input);
-    const observed: BaseEvent[] = [];
-    return runAttempt(prepared.input).pipe(
-      tap((event) => observed.push(event)),
-      map((event) =>
-        exposeCompactionEvent(event, prepared.compacted.omittedMessages),
-      ),
-      tap({
-        complete: () => recordRuntimeEpisode(prepared.input, observed, false),
-      }),
-    );
-  });
+  return defer(() => compactRun(input)).pipe(
+    switchMap((prepared) => {
+      const observed: BaseEvent[] = [];
+      return runAttempt(prepared.input).pipe(
+        tap((event) => observed.push(event)),
+        map((event) =>
+          exposeCompactionEvent(event, prepared.compacted.omittedMessages),
+        ),
+        tap({
+          complete: () => recordRuntimeEpisode(prepared.input, observed, false),
+        }),
+      );
+    }),
+  );
 }
 
 async function eventsFromObservable(
@@ -711,7 +734,7 @@ function runEvidenceAttempts(
 ): Observable<BaseEvent> {
   return defer(async () => {
     try {
-      const prepared = compactRun(input);
+      const prepared = await compactRun(input);
       const { compacted } = prepared;
       const runInput = prepared.input;
       const exposeCompaction = (events: BaseEvent[]): BaseEvent[] => {

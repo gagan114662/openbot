@@ -18,6 +18,7 @@ import {
   runWithAgentDeadline,
   runWithContextCompaction,
   runWithEvidenceRequirement,
+  setContextCapsuleRecorder,
   standingRoleMessage,
 } from "../src/copilot";
 import { grantedToolGuidance } from "../src/plugins/tools";
@@ -101,6 +102,10 @@ describe("retrieved-evidence enforcement", () => {
   });
 
   test("publishes compaction metadata on the finished event for the UI", async () => {
+    const capsules: unknown[] = [];
+    setContextCapsuleRecorder(async (capsule) => {
+      capsules.push(capsule);
+    });
     const agent = new ScriptedEvidenceAgent([
       answerEvents("Still responsive."),
     ]);
@@ -120,6 +125,12 @@ describe("retrieved-evidence enforcement", () => {
 
     expect(finished).toMatchObject({
       result: { openbotContextCompaction: { omittedMessages: 2 } },
+    });
+    expect(capsules).toHaveLength(1);
+    expect(capsules[0]).toMatchObject({
+      runId: "run-evidence",
+      threadId: "thread-evidence",
+      messages: input.messages.slice(0, 2),
     });
   });
 

@@ -388,6 +388,10 @@ const workflowWorker = createWorkflowWorker({
   workerId: `software-factory/${process.env.HOSTNAME ?? randomUUID().slice(0, 8)}`,
   executor: createCodexWorkflowExecutor(
     process.env.SOFTWARE_FACTORY_REPOSITORY ?? process.cwd(),
+    {
+      groundContext: (keys) =>
+        factoryContextGraph.ground(tenantPackage.tenantId, keys),
+    },
   ),
   onTerminalFailure: async ({ runId, error }) => {
     const run = (await workflowRuntime.snapshot(runId))?.run;

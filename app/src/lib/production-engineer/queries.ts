@@ -138,6 +138,11 @@ export type SoftwareFactoryDashboard = {
     }>;
   };
   workflows: Array<{
+    evidence: {
+      terminal: boolean;
+      verified: boolean;
+      checks: Record<string, boolean>;
+    };
     run: {
       id: string;
       jobId: string;
@@ -175,7 +180,23 @@ export type SoftwareFactoryDashboard = {
       producerSessionId: string;
       command: string;
       exitCode: number;
-      metadata: null | { checks?: string[]; diffBytes?: number };
+      metadata: null | {
+        checks?: string[];
+        diffBytes?: number;
+        trustedContext?: Array<{
+          key: string;
+          sourceSystem: string;
+          sourceUrl: string | null;
+          refreshedAt: string;
+          checksum: string;
+        }>;
+        debt?: {
+          metrics: Record<string, number>;
+          budget: Record<string, number>;
+          changedPaths: string[];
+          violations: string[];
+        };
+      };
     }>;
     events: Array<{
       id: string;
@@ -206,6 +227,7 @@ export async function createManagedJob(input: {
   objective: string;
   maximumAttempts: number;
   concurrencyLimit: number;
+  requiredContext: string[];
 }) {
   const response = await client("/api/software-factory/jobs", {
     method: "POST",

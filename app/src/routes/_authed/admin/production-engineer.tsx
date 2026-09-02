@@ -35,6 +35,7 @@ function ProductionEngineerPage() {
   const [investigationApproved, setInvestigationApproved] = useState(false);
   const [workflowSteering, setWorkflowSteering] = useState("");
   const [jobObjective, setJobObjective] = useState("");
+  const [jobContextKeys, setJobContextKeys] = useState("");
   const [jobKind, setJobKind] = useState<
     "pull-request-review" | "ci-repair" | "bug-triage" | "visual-delivery"
   >("pull-request-review");
@@ -62,6 +63,7 @@ function ProductionEngineerPage() {
     mutationFn: createManagedJob,
     onSuccess: () => {
       setJobObjective("");
+      setJobContextKeys("");
       return queryClient.invalidateQueries({ queryKey: ["software-factory"] });
     },
   });
@@ -248,7 +250,15 @@ function ProductionEngineerPage() {
             value={jobObjective}
             onChange={(event) => setJobObjective(event.target.value)}
           />
+          <Input
+            aria-label="Trusted context keys"
+            className="md:col-start-2"
+            placeholder="Trusted context keys (comma-separated, optional)"
+            value={jobContextKeys}
+            onChange={(event) => setJobContextKeys(event.target.value)}
+          />
           <Button
+            className="md:col-start-3 md:row-start-1"
             disabled={!jobObjective.trim() || createJob.isPending}
             onClick={() =>
               createJob.mutate({
@@ -256,6 +266,10 @@ function ProductionEngineerPage() {
                 objective: jobObjective,
                 maximumAttempts: 3,
                 concurrencyLimit: 1,
+                requiredContext: jobContextKeys
+                  .split(",")
+                  .map((key) => key.trim())
+                  .filter(Boolean),
               })
             }
           >
@@ -274,7 +288,7 @@ function ProductionEngineerPage() {
         ) : (
           <div className="space-y-3">
             {factory.data?.workflows.map(
-              ({ run, stages, artifacts, events }) => (
+              ({ run, stages, artifacts, events, evidence }) => (
                 <div className="rounded-md border p-3" key={run.id}>
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <div>
@@ -349,6 +363,38 @@ function ProductionEngineerPage() {
                         </Button>
                       ) : null}
                     </div>
+                  </div>
+                  <div
+                    className="mt-3 rounded-md border p-2 text-sm"
+                    data-testid={`workflow-evidence-${run.id}`}
+                  >
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-medium">
+                        Causal evidence integrity:{" "}
+                        {evidence.verified
+                          ? "VERIFIED"
+                          : evidence.terminal
+                            ? "FAILED"
+                            : "PENDING"}
+                      </span>
+                      <a
+                        className="underline"
+                        href={`/api/software-factory/workflows/${encodeURIComponent(run.id)}/evidence`}
+                        rel="noreferrer"
+                        target="_blank"
+                      >
+                        Inspect raw proof bundle
+                      </a>
+                    </div>
+                    <ul className="mt-1 grid gap-x-3 text-xs md:grid-cols-2">
+                      {Object.entries(evidence.checks).map(
+                        ([check, passed]) => (
+                          <li key={check}>
+                            {passed ? "✓" : "✗"} {check}
+                          </li>
+                        ),
+                      )}
+                    </ul>
                   </div>
                   <details className="mt-3 text-sm">
                     <summary className="cursor-pointer font-medium">
@@ -427,7 +473,35 @@ function ProductionEngineerPage() {
                               </dd>
                               <dt>Captured diff</dt>
                               <dd>{artifact.metadata?.diffBytes ?? 0} bytes</dd>
+                              <dt>Debt gate</dt>
+                              <dd>
+                                {artifact.metadata?.debt
+                                  ? `${artifact.metadata.debt.violations.length === 0 ? "passed" : "rejected"} · ${artifact.metadata.debt.changedPaths.length} changed paths`
+                                  : "legacy artifact"}
+                              </dd>
                             </dl>
+                            {(artifact.metadata?.trustedContext?.length ?? 0) >
+                            0 ? (
+                              <details className="mt-2 text-xs">
+                                <summary className="cursor-pointer">
+                                  Trusted context lineage (
+                                  {artifact.metadata?.trustedContext?.length})
+                                </summary>
+                                <ul className="mt-1 space-y-1">
+                                  {artifact.metadata?.trustedContext?.map(
+                                    (node) => (
+                                      <li
+                                        className="break-all font-mono"
+                                        key={`${artifact.id}-${node.key}`}
+                                      >
+                                        {node.key} · {node.sourceSystem} ·{" "}
+                                        {node.checksum}
+                                      </li>
+                                    ),
+                                  )}
+                                </ul>
+                              </details>
+                            ) : null}
                           </div>
                         ))}
                       </div>

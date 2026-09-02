@@ -20,6 +20,56 @@ const record = (value: unknown): Record<string, unknown> | null =>
 const nonempty = (value: unknown) =>
   typeof value === "string" && value.trim() ? value.trim() : null;
 
+export function managedWorkflowStages(
+  kind: ManagedJobKind,
+  objective: string,
+  requiredContext: string[],
+) {
+  const stage = (id: string, purpose: string, dependsOn: string[] = []) => ({
+    id,
+    objective: `${purpose}. Overall objective: ${objective}`,
+    requiredContext,
+    dependsOn,
+  });
+  switch (kind) {
+    case "pull-request-review":
+      return [
+        stage(
+          "inspect",
+          "Inspect the change and establish revision-bound evidence",
+        ),
+        stage("review", "Independently review correctness and risk", [
+          "inspect",
+        ]),
+      ];
+    case "ci-repair":
+      return [
+        stage("diagnose", "Reproduce and diagnose the failing CI checks"),
+        stage("repair", "Implement the smallest evidence-backed repair", [
+          "diagnose",
+        ]),
+        stage("verify", "Run deterministic regression checks", ["repair"]),
+      ];
+    case "bug-triage":
+      return [
+        stage("reproduce", "Reproduce the reported behavior"),
+        stage("diagnose", "Identify the causal root issue", ["reproduce"]),
+        stage("recommend", "Produce a bounded remediation with evidence", [
+          "diagnose",
+        ]),
+      ];
+    case "visual-delivery":
+      return [
+        stage("implement", "Implement the requested user-visible change"),
+        stage(
+          "visual-verify",
+          "Verify the rendered behavior and regression checks",
+          ["implement"],
+        ),
+      ];
+  }
+}
+
 export function createSoftwareFactoryRoutes(
   store: SoftwareFactoryStore,
   graph: ContextGraph,
@@ -72,6 +122,16 @@ export function createSoftwareFactoryRoutes(
     const tier = nonempty(body?.tier);
     const objective = nonempty(body?.objective);
     const trigger = nonempty(body?.trigger);
+    const requiredContext = Array.isArray(body?.requiredContext)
+      ? [
+          ...new Set(
+            body.requiredContext
+              .filter((key): key is string => typeof key === "string")
+              .map((key) => key.trim())
+              .filter(Boolean),
+          ),
+        ].slice(0, 50)
+      : [];
     if (
       !kind ||
       !managedJobKinds.includes(kind as ManagedJobKind) ||
@@ -96,14 +156,11 @@ export function createSoftwareFactoryRoutes(
           jobId: queued.job.id,
           maximumAttempts: Number(body?.maximumAttempts ?? 3),
           concurrencyLimit: Number(body?.concurrencyLimit ?? 1),
-          stages: [
-            {
-              id: "execute",
-              objective,
-              requiredContext: [],
-              dependsOn: [],
-            },
-          ],
+          stages: managedWorkflowStages(
+            kind as ManagedJobKind,
+            objective,
+            requiredContext,
+          ),
         })
       : null;
     return context.json({ ...queued, workflow }, 201);
@@ -200,6 +257,20 @@ export function createSoftwareFactoryRoutes(
     if (!workflows) return context.notFound();
     const snapshot = await workflows.snapshot(context.req.param("runId"));
     return snapshot ? context.json(snapshot) : context.notFound();
+  });
+  routes.get("/workflows/:runId/evidence", async (context) => {
+    if (!workflows) return context.notFound();
+    const snapshot = await workflows.snapshot(context.req.param("runId"));
+    return snapshot
+      ? context.json({
+          runId: snapshot.run.id,
+          revision: provenance?.revision ?? null,
+          ...snapshot.evidence,
+          stages: snapshot.stages,
+          artifacts: snapshot.artifacts,
+          events: snapshot.events,
+        })
+      : context.notFound();
   });
   routes.get("/context-capsules/:id", async (context) => {
     if (!workflows) return context.notFound();

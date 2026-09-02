@@ -82,6 +82,72 @@ const assertDag = (stages: z.infer<typeof stagePlanSchema>) => {
 export const artifactChecksum = (content: string | Uint8Array) =>
   createHash("sha256").update(content).digest("hex");
 
+export function verifyWorkflowEvidence(snapshot: {
+  run: { status: string; approvedBy: string | null };
+  stages: Array<{
+    stageId: string;
+    status: string;
+    sessionId: string | null;
+    reviewerSessionId: string | null;
+    verification: unknown;
+  }>;
+  artifacts: Array<{
+    stageId: string;
+    content: string;
+    checksum: string;
+    revision: string;
+    producerSessionId: string;
+    exitCode: number | null;
+  }>;
+}) {
+  const succeeded = snapshot.stages.filter(
+    (stage) => stage.status === "succeeded",
+  );
+  const checks = {
+    allStagesSucceeded:
+      snapshot.stages.length > 0 && succeeded.length === snapshot.stages.length,
+    artifactChecksums: snapshot.artifacts.every(
+      (artifact) => artifactChecksum(artifact.content) === artifact.checksum,
+    ),
+    revisionBound: snapshot.artifacts.every((artifact) =>
+      Boolean(artifact.revision.trim()),
+    ),
+    producerBound: snapshot.artifacts.every((artifact) =>
+      snapshot.stages.some(
+        (stage) =>
+          stage.stageId === artifact.stageId &&
+          stage.sessionId === artifact.producerSessionId,
+      ),
+    ),
+    commandsSucceeded: snapshot.artifacts.every(
+      (artifact) => artifact.exitCode === 0,
+    ),
+    freshReviewers: succeeded.every(
+      (stage) =>
+        Boolean(stage.reviewerSessionId) &&
+        stage.reviewerSessionId !== stage.sessionId,
+    ),
+    acceptedStages: succeeded.every(
+      (stage) =>
+        (stage.verification as { accepted?: unknown } | null)?.accepted ===
+        true,
+    ),
+    artifactsForSucceededStages: succeeded.every((stage) =>
+      snapshot.artifacts.some((artifact) => artifact.stageId === stage.stageId),
+    ),
+    humanApproval:
+      snapshot.run.status !== "succeeded" || Boolean(snapshot.run.approvedBy),
+  };
+  const terminal = ["awaiting_approval", "succeeded"].includes(
+    snapshot.run.status,
+  );
+  return {
+    terminal,
+    verified: terminal && Object.values(checks).every(Boolean),
+    checks,
+  };
+}
+
 export function createWorkflowRuntime(database: Database, tenantId: string) {
   return {
     async listContextCapsules(limit = 50) {
@@ -138,7 +204,8 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
               .where(eq(factoryWorkflowEvents.runId, run.id))
               .orderBy(asc(factoryWorkflowEvents.createdAt)),
           ]);
-          return { run, stages, artifacts, events };
+          const snapshot = { run, stages, artifacts, events };
+          return { ...snapshot, evidence: verifyWorkflowEvidence(snapshot) };
         }),
       );
     },
@@ -231,7 +298,8 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
           .where(eq(factoryWorkflowEvents.runId, runId))
           .orderBy(asc(factoryWorkflowEvents.createdAt)),
       ]);
-      return { run, stages, artifacts, events };
+      const snapshot = { run, stages, artifacts, events };
+      return { ...snapshot, evidence: verifyWorkflowEvidence(snapshot) };
     },
 
     async requestPause(runId: string) {

@@ -8,7 +8,7 @@ import {
 import { artifactChecksum, stageCheckSchema } from "./workflow-runtime";
 import {
   StageExecutionFailure,
-  type WorkflowStageExecutor,
+  type WorkflowHarnessExecutor,
 } from "./workflow-worker";
 
 async function command(args: string[], cwd: string, signal?: AbortSignal) {
@@ -51,6 +51,12 @@ const REVIEW_SCHEMA = {
   additionalProperties: false,
 };
 
+function parseJsonPayload(value: string): Record<string, unknown> {
+  const trimmed = value.trim();
+  const unfenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)?.[1];
+  return JSON.parse(unfenced ?? trimmed) as Record<string, unknown>;
+}
+
 export async function persistReviewMaterial(
   directory: string,
   sessionId: string,
@@ -81,9 +87,12 @@ export function createCodexWorkflowExecutor(
         checksum: string;
       }>
     >;
+    harness?: "codex" | "claude";
+    binary?: string;
   } = {},
-): WorkflowStageExecutor {
+): WorkflowHarnessExecutor {
   const root = resolve(repository);
+  const harness = options.harness ?? "codex";
 
   async function workspace(runId: string) {
     const directory = join(root, ".openbot", "workflows", runId);
@@ -192,40 +201,67 @@ export function createCodexWorkflowExecutor(
     prompt: string,
     sandbox: "read-only" | "workspace-write",
     signal: AbortSignal,
+    model: string,
   ) {
     const evidence = join(cwd, ".openbot-evidence");
     await mkdir(evidence, { recursive: true });
     const schemaPath = join(evidence, `${sessionId}.schema.json`);
     const outputPath = join(evidence, `${sessionId}.json`);
     await writeFile(schemaPath, JSON.stringify(schema), { mode: 0o600 });
-    const permissionArgs =
-      sandbox === "workspace-write"
-        ? ["--approve-for-me"]
-        : ["--sandbox", "read-only"];
-    await command(
+    if (harness === "codex") {
+      const permissionArgs =
+        sandbox === "workspace-write"
+          ? ["--approve-for-me"]
+          : ["--sandbox", "read-only"];
+      await command(
+        [
+          options.binary ?? "codex",
+          "exec",
+          "--ephemeral",
+          ...permissionArgs,
+          "--model",
+          model,
+          "--output-schema",
+          schemaPath,
+          "--output-last-message",
+          outputPath,
+          prompt,
+        ],
+        cwd,
+        signal,
+      );
+      return parseJsonPayload(await readFile(outputPath, "utf8"));
+    }
+    const response = await command(
       [
-        "codex",
-        "exec",
-        "--ephemeral",
-        ...permissionArgs,
-        "--output-schema",
-        schemaPath,
-        "--output-last-message",
-        outputPath,
-        prompt,
+        options.binary ?? "claude",
+        "-p",
+        `${prompt}\nReturn only JSON matching this schema: ${JSON.stringify(schema)}`,
+        "--output-format",
+        "json",
+        "--model",
+        model,
+        "--permission-mode",
+        sandbox === "workspace-write" ? "acceptEdits" : "plan",
       ],
       cwd,
       signal,
     );
-    return JSON.parse(await readFile(outputPath, "utf8")) as Record<
-      string,
-      unknown
-    >;
+    const envelope = JSON.parse(response.stdout) as { result?: unknown };
+    const payload =
+      typeof envelope.result === "string" ? envelope.result : response.stdout;
+    return parseJsonPayload(payload);
   }
 
   return {
-    async execute({ runId, stage, snapshot, sessionId, signal }) {
+    harness,
+    async run({ runId, stage, snapshot, sessionId, signal }) {
       const cwd = await workspace(runId);
+      const model = stage.selectedModel;
+      if (!model || stage.selectedHarness !== harness)
+        throw new Error(
+          `Stage route ${stage.selectedHarness ?? "missing"}/${model ?? "missing"} cannot run on ${harness}.`,
+        );
       const contextKeys = (stage.requiredContext as { keys?: unknown }).keys;
       const requiredContext = Array.isArray(contextKeys)
         ? contextKeys.filter(
@@ -276,6 +312,7 @@ export function createCodexWorkflowExecutor(
         ].join("\n"),
         "workspace-write",
         signal,
+        model,
       );
       const [revision, diff] = await Promise.all([
         command(["git", "rev-parse", "HEAD"], cwd),
@@ -341,10 +378,15 @@ export function createCodexWorkflowExecutor(
             checksum: reviewMaterial.checksum,
             revision: revision.stdout.trim(),
             producerSessionId: sessionId,
-            command: "codex exec --ephemeral --approve-for-me",
+            command:
+              harness === "codex"
+                ? `codex exec --ephemeral --model ${model}`
+                : `claude -p --output-format json --model ${model}`,
             exitCode: 0,
             metadata: {
               checks: result.checks ?? [],
+              harness,
+              model,
               diffBytes: diff.stdout.length,
               trustedContext: trustedContext.map((node) => ({
                 key: node.key,
@@ -368,6 +410,9 @@ export function createCodexWorkflowExecutor(
 
     async review({ runId, stage, candidate, sessionId, signal }) {
       const cwd = await workspace(runId);
+      const model = stage.selectedModel;
+      if (!model || stage.selectedHarness !== harness)
+        throw new Error("Reviewer harness does not match the persisted route.");
       const result = await codexJson(
         cwd,
         sessionId,
@@ -392,6 +437,7 @@ export function createCodexWorkflowExecutor(
         ].join("\n"),
         "read-only",
         signal,
+        model,
       );
       return {
         accepted: result.accepted === true,
@@ -403,5 +449,19 @@ export function createCodexWorkflowExecutor(
           : [],
       };
     },
+    async interrupt() {
+      // Active subprocesses are bound to the worker-owned AbortSignal and receive SIGTERM there.
+    },
   };
+}
+
+export function createClaudeWorkflowExecutor(
+  repository: string,
+  options: Parameters<typeof createCodexWorkflowExecutor>[1] = {},
+) {
+  return createCodexWorkflowExecutor(repository, {
+    ...options,
+    harness: "claude",
+    binary: options.binary ?? "claude",
+  });
 }

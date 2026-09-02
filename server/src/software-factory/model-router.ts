@@ -8,6 +8,7 @@ export const executionTiers = [
 export type ExecutionTier = (typeof executionTiers)[number];
 
 export type ModelBenchmark = {
+  harness?: "codex" | "claude";
   model: string;
   task: string;
   quality: number;
@@ -18,6 +19,7 @@ export type ModelBenchmark = {
 };
 
 export type RoutingDecision = {
+  harness: "codex" | "claude";
   model: string;
   task: string;
   tier: ExecutionTier;
@@ -45,7 +47,11 @@ export function paretoFrontier(candidates: ModelBenchmark[]) {
   return candidates.filter((candidate) => {
     const cost = observedCostPerOutcome(candidate);
     return !candidates.some((other) => {
-      if (other.model === candidate.model) return false;
+      if (
+        other.model === candidate.model &&
+        (other.harness ?? "codex") === (candidate.harness ?? "codex")
+      )
+        return false;
       const otherCost = observedCostPerOutcome(other);
       return (
         other.quality >= candidate.quality &&
@@ -93,6 +99,7 @@ export function chooseModel(input: {
   })[0];
   if (!selected) throw new Error("No Pareto-optimal model is available.");
   return {
+    harness: selected.harness ?? "codex",
     model: selected.model,
     task: input.task,
     tier: input.tier,

@@ -26,6 +26,7 @@ test("a judging orchestrator grounds and runs independent cheaper workers before
       },
     ],
     route: async (unit) => ({
+      harness: "codex",
       model: unit.id === "fix" ? "frontier" : "worker-small",
       task: "ci-repair",
       tier: "managed",
@@ -125,6 +126,7 @@ test("a rejected verdict drives a bounded repair with fresh workers and reviewer
       { id: "repair", objective: "repair", requiredContext: [], dependsOn: [] },
     ],
     route: async () => ({
+      harness: "codex",
       model: "worker-small",
       task: "ci-repair",
       tier: "managed",

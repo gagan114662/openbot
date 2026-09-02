@@ -74,6 +74,7 @@ describe("persistent software factory", () => {
 
   test("persists a benchmark route and feeds verified outcome cost back exactly once", async () => {
     await store.benchmark({
+      harness: "claude",
       model: "worker-small",
       task: "ci-repair",
       quality: 0.9,
@@ -89,7 +90,11 @@ describe("persistent software factory", () => {
       trigger: "github-actions",
       minimumQuality: 0.8,
     });
-    expect(queued.decision.model).toBe("worker-small");
+    expect(queued.decision).toMatchObject({
+      harness: "claude",
+      model: "worker-small",
+    });
+    expect(queued.job).toMatchObject({ selectedHarness: "claude" });
     await store.completeJob(queued.job?.id ?? "missing", {
       success: true,
       costMicros: 100,
@@ -106,6 +111,7 @@ describe("persistent software factory", () => {
       .where(
         and(
           eq(factoryModelBenchmarks.tenantId, tenantId),
+          eq(factoryModelBenchmarks.harness, "claude"),
           eq(factoryModelBenchmarks.model, "worker-small"),
         ),
       );

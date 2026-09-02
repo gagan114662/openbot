@@ -156,9 +156,14 @@ export function createSoftwareFactoryRoutes(
     const body = record(await context.req.json().catch(() => null));
     const model = nonempty(body?.model);
     const task = nonempty(body?.task);
-    if (!model || !task)
-      return context.json({ error: "Model and task are required." }, 400);
+    const harness = nonempty(body?.harness) ?? "codex";
+    if (!model || !task || !["codex", "claude"].includes(harness))
+      return context.json(
+        { error: "Model, task, and a valid harness are required." },
+        400,
+      );
     await store.benchmark({
+      harness: harness as "codex" | "claude",
       model,
       task,
       quality: Number(body?.quality),

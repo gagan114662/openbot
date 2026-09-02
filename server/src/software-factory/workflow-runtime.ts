@@ -8,6 +8,7 @@ import {
   factoryWorkflowEvents,
   factoryWorkflowRuns,
   factoryWorkflowStages,
+  factoryManagedJobs,
 } from "../db/schema";
 
 export const stageCheckSchema = z.object({
@@ -257,6 +258,20 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
           "Workflow concurrency must be between one and sixteen.",
         );
       return database.transaction(async (tx) => {
+        const [job] = await tx
+          .select({
+            selectedModel: factoryManagedJobs.selectedModel,
+            selectedHarness: factoryManagedJobs.selectedHarness,
+          })
+          .from(factoryManagedJobs)
+          .where(
+            and(
+              eq(factoryManagedJobs.id, input.jobId),
+              eq(factoryManagedJobs.tenantId, tenantId),
+            ),
+          );
+        if (!job?.selectedModel || !job.selectedHarness)
+          throw new Error("Workflow job has no benchmarked harness route.");
         const [run] = await tx
           .insert(factoryWorkflowRuns)
           .values({
@@ -289,6 +304,8 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
             requiredContext: { keys: stage.requiredContext },
             dependsOn: { ids: stage.dependsOn },
             checks: { items: stage.checks },
+            selectedModel: job.selectedModel,
+            selectedHarness: job.selectedHarness,
           })),
         );
         return run;

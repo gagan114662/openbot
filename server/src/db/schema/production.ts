@@ -123,6 +123,7 @@ export const factoryModelBenchmarks = pgTable(
   "factory_model_benchmarks",
   {
     tenantId: text("tenant_id").notNull(),
+    harness: text("harness").notNull().default("codex"),
     model: text("model").notNull(),
     task: text("task").notNull(),
     qualityBasisPoints: integer("quality_basis_points").notNull(),
@@ -134,7 +135,9 @@ export const factoryModelBenchmarks = pgTable(
     updatedAt: updatedAt(),
   },
   (table) => [
-    primaryKey({ columns: [table.tenantId, table.model, table.task] }),
+    primaryKey({
+      columns: [table.tenantId, table.harness, table.model, table.task],
+    }),
   ],
 );
 
@@ -149,6 +152,7 @@ export const factoryManagedJobs = pgTable(
     trigger: text("trigger").notNull(),
     status: text("status").notNull().default("queued"),
     selectedModel: text("selected_model"),
+    selectedHarness: text("selected_harness"),
     outcome: jsonb("outcome").notNull().default({}),
     costMicros: integer("cost_micros").notNull().default(0),
     createdBy: text("created_by").notNull(),
@@ -283,6 +287,8 @@ export const factoryWorkflowStages = pgTable(
     requiredContext: jsonb("required_context").notNull().default({ keys: [] }),
     dependsOn: jsonb("depends_on").notNull().default({ ids: [] }),
     checks: jsonb("checks").notNull().default({ items: [] }),
+    selectedModel: text("selected_model"),
+    selectedHarness: text("selected_harness"),
     status: text("status").notNull().default("pending"),
     attempts: integer("attempts").notNull().default(0),
     sessionId: text("session_id"),

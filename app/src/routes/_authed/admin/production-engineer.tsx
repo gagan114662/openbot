@@ -247,9 +247,9 @@ function ProductionEngineerPage() {
       </PageSection>
       <PageSection title="Launch a managed workflow">
         <p className="mb-3 text-muted-foreground text-sm">
-          This creates a durable production run. A separate Codex worker
-          executes it, a fresh reviewer validates revision-bound artifacts, and
-          completion waits for human approval.
+          This creates a durable production run. A benchmark-routed Codex or
+          Claude worker executes it, a fresh reviewer validates revision-bound
+          artifacts, and completion waits for human approval.
         </p>
         <div className="grid gap-2 md:grid-cols-[220px_1fr_auto]">
           <select
@@ -443,6 +443,9 @@ function ProductionEngineerPage() {
                         <span className="font-medium">{stage.stageId}</span> ·{" "}
                         {stage.status} · attempt {stage.attempts}/
                         {run.maximumAttempts}
+                        {stage.selectedHarness && stage.selectedModel
+                          ? ` · ${stage.selectedHarness}/${stage.selectedModel}`
+                          : " · route pending"}
                         <p className="text-muted-foreground">
                           {stage.objective}
                         </p>
@@ -491,6 +494,13 @@ function ProductionEngineerPage() {
                               <dt>Command</dt>
                               <dd className="font-mono">
                                 {artifact.command} (exit {artifact.exitCode})
+                              </dd>
+                              <dt>Harness route</dt>
+                              <dd>
+                                {artifact.metadata?.harness &&
+                                artifact.metadata?.model
+                                  ? `${artifact.metadata.harness}/${artifact.metadata.model}`
+                                  : "runtime command"}
                               </dd>
                               <dt>Captured diff</dt>
                               <dd>{artifact.metadata?.diffBytes ?? 0} bytes</dd>

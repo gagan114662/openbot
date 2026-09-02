@@ -98,7 +98,11 @@ import { createIntentRouter } from "./routing/classify";
 import { chatCompletionsUrl, createModelCompleter } from "./routing/model";
 import { installGracefulShutdown } from "./shutdown";
 import { createContextGraph } from "./software-factory/context-graph";
-import { createCodexWorkflowExecutor } from "./software-factory/codex-workflow-executor";
+import {
+  createClaudeWorkflowExecutor,
+  createCodexWorkflowExecutor,
+} from "./software-factory/codex-workflow-executor";
+import { createRoutedWorkflowExecutor } from "./software-factory/workflow-executor";
 import { createSoftwareFactoryStore } from "./software-factory/store";
 import { createShadowEvaluator } from "./software-factory/shadow-evaluator";
 import {
@@ -401,13 +405,22 @@ const workflowWorkerId = processOwner("software-factory");
 const workflowWorker = createWorkflowWorker({
   runtime: workflowRuntime,
   workerId: workflowWorkerId,
-  executor: createCodexWorkflowExecutor(
-    process.env.SOFTWARE_FACTORY_REPOSITORY ?? process.cwd(),
-    {
-      groundContext: (keys) =>
-        factoryContextGraph.ground(tenantPackage.tenantId, keys),
-    },
-  ),
+  executor: createRoutedWorkflowExecutor([
+    createCodexWorkflowExecutor(
+      process.env.SOFTWARE_FACTORY_REPOSITORY ?? process.cwd(),
+      {
+        groundContext: (keys) =>
+          factoryContextGraph.ground(tenantPackage.tenantId, keys),
+      },
+    ),
+    createClaudeWorkflowExecutor(
+      process.env.SOFTWARE_FACTORY_REPOSITORY ?? process.cwd(),
+      {
+        groundContext: (keys) =>
+          factoryContextGraph.ground(tenantPackage.tenantId, keys),
+      },
+    ),
+  ]),
   onTerminalFailure: async ({ runId, error }) => {
     const run = (await workflowRuntime.snapshot(runId))?.run;
     if (!run) return;

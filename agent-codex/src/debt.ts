@@ -41,6 +41,24 @@ function nonBlankLines(text: string) {
     .filter(Boolean);
 }
 
+function codeMetrics(text: string) {
+  const lines = nonBlankLines(text);
+  const seen = new Set<string>();
+  let duplicatedLines = 0;
+  for (const line of lines) {
+    if (line.length < 24 || line === "{" || line === "}") continue;
+    if (seen.has(line)) duplicatedLines += 1;
+    else seen.add(line);
+  }
+  return {
+    complexityPoints: [
+      ...text.matchAll(/\b(?:if|else if|for|while|catch|case|&&|\|\|)\b/g),
+    ].length,
+    duplicatedLines,
+    fileLines: text.split(/\r?\n/).length,
+  };
+}
+
 export async function assessTechnicalDebt(input: {
   cwd: string;
   before: readonly string[];
@@ -52,7 +70,6 @@ export async function assessTechnicalDebt(input: {
   let complexityPoints = 0;
   let duplicatedLines = 0;
   let maximumFileLines = 0;
-  const seen = new Set<string>();
 
   for (const path of paths.filter((candidate) =>
     CODE_EXTENSIONS.test(candidate),
@@ -60,16 +77,27 @@ export async function assessTechnicalDebt(input: {
     const file = Bun.file(`${input.cwd}/${path}`);
     if (!(await file.exists())) continue;
     const text = await file.text();
-    const lines = nonBlankLines(text);
-    maximumFileLines = Math.max(maximumFileLines, text.split(/\r?\n/).length);
-    complexityPoints += [
-      ...text.matchAll(/\b(?:if|else if|for|while|catch|case|&&|\|\|)\b/g),
-    ].length;
-    for (const line of lines) {
-      if (line.length < 24 || line === "{" || line === "}") continue;
-      if (seen.has(line)) duplicatedLines += 1;
-      else seen.add(line);
-    }
+    const current = codeMetrics(text);
+    // Modified legacy files are judged on debt added by this candidate, not debt that already
+    // existed at HEAD. New files have no baseline and therefore remain fully accountable.
+    const baselineText = await output(["git", "show", `HEAD:${path}`], input.cwd);
+    const baseline = baselineText
+      ? codeMetrics(baselineText)
+      : { complexityPoints: 0, duplicatedLines: 0, fileLines: 0 };
+    complexityPoints += Math.max(
+      0,
+      current.complexityPoints - baseline.complexityPoints,
+    );
+    duplicatedLines += Math.max(
+      0,
+      current.duplicatedLines - baseline.duplicatedLines,
+    );
+    maximumFileLines = Math.max(
+      maximumFileLines,
+      baselineText
+        ? Math.max(0, current.fileLines - baseline.fileLines)
+        : current.fileLines,
+    );
   }
 
   const metrics: DebtMetrics = {

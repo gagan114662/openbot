@@ -87,6 +87,22 @@ describe("asking a person", () => {
     expect(written[0]?.eventType).toBe("agent.escalation_failed");
   });
 
+  test("still tells the Bot who was reached when the audit database is offline", async () => {
+    const tool = escalationTool({
+      from: FROM,
+      route: askTheirOwnPerson,
+      auditStore: {
+        insert: async () => {
+          throw new Error("audit offline");
+        },
+      },
+    });
+
+    await expect(
+      tool.execute({ question: "which account?" }),
+    ).resolves.toContain("the person in this conversation");
+  });
+
   /*
    * Mid-run with a person waiting: a throw ends the run with nothing said, which reads as the Bot
    * ignoring them.

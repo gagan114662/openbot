@@ -94,7 +94,9 @@ function nonEmpty(values: string[]): boolean {
   return values.length > 0 && values.every((value) => value.trim().length > 0);
 }
 
-export function validateEvolutionContract(contract: EvolutionContract): string[] {
+export function validateEvolutionContract(
+  contract: EvolutionContract,
+): string[] {
   const reasons: string[] = [];
   if (
     !contract.id.trim() ||
@@ -108,8 +110,10 @@ export function validateEvolutionContract(contract: EvolutionContract): string[]
   if (!nonEmpty(contract.definitionOfDone)) {
     reasons.push("a definition of done is required");
   }
-  if (!contract.rollbackPlan.trim()) reasons.push("a rollback plan is required");
-  if (!nonEmpty(contract.allowedPaths)) reasons.push("allowed paths are required");
+  if (!contract.rollbackPlan.trim())
+    reasons.push("a rollback plan is required");
+  if (!nonEmpty(contract.allowedPaths))
+    reasons.push("allowed paths are required");
   if (contract.invariants.length === 0) reasons.push("invariants are required");
   const invariantKeys = contract.invariants.map(
     ({ id, version }) => `${id}@${version}`,
@@ -154,7 +158,8 @@ export function buildContextCapsule(input: {
 }): ContextCapsule {
   const contractReasons = validateEvolutionContract(input.contract);
   if (contractReasons.length > 0) throw new Error(contractReasons.join("; "));
-  if (!input.parentStateHash.trim()) throw new Error("parent state hash is required");
+  if (!input.parentStateHash.trim())
+    throw new Error("parent state hash is required");
   const approvedMemory = [...input.approvedMemory].sort((a, b) =>
     a.id.localeCompare(b.id),
   );
@@ -166,7 +171,9 @@ export function buildContextCapsule(input: {
       !memory.approvedBy.trim() ||
       !Number.isFinite(Date.parse(memory.approvedAt))
     ) {
-      throw new Error(`reviewed memory ${memory.id || "<unknown>"} is incomplete`);
+      throw new Error(
+        `reviewed memory ${memory.id || "<unknown>"} is incomplete`,
+      );
     }
   }
   const content = {
@@ -188,7 +195,9 @@ export function hashCandidate(candidate: EvolutionCandidate): string {
 }
 
 function pathAllowed(path: string, allowed: string[]): boolean {
-  return allowed.some((prefix) => path === prefix || path.startsWith(`${prefix}/`));
+  return allowed.some(
+    (prefix) => path === prefix || path.startsWith(`${prefix}/`),
+  );
 }
 
 /**
@@ -204,7 +213,8 @@ export function decidePromotion(input: {
   approvedMemory: ReviewedMemory[];
   candidate: EvolutionCandidate;
 }): PromotionDecision {
-  const { contract, trustedStateHash, capsule, approvedMemory, candidate } = input;
+  const { contract, trustedStateHash, capsule, approvedMemory, candidate } =
+    input;
   const reasons = validateEvolutionContract(contract);
   const candidateHash = hashCandidate(candidate);
   if (candidate.parentStateHash !== trustedStateHash) {
@@ -232,16 +242,22 @@ export function decidePromotion(input: {
       reasons.push("context capsule is stale, incomplete, or altered");
     }
     if (candidate.contextChecksum !== expectedCapsule.checksum) {
-      reasons.push("candidate is not bound to the current complete context capsule");
+      reasons.push(
+        "candidate is not bound to the current complete context capsule",
+      );
     }
   }
   const disallowedPaths = candidate.changedPaths.filter(
     (path) => !pathAllowed(path, contract.allowedPaths),
   );
   if (disallowedPaths.length > 0) {
-    reasons.push(`candidate changes disallowed paths: ${disallowedPaths.join(", ")}`);
+    reasons.push(
+      `candidate changes disallowed paths: ${disallowedPaths.join(", ")}`,
+    );
   }
-  const results = new Map(candidate.verifierResults.map((result) => [result.id, result]));
+  const results = new Map(
+    candidate.verifierResults.map((result) => [result.id, result]),
+  );
   for (const verifier of contract.requiredVerifiers) {
     const result = results.get(verifier);
     if (!result?.passed || !result.evidenceHash.trim()) {
@@ -249,9 +265,16 @@ export function decidePromotion(input: {
     }
   }
   for (const invariant of contract.invariants) {
-    const result = results.get(`invariant:${invariant.id}@${invariant.version}`);
-    if (invariant.critical && (!result?.passed || !result.evidenceHash.trim())) {
-      reasons.push(`critical invariant did not pass: ${invariant.id}@${invariant.version}`);
+    const result = results.get(
+      `invariant:${invariant.id}@${invariant.version}`,
+    );
+    if (
+      invariant.critical &&
+      (!result?.passed || !result.evidenceHash.trim())
+    ) {
+      reasons.push(
+        `critical invariant did not pass: ${invariant.id}@${invariant.version}`,
+      );
     }
   }
   if (
@@ -260,7 +283,9 @@ export function decidePromotion(input: {
     candidate.novelCases.passed !== candidate.novelCases.total ||
     !candidate.novelCases.suiteHash.trim()
   ) {
-    reasons.push("novel-input verification is missing, insufficient, or failing");
+    reasons.push(
+      "novel-input verification is missing, insufficient, or failing",
+    );
   }
   if (
     !Number.isFinite(candidate.mutationScore) ||

@@ -19,6 +19,8 @@ RUN bun install --frozen-lockfile
 COPY --from=spire /opt/spire/bin/spire-server /usr/local/bin/spire-server
 
 COPY supervisor/src ./src
+COPY agent-computer/seccomp_profile.json /app/seccomp_profile.json
+ENV COMPUTER_SECCOMP_PROFILE=/app/seccomp_profile.json
 
 EXPOSE 4300
 CMD ["bun", "src/index.ts"]

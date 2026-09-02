@@ -1,4 +1,5 @@
 import * as builtinRoutines from "./builtin-routines";
+import * as builtinData from "./builtin-data";
 import * as builtinRepository from "./builtin-repository";
 import * as builtinWeb from "./builtin-web";
 import type { CatalogueEntry } from "./catalogue";
@@ -86,7 +87,8 @@ export type TransportKind =
   | "google-drive-rest"
   | "builtin-routines"
   | "builtin-web"
-  | "builtin-repository";
+  | "builtin-repository"
+  | "builtin-data";
 
 const TRANSPORTS: Record<TransportKind, VendorTransport> = {
   mcp,
@@ -94,6 +96,7 @@ const TRANSPORTS: Record<TransportKind, VendorTransport> = {
   "builtin-routines": builtinRoutines,
   "builtin-web": builtinWeb,
   "builtin-repository": builtinRepository,
+  "builtin-data": builtinData,
 };
 
 /**

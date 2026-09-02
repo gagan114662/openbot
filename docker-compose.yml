@@ -1,6 +1,9 @@
 services:
   postgres:
     image: pgvector/pgvector:pg17
+    # Headroom for the API, migrations and one guarded test suite. The suite lock below the app
+    # prevents a second run from converting this finite budget into hundreds of fake regressions.
+    command: ["postgres", "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-200}"]
     # Off the network the Bots are on, because a Bot's computer is on it and a Bot has a shell.
     #
     # With no `networks:` anywhere, Compose puts every service on one network with DNS by service
@@ -85,12 +88,21 @@ services:
       # minutes; closing a browser costs only a relaunch, because the profile is on the volume below.
       COMPUTER_MAX_BROWSERS: ${COMPUTER_MAX_BROWSERS:-}
       COMPUTER_BROWSER_IDLE_MS: ${COMPUTER_BROWSER_IDLE_MS:-}
+      # The image runs as Playwright's non-root user, so Chromium's own process sandbox is the
+      # default. Set this to off only on a platform that demonstrably blocks user namespaces.
+      COMPUTER_SANDBOX: ${COMPUTER_SANDBOX:-on}
     volumes:
       - agent-workspace:/workspace
       # Chromium's user-data directory is volume-backed so logins survive container restarts.
       - agent-profiles:/profiles
     # Gives Chromium time to flush its profile after SIGTERM before Docker sends SIGKILL.
     stop_grace_period: 30s
+    init: true
+    security_opt:
+      - no-new-privileges:true
+      - seccomp=./agent-computer/seccomp_profile.json
+    cap_drop: [ALL]
+    cap_add: [SYS_CHROOT]
     healthcheck:
       test: ["CMD-SHELL", "bun -e \"await fetch('http://localhost:4100/health')\""]
       interval: 10s
@@ -185,6 +197,7 @@ services:
       # Set to runsc to run every computer under gVisor, when the host has it. Left unset each
       # computer is an ordinary container and shares the host kernel.
       COMPUTER_RUNTIME: ${COMPUTER_RUNTIME:-}
+      COMPUTER_SANDBOX: ${COMPUTER_SANDBOX:-on}
       # Identity, when SPIRE is part of this deployment. The supervisor registers an entry per Bot
       # and mounts the agent's socket into that Bot's computer so it can fetch its own SVID.
       SPIRE_SOCKET: /tmp/spire-server/private/api.sock
@@ -279,6 +292,41 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  # Optional live observability proof: Prometheus scrapes actual OpenBot database-backed metrics,
+  # evaluates a real threshold, and sends the firing through a signing relay to the production
+  # engineer ingress. Start with `docker compose --profile observability up -d`.
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    profiles: [observability]
+    command: ["--config.file=/etc/prometheus/prometheus.yml"]
+    volumes:
+      - ./observability/prometheus/openbot-live.yml:/etc/prometheus/prometheus.yml:ro
+      - ./observability/prometheus/openbot-live.rules.yml:/etc/prometheus/openbot-live.rules.yml:ro
+    ports: ["127.0.0.1:9090:9090"]
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    depends_on: [alertmanager]
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    profiles: [observability]
+    command: ["--config.file=/etc/alertmanager/alertmanager.yml"]
+    volumes:
+      - ./observability/alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+    ports: ["127.0.0.1:9093:9093"]
+    depends_on: [alert-relay]
+
+  alert-relay:
+    image: node:22-alpine
+    profiles: [observability]
+    command: ["node", "/app/alert-relay.mjs"]
+    environment:
+      # Loopback-only development default. Production must set a random value shared with the API.
+      PRODUCTION_ENGINEER_ALERTMANAGER_WEBHOOK_SECRET: ${PRODUCTION_ENGINEER_ALERTMANAGER_WEBHOOK_SECRET:-openbot-dev-alertmanager-secret}
+      OPENBOT_ALERT_WEBHOOK_URL: http://host.docker.internal:${SERVER_PORT:-3001}/api/production-engineer/alertmanager-webhook
+    volumes:
+      - ./observability/alert-relay.mjs:/app/alert-relay.mjs:ro
+    extra_hosts: ["host.docker.internal:host-gateway"]
 
 networks:
   # The database and the one service that reaches it by name. Nothing a Bot can reach is on it.

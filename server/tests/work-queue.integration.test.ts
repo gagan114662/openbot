@@ -324,6 +324,40 @@ describe("claiming durable work", () => {
     expect(row?.why).toBe("the cluster said no");
   });
 
+  test("backpressure can outlast the retry budget without stranding the item", async () => {
+    await queue.offer({ kind, key: "busy-relay" });
+
+    // Seven lock collisions exceed the ordinary five-attempt budget. None began delivery, so none
+    // is allowed to spend that budget.
+    for (let collision = 0; collision < 7; collision += 1) {
+      const [item] = await queue.claim({
+        kind,
+        owner: "replica-1",
+        leaseMs: 30_000,
+        maxAttempts: 5,
+      });
+      expect(item?.attempts).toBe(1);
+      expect(
+        await queue.defer({
+          kind,
+          key: "busy-relay",
+          owner: "replica-1",
+          delayMs: 0,
+          reason: "the asking thread is busy",
+        }),
+      ).toBe(true);
+    }
+
+    const [afterContention] = await queue.claim({
+      kind,
+      owner: "replica-2",
+      leaseMs: 30_000,
+      maxAttempts: 5,
+    });
+    expect(afterContention?.key).toBe("busy-relay");
+    expect(afterContention?.attempts).toBe(1);
+  });
+
   /*
    * The two kinds of done, on their own clocks.
    *

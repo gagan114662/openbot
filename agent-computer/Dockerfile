@@ -7,8 +7,8 @@ FROM mcr.microsoft.com/playwright:v1.62.1-noble
 # unzip is not in the Playwright image and bun's installer needs it.
 RUN apt-get update && apt-get install -y --no-install-recommends unzip \
   && rm -rf /var/lib/apt/lists/* \
-  && curl -fsSL https://bun.sh/install | bash
-ENV PATH="/root/.bun/bin:${PATH}"
+  && curl -fsSL https://bun.sh/install | bash \
+  && install -m 0755 /root/.bun/bin/bun /usr/local/bin/bun
 
 WORKDIR /app
 # The lockfile as well as the manifest: `--frozen-lockfile` with no lockfile present resolves afresh
@@ -19,8 +19,14 @@ RUN bun install --frozen-lockfile
 COPY agent-computer/src ./src
 
 # Durable working directory. Bot-produced files that must survive replacement live here.
-RUN mkdir -p /workspace
+RUN mkdir -p /workspace /profiles \
+  && chown -R pwuser:pwuser /app /workspace /profiles
 ENV WORKSPACE_DIR=/workspace
+ENV COMPUTER_SANDBOX=on
+
+# Chromium refuses to enable its process sandbox as root. The Playwright image ships this account;
+# named volumes inherit the ownership prepared above when first created.
+USER pwuser
 
 ENV PORT=4100
 EXPOSE 4100

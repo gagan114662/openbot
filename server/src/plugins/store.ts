@@ -24,6 +24,7 @@ import {
   mcpTools,
   mcpUserCredentials,
   pluginGrants,
+  pluginToolRequests,
   skills,
   skillTools,
 } from "../db/schema";
@@ -1506,6 +1507,28 @@ export function createPluginStore(options: PluginStoreOptions) {
   }
 
   return {
+    /** Record a fail-closed content-guard refusal without persisting matched values. */
+    async recordContentGuard(input: {
+      ref: string;
+      botId: string;
+      actorId: string;
+      categories: string[];
+      paths: string[];
+    }) {
+      await recordAuditEvent(auditStore, {
+        eventType: "mcp.call_rejected",
+        targetType: "mcp_tool",
+        targetId: input.ref,
+        payload: {
+          actor: input.actorId,
+          bot: input.botId,
+          refusal: "content_guard",
+          categories: [...new Set(input.categories)].sort(),
+          paths: [...new Set(input.paths)].sort(),
+          carriedOut: false,
+        },
+      });
+    },
     /**
      * Add a server from the catalogue.
      *
@@ -2389,6 +2412,103 @@ export function createPluginStore(options: PluginStoreOptions) {
           bot: agentId,
         },
       });
+    },
+
+    async requestCatalogueTool(input: {
+      agentId: string;
+      requesterId: string;
+      catalogueKey: string;
+      reason: string;
+    }) {
+      if (!catalogueEntry(input.catalogueKey)) {
+        throw new Error("That catalogue capability is not available.");
+      }
+      const [request] = await database
+        .insert(pluginToolRequests)
+        .values(input)
+        .returning();
+      if (!request) throw new Error("The capability request was not recorded.");
+      await recordAuditEvent(auditStore, {
+        eventType: "configuration.changed",
+        targetType: "mcp_server",
+        targetId: input.catalogueKey,
+        actorUserId: input.requesterId,
+        payload: {
+          change: "plugin_tool_requested",
+          bot: input.agentId,
+          request: request.id,
+        },
+      });
+      return request;
+    },
+
+    async listToolRequests() {
+      return database
+        .select()
+        .from(pluginToolRequests)
+        .orderBy(pluginToolRequests.createdAt);
+    },
+
+    async decideToolRequest(
+      requestId: string,
+      decision: "approved" | "rejected",
+      by: string,
+    ) {
+      const decided = await database.transaction(async (tx) => {
+        const [request] = await tx
+          .select()
+          .from(pluginToolRequests)
+          .where(eq(pluginToolRequests.id, requestId))
+          .for("update")
+          .limit(1);
+        if (request?.status !== "pending") return null;
+        if (decision === "approved") {
+          const tools = await tx
+            .select({ name: mcpTools.name })
+            .from(mcpTools)
+            .where(eq(mcpTools.serverId, request.catalogueKey));
+          if (tools.length === 0) {
+            throw new Error(
+              "Add and refresh this catalogue capability before approving its grant.",
+            );
+          }
+          await tx
+            .insert(pluginGrants)
+            .values(
+              tools.map((tool) => ({
+                kind: "mcp",
+                ref: `${request.catalogueKey}/${tool.name}`,
+                agentId: request.agentId,
+                grantedBy: by,
+              })),
+            )
+            .onConflictDoNothing();
+        }
+        const [updated] = await tx
+          .update(pluginToolRequests)
+          .set({
+            status: decision,
+            reviewedBy: by,
+            reviewedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(eq(pluginToolRequests.id, requestId))
+          .returning();
+        return updated ? { updated, request } : null;
+      });
+      if (!decided) return null;
+      await recordAuditEvent(auditStore, {
+        eventType: "configuration.changed",
+        targetType: "mcp_server",
+        targetId: decided.request.catalogueKey,
+        actorUserId: by,
+        payload: {
+          change: `plugin_tool_request_${decision}`,
+          bot: decided.request.agentId,
+          request: decided.request.id,
+        },
+      });
+      return decided.updated;
     },
 
     async revoke(

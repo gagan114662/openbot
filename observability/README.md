@@ -11,3 +11,11 @@ the persistent daily run budget and concurrency limit. Do not label that proxy a
 
 Default SLO alerts are p95 latency above 60 seconds, errors above 5%, budget above 90%, and sustained
 concurrency saturation. Tune those values to an approved tenant SLO before production exposure.
+
+## End-to-end Alertmanager delivery
+
+Set the same random `PRODUCTION_ENGINEER_ALERTMANAGER_WEBHOOK_SECRET` in the API and `.env`, then run
+`docker compose --profile observability up -d`. The included Prometheus scrapes the API's real,
+database-backed production metrics and its rule sends an observed failure to a real Alertmanager.
+Because Alertmanager cannot HMAC-sign a webhook body, the minimal relay signs the exact bytes it
+receives before forwarding them. The server still rejects unsigned or altered requests.

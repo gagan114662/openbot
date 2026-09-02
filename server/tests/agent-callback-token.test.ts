@@ -104,14 +104,22 @@ describe("who may call a tool back, and as whom", () => {
         threadId: "thread-1",
       },
       KEY,
+      Date.now(),
+      "tool-call",
     );
 
+  const spent = new Set<string>();
   const call = (presented: string, run: unknown, legacyToken?: string) =>
     authoriseAgentCall({
       presented,
       run,
       encryptionKey: KEY,
       lookup,
+      consume: async (id) => {
+        if (spent.has(id)) return false;
+        spent.add(id);
+        return true;
+      },
       ...(legacyToken ? { legacyToken } : {}),
     });
 
@@ -123,6 +131,25 @@ describe("who may call a tool back, and as whom", () => {
       runId: "r1",
       threadId: "thread-1",
       depth: 0,
+      credential: "per-bot",
+    });
+  });
+
+  test("consumes a signed tool-call assertion exactly once", async () => {
+    const ticket = runForA();
+    expect((await call(tokenA, ticket)).ok).toBe(true);
+    expect(await call(tokenA, ticket)).toEqual({
+      ok: false,
+      status: 401,
+      reason: "Not authorised.",
+    });
+  });
+
+  test("refuses a lineage assertion at the tool-call boundary", async () => {
+    expect(await call(tokenA, mintRunAssertion(RUN, KEY))).toEqual({
+      ok: false,
+      status: 401,
+      reason: "Not authorised.",
     });
   });
 
@@ -178,6 +205,7 @@ describe("who may call a tool back, and as whom", () => {
       runId: "r1",
       threadId: "thread-1",
       depth: 0,
+      credential: "legacy",
     });
   });
 
@@ -227,6 +255,7 @@ describe("a callback that cannot prove which Bot it is", () => {
       encryptionKey: KEY,
       legacyToken: "the-deployment-secret",
       lookup: async () => null,
+      consume: async () => true,
     });
 
     expect(verdict.ok).toBe(false);
@@ -246,6 +275,7 @@ describe("a callback that cannot prove which Bot it is", () => {
       encryptionKey: KEY,
       legacyToken: "the-deployment-secret",
       lookup: async () => null,
+      consume: async () => true,
     });
 
     expect(verdict.ok).toBe(false);
@@ -263,6 +293,7 @@ describe("a callback that cannot prove which Bot it is", () => {
       encryptionKey: KEY,
       legacyToken: "the-deployment-secret",
       lookup: async () => null,
+      consume: async () => true,
     });
 
     expect(verdict.ok).toBe(false);

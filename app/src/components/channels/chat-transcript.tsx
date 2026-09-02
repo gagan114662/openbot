@@ -69,7 +69,7 @@ const EMPTY_QUEUE: readonly QueuedMessage[] = [];
  *
  * The trigger only opens at the start of a line, so the chip is the first token or there is none.
  */
-function splitSkillChip(
+export function splitSkillChip(
   text: string,
   commandNames: string,
 ): { chip: string; rest: string } | null {
@@ -288,7 +288,7 @@ const FIRST_PAINT_STAGGER_SECONDS = 0.04;
  * is restored asynchronously, so a channel's transcript is empty for a beat. Anything appearing
  * after that is a live turn and is given no delay at all.
  */
-function createFirstPaintDelays() {
+export function createFirstPaintDelays() {
   const decided = new Map<string, number>();
   let settled = false;
 

@@ -1,4 +1,11 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  test,
+} from "bun:test";
 import { existsSync } from "node:fs";
 import { namesFor } from "../src/names";
 
@@ -17,7 +24,29 @@ import { namesFor } from "../src/names";
  * one of the reasons to skip, alongside there being no socket to talk to.
  */
 
-const SOCKET = process.env.DOCKER_SOCKET ?? "/var/run/docker.sock";
+function dockerSocket(): string | null {
+  if (process.env.DOCKER_SOCKET) return process.env.DOCKER_SOCKET;
+  if (process.env.DOCKER_HOST?.startsWith("unix://")) {
+    return process.env.DOCKER_HOST.slice("unix://".length);
+  }
+  if (existsSync("/var/run/docker.sock")) return "/var/run/docker.sock";
+
+  // Docker Desktop alternatives such as OrbStack expose their socket through the active Docker
+  // context instead of /var/run. Asking the installed CLI keeps this integration proof aligned with
+  // the daemon a developer actually uses; an absent CLI remains an honest skip.
+  const context = Bun.spawnSync([
+    "docker",
+    "context",
+    "inspect",
+    "--format",
+    "{{.Endpoints.docker.Host}}",
+  ]);
+  if (context.exitCode !== 0) return null;
+  const host = context.stdout.toString().trim();
+  return host.startsWith("unix://") ? host.slice("unix://".length) : null;
+}
+
+const SOCKET = dockerSocket();
 
 type DockerRuntime = {
   docker: InstanceType<typeof import("dockerode").default>;
@@ -33,15 +62,13 @@ type DockerRuntime = {
  * being tested.
  */
 async function dockerRuntime(): Promise<DockerRuntime | null> {
-  if (!existsSync(SOCKET)) return null;
+  if (!SOCKET || !existsSync(SOCKET)) return null;
   try {
     const supervisor = await import("../src/docker");
     if (!(await supervisor.reachable())) return null;
     const { default: Docker } = await import("dockerode");
     return {
-      docker: new Docker(
-        process.env.DOCKER_SOCKET ? { socketPath: SOCKET } : undefined,
-      ),
+      docker: new Docker({ socketPath: SOCKET }),
       supervisor,
     };
   } catch {
@@ -66,6 +93,31 @@ function withDocker(): DockerRuntime {
 
 /** Any small image that stays up when told to sleep. Nothing here tests what is inside it. */
 const IMAGE = process.env.SUPERVISOR_TEST_IMAGE ?? "debian:bookworm-slim";
+let pulledForThisSuite = false;
+
+beforeAll(async () => {
+  if (!runtime) return;
+  try {
+    await runtime.docker.getImage(IMAGE).inspect();
+  } catch {
+    const stream = await runtime.docker.pull(IMAGE);
+    await new Promise<void>((resolve, reject) => {
+      runtime.docker.modem.followProgress(stream, (error) =>
+        error ? reject(error) : resolve(),
+      );
+    });
+    pulledForThisSuite = true;
+  }
+});
+
+afterAll(async () => {
+  if (runtime && pulledForThisSuite) {
+    await runtime.docker
+      .getImage(IMAGE)
+      .remove()
+      .catch(() => undefined);
+  }
+});
 
 const BOT = "supervisortestbot";
 const result = namesFor(BOT);
@@ -280,6 +332,28 @@ describe.skipIf(runtime === null)(
       expect(first).not.toBeNull();
       expect(second).not.toBeNull();
       expect(after.Id).toBe(before.Id);
+    }, 180_000);
+
+    test("is replaced when a deployment secret changes", async () => {
+      await withDocker().supervisor.ensure(names, {
+        image: IMAGE,
+        environment: ["COMPUTER_TOKEN=old-token"],
+      });
+      const before = await withDocker()
+        .docker.getContainer(names.container)
+        .inspect();
+
+      await withDocker().supervisor.ensure(names, {
+        image: IMAGE,
+        environment: ["COMPUTER_TOKEN=new-token"],
+      });
+      const after = await withDocker()
+        .docker.getContainer(names.container)
+        .inspect();
+
+      expect(after.Id).not.toBe(before.Id);
+      expect(after.Config.Env).toContain("COMPUTER_TOKEN=new-token");
+      expect(after.Config.Env).not.toContain("COMPUTER_TOKEN=old-token");
     }, 180_000);
   },
 );

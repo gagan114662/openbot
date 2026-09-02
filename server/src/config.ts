@@ -208,6 +208,8 @@ export type DeploymentConfig = {
    * until it has.
    */
   auditRetentionDays: number | undefined;
+  /** Days to retain agent analytics, or undefined to keep it indefinitely. */
+  analyticsRetentionDays: number | undefined;
   oauth: {
     google?: { clientId: string; clientSecret: string };
   };
@@ -841,10 +843,24 @@ function auditRetentionDays(environment: Environment): number | undefined {
   return days;
 }
 
+function analyticsRetentionDays(environment: Environment): number | undefined {
+  const raw = optional(environment, "ANALYTICS_RETENTION_DAYS");
+  if (!raw) return undefined;
+  const days = Number(raw);
+  if (!Number.isInteger(days) || days < 1) {
+    throw new Error(
+      "ANALYTICS_RETENTION_DAYS must be a whole number of days, at least 1. Leave it unset to keep analytics forever.",
+    );
+  }
+  return days;
+}
+
 function agentStallTimeoutMs(environment: Environment): number {
   const raw = optional(environment, "AGENT_STALL_TIMEOUT_MS");
   if (!raw) {
-    return 0;
+    // A silent Bot must eventually give the conversation back. Two minutes is long enough for a
+    // slow model/tool round trip and short enough that a dead endpoint does not strand a run.
+    return 120_000;
   }
 
   const milliseconds = Number(raw);
@@ -884,6 +900,7 @@ export function loadConfig(
     runtime: runtimeCapabilities(environment),
     agentStallTimeoutMs: agentStallTimeoutMs(environment),
     auditRetentionDays: auditRetentionDays(environment),
+    analyticsRetentionDays: analyticsRetentionDays(environment),
     oauth: { google },
     auth,
     singleUser: singleUserEnabled(

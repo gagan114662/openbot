@@ -16,7 +16,7 @@
  * reads to the person as the Bot ignoring them.
  */
 import { createHash } from "node:crypto";
-import { type AuditStore, recordAuditEvent } from "../audit";
+import { type AuditStore, recordAuditEventBestEffort } from "../audit";
 import type { WorkQueue } from "../work/queue";
 import type { RunAssertion } from "./callback-token";
 import type { AgentProfileStore } from "./profile-store";
@@ -94,8 +94,11 @@ export function createHandoffDesk(options: {
   actorFor: (userId: string) => Promise<AgentActor | null>;
   auditStore: AuditStore;
   caps: HandoffCaps;
+  /** Queue namespace. Production uses bot.message; integration suites use an isolated kind. */
+  kind?: string;
 }): HandoffDesk {
   const { queue, profiles, mayAddress, actorFor, auditStore, caps } = options;
+  const kind = options.kind ?? HANDOFF_KIND;
 
   /** Said once, so the trail carries the same words the Bot was given. */
   async function refuse(
@@ -104,28 +107,32 @@ export function createHandoffDesk(options: {
     reason: string,
     refusal: string,
   ): Promise<HandoffOutcome> {
-    await recordAuditEvent(auditStore, {
-      eventType: "agent.handoff_refused",
-      targetType: "agent",
-      targetId: from.botId,
-      ...(from.actorId ? { actorUserId: from.actorId } : {}),
-      payload: {
-        // The same key `agent.handoff_offered` sets below, and for the same reason: the Audit
-        // screen renders `payload.bot` and nothing else in its Bot column, so a row without it
-        // shows a dash. The accepted row was given this and its refusal was not, which left the
-        // refusal — the one the trail says matters more, because a hop that happened is visible in
-        // the transcript and a refused one is invisible everywhere else — naming no Bot at all.
-        bot: from.botId,
-        from: from.botId,
-        // As the model named it, capped: untrusted input, kept because "who did it reach for" is the
-        // useful half of the question.
-        target: target.slice(0, 120),
-        run: from.runId,
-        ...(from.threadId ? { threadId: from.threadId } : {}),
-        depth: from.depth ?? 0,
-        reason,
+    await recordAuditEventBestEffort(
+      auditStore,
+      {
+        eventType: "agent.handoff_refused",
+        targetType: "agent",
+        targetId: from.botId,
+        ...(from.actorId ? { actorUserId: from.actorId } : {}),
+        payload: {
+          // The same key `agent.handoff_offered` sets below, and for the same reason: the Audit
+          // screen renders `payload.bot` and nothing else in its Bot column, so a row without it
+          // shows a dash. The accepted row was given this and its refusal was not, which left the
+          // refusal — the one the trail says matters more, because a hop that happened is visible in
+          // the transcript and a refused one is invisible everywhere else — naming no Bot at all.
+          bot: from.botId,
+          from: from.botId,
+          // As the model named it, capped: untrusted input, kept because "who did it reach for" is the
+          // useful half of the question.
+          target: target.slice(0, 120),
+          run: from.runId,
+          ...(from.threadId ? { threadId: from.threadId } : {}),
+          depth: from.depth ?? 0,
+          reason,
+        },
       },
-    });
+      "handoff.refuse",
+    );
     return { ok: false, refusal };
   }
 
@@ -307,7 +314,7 @@ export function createHandoffDesk(options: {
         .slice(0, 32)}`;
 
       const offered = await queue.offer({
-        kind: HANDOFF_KIND,
+        kind,
         key,
         /*
          * Counted from the rows rather than from a variable, because a run whose hops land on
@@ -384,27 +391,31 @@ export function createHandoffDesk(options: {
         );
       }
 
-      await recordAuditEvent(auditStore, {
-        eventType: "agent.handoff_offered",
-        targetType: "agent",
-        targetId: found.id,
-        ...(from.actorId ? { actorUserId: from.actorId } : {}),
-        payload: {
-          // The Bot that did this, under the key the Audit screen reads for its Bot column. `from`
-          // below says the same thing and is what the payload is read by, but the screen renders
-          // `payload.bot` and nothing else, so without this the two handoff rows are the only Bot
-          // actions on a screen headed "Every action a Bot took" that name no Bot.
-          bot: from.botId,
-          from: from.botId,
-          to: found.id,
-          run: from.runId,
-          ...(from.threadId ? { threadId: from.threadId } : {}),
-          depth: depth + 1,
-          // What was asked, so the trail says what one Bot sent another rather than merely that it
-          // did. The task is the Bot's own words about the work, not a person's private content.
-          task: task.slice(0, 500),
+      await recordAuditEventBestEffort(
+        auditStore,
+        {
+          eventType: "agent.handoff_offered",
+          targetType: "agent",
+          targetId: found.id,
+          ...(from.actorId ? { actorUserId: from.actorId } : {}),
+          payload: {
+            // The Bot that did this, under the key the Audit screen reads for its Bot column. `from`
+            // below says the same thing and is what the payload is read by, but the screen renders
+            // `payload.bot` and nothing else, so without this the two handoff rows are the only Bot
+            // actions on a screen headed "Every action a Bot took" that name no Bot.
+            bot: from.botId,
+            from: from.botId,
+            to: found.id,
+            run: from.runId,
+            ...(from.threadId ? { threadId: from.threadId } : {}),
+            depth: depth + 1,
+            // What was asked, so the trail says what one Bot sent another rather than merely that it
+            // did. The task is the Bot's own words about the work, not a person's private content.
+            task: task.slice(0, 500),
+          },
         },
-      });
+        "handoff.offer",
+      );
 
       return { ok: true, to: found.id, toName: found.name };
     },

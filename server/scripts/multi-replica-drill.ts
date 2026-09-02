@@ -1,17 +1,57 @@
-const ports = [3101, 3102];
-const requestCount = 200;
-const concurrency = 20;
+import { existsSync } from "node:fs";
+
+const ports = (process.env.OPENBOT_REPLICA_DRILL_PORTS ?? "3101,3102")
+  .split(",")
+  .map((value) => Number.parseInt(value, 10));
+const requestCount = Number.parseInt(
+  process.env.OPENBOT_REPLICA_DRILL_REQUESTS ?? "200",
+  10,
+);
+const concurrency = Number.parseInt(
+  process.env.OPENBOT_REPLICA_DRILL_CONCURRENCY ?? "20",
+  10,
+);
+if (
+  ports.length !== 2 ||
+  ports.some((port) => !Number.isInteger(port) || port < 1024 || port > 65_535)
+) {
+  throw new Error("OPENBOT_REPLICA_DRILL_PORTS must name two usable ports");
+}
+if (!Number.isInteger(requestCount) || requestCount < 1) {
+  throw new Error("OPENBOT_REPLICA_DRILL_REQUESTS must be a positive integer");
+}
+if (!Number.isInteger(concurrency) || concurrency < 1) {
+  throw new Error(
+    "OPENBOT_REPLICA_DRILL_CONCURRENCY must be a positive integer",
+  );
+}
 const processes = ports.map((port) =>
-  Bun.spawn(["bun", "--env-file=../.env", "src/index.ts"], {
-    cwd: "server",
-    env: { ...process.env, PORT: String(port) },
-    stdout: "pipe",
-    stderr: "pipe",
-  }),
+  Bun.spawn(
+    [
+      "bun",
+      ...(existsSync(".env") || existsSync("../.env")
+        ? ["--env-file=../.env"]
+        : []),
+      "src/index.ts",
+    ],
+    {
+      cwd: "server",
+      env: { ...process.env, PORT: String(port) },
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  ),
 );
 
 async function waitFor(port: number): Promise<void> {
-  for (let attempt = 0; attempt < 60; attempt += 1) {
+  const process = processes[ports.indexOf(port)];
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    if (process.exitCode !== null) {
+      const stderr = await new Response(process.stderr).text();
+      throw new Error(
+        `Replica on port ${port} exited with ${process.exitCode}: ${stderr}`,
+      );
+    }
     try {
       const response = await fetch(`http://127.0.0.1:${port}/health`);
       if (response.ok) return;
@@ -20,7 +60,9 @@ async function waitFor(port: number): Promise<void> {
     }
     await Bun.sleep(250);
   }
-  throw new Error(`Replica on port ${port} did not become healthy`);
+  throw new Error(
+    `Replica on port ${port} did not become healthy within 30 seconds`,
+  );
 }
 
 try {
@@ -77,5 +119,3 @@ try {
   for (const process of processes) process.kill();
   await Promise.all(processes.map((process) => process.exited));
 }
-
-export {};

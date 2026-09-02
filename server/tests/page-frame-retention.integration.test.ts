@@ -42,6 +42,30 @@ async function frame(daysAgo: number, index: number): Promise<void> {
     .where(eq(computerPageFrame.toolCallId, `turn-${index}`));
 }
 
+/**
+ * Build a retention-sized fixture without spending the test's deadline on hundreds of serial
+ * insert/update round trips. The concurrency assertion below is about two purges overlapping, not
+ * about how quickly a laptop can seed PostgreSQL while 200 other test files are using it.
+ */
+async function frames(daysAgo: number, count: number): Promise<void> {
+  await database.insert(computerPageFrame).values(
+    Array.from({ length: count }, (_, offset) => {
+      const index = offset + 1;
+      return {
+        computerId: COMPUTER,
+        toolCallId: `turn-${index}`,
+        url: `https://example.com/${index}`,
+        title: `page ${index}`,
+        frame: "iVBORw0KGgo=",
+      };
+    }),
+  );
+  await database
+    .update(computerPageFrame)
+    .set({ capturedAt: sql`now() - make_interval(days => ${daysAgo})` })
+    .where(eq(computerPageFrame.computerId, COMPUTER));
+}
+
 const kept = () =>
   database
     .select({ toolCallId: computerPageFrame.toolCallId })
@@ -90,7 +114,7 @@ describe("page frame retention", () => {
   });
 
   test("purge past its batch size removes every eligible row", async () => {
-    for (let index = 1; index <= 205; index += 1) await frame(45, index);
+    await frames(45, 205);
 
     await store.purge(FRAME_RETENTION_MS);
     expect(await kept()).toHaveLength(0);
@@ -112,7 +136,7 @@ describe("page frame retention", () => {
    * not to have is double-counting or deadlocking on the same `ctid`s.
    */
   test("two sweeps at once remove each row once and neither stalls", async () => {
-    for (let index = 1; index <= 400; index += 1) await frame(45, index);
+    await frames(45, 400);
 
     await Promise.all([
       store.purge(FRAME_RETENTION_MS),

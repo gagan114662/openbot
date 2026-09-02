@@ -6,4 +6,5 @@ export * from "./computer";
 export * from "./core";
 export * from "./coworker";
 export * from "./plugins";
+export * from "./production";
 export * from "./work";

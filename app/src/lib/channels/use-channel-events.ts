@@ -49,6 +49,29 @@ export type ChannelActivityEvent = {
   busy?: boolean;
 };
 
+type ChannelEventListener = (event: ChannelSocketMessage | "connected") => void;
+const channelEventListeners = new Set<ChannelEventListener>();
+
+/**
+ * Observe the channel wire directly.
+ *
+ * A transcript used to infer new messages from the roster query cache. That made a deep-linked
+ * channel deaf until the roster had loaded and made reconnect recovery refresh the sidebar but not
+ * the open conversation. The socket is the event source for both, so expose its activity without
+ * making a second connection. Every browser tab already has this socket, which also makes a turn
+ * sent in another tab visible in the open transcript.
+ */
+export function subscribeChannelEvents(listener: ChannelEventListener) {
+  channelEventListeners.add(listener);
+  return () => {
+    channelEventListeners.delete(listener);
+  };
+}
+
+export function publishChannelEvent(event: ChannelSocketMessage | "connected") {
+  for (const listener of channelEventListeners) listener(event);
+}
+
 /** The infinite query's cache, which holds pages rather than one array. */
 type ChannelCache = { pages: ChannelPage[]; pageParams: unknown[] };
 
@@ -166,6 +189,7 @@ export function useChannelEvents() {
 
       socket.onopen = () => {
         retryDelay = FIRST_RETRY_MS;
+        publishChannelEvent("connected");
         // Recover events missed while the socket was disconnected.
         void queryClient.invalidateQueries({ queryKey: channelKeys.list() });
       };
@@ -181,11 +205,13 @@ export function useChannelEvents() {
         // Refetch rather than patch: there is no delta to apply. Checked before anything reads
         // `channelId`, because this message has none.
         if (isResync(parsed)) {
+          publishChannelEvent(parsed);
           void queryClient.invalidateQueries({ queryKey: channelKeys.list() });
           return;
         }
 
         const activity = parsed;
+        publishChannelEvent(activity);
 
         /*
          * The list is paged, so the cache holds pages rather than one array.
@@ -251,12 +277,15 @@ export function useChannelEvents() {
 /**
  * Most recent first, where starting a conversation counts as activity.
  *
- * Deliberately the same rule the roster query uses, `coalesce(last_message_at, created_at) desc` in
- * channels/routes.ts. If these two disagree the list reorders itself the moment an event arrives,
- * which looks like rows jumping for no reason.
+ * Deliberately the same rule the roster query uses: the later of creation and last-message time.
+ * Browser and database clocks can differ, and a slightly older message timestamp must not make a
+ * newly-created channel move down. If these two rules disagree the list reorders itself the moment
+ * an event arrives, which looks like rows jumping for no reason.
  */
 function byRecency(left: ChannelSummary, right: ChannelSummary) {
   const at = (channel: ChannelSummary) =>
-    channel.lastMessageAt ?? channel.createdAt;
+    channel.lastMessageAt && channel.lastMessageAt > channel.createdAt
+      ? channel.lastMessageAt
+      : channel.createdAt;
   return at(right).localeCompare(at(left));
 }

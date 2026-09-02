@@ -1,0 +1,1 @@
+ALTER TABLE "factory_workflow_stages" ADD COLUMN "checks" jsonb DEFAULT '{"items":[]}'::jsonb NOT NULL;

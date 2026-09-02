@@ -7,13 +7,16 @@ import type { AppVariables } from "../src/auth/guards";
 function testApp(
   role: "admin" | "user",
   overrides: Partial<AnalyticsStore> = {},
+  canUseBot: (botId: string) => boolean = () => true,
 ) {
   const calls: unknown[] = [];
+  const ingest = async (actor: string, body: unknown) => {
+    calls.push({ actor, body });
+    return { sessionId: "session-1", acceptedEvents: 1, acceptedSpans: 0 };
+  };
   const store = {
-    ingest: async (actor: string, body: unknown) => {
-      calls.push({ actor, body });
-      return { sessionId: "session-1", acceptedEvents: 1, acceptedSpans: 0 };
-    },
+    ingest,
+    ingestClient: ingest,
     list: async () => ({ sessions: [] }),
     detail: async () => null,
     overview: async () => ({ totals: { sessions: 0 }, models: [] }),
@@ -43,11 +46,33 @@ function testApp(
     context.set("actor", { id: "person-1", email: "person@example.com", role });
     await next();
   };
-  app.route("/api/analytics", createAnalyticsRoutes(store, authenticate));
+  app.route(
+    "/api/analytics",
+    createAnalyticsRoutes(store, authenticate, async (_actor, botId) =>
+      canUseBot(botId),
+    ),
+  );
   return { app, calls };
 }
 
 describe("agent analytics routes", () => {
+  test("passes bounded pagination through the admin session endpoint", async () => {
+    let query: unknown;
+    const { app } = testApp("admin", {
+      list: async (received) => {
+        query = received;
+        return { sessions: [] };
+      },
+    });
+
+    const response = await app.request(
+      "http://openbot.test/api/analytics/admin/sessions?search=handoff&limit=25&offset=50",
+    );
+
+    expect(response.status).toBe(200);
+    expect(query).toMatchObject({ search: "handoff", limit: 25, offset: 50 });
+  });
+
   test("attributes ingestion to the signed-in actor, not a supplied user id", async () => {
     const { app, calls } = testApp("user");
     const response = await app.request(
@@ -69,6 +94,73 @@ describe("agent analytics routes", () => {
     );
     expect(response.status).toBe(202);
     expect(calls[0]).toMatchObject({ actor: "person-1" });
+  });
+
+  test("rejects metrics attributed to a Bot the signed-in person cannot use", async () => {
+    const { app, calls } = testApp(
+      "user",
+      {},
+      (botId) => botId !== "private-finance-bot",
+    );
+    const response = await app.request(
+      "http://openbot.test/api/analytics/ingest",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          session: {
+            id: "spoofed-session",
+            source: "openbot",
+            agentId: "private-finance-bot",
+            status: "completed",
+            taskCompleted: true,
+          },
+        }),
+      },
+    );
+
+    expect(response.status).toBe(404);
+    await expect(response.json()).resolves.toEqual({
+      error: "That analytics agent is not available.",
+    });
+    expect(calls).toHaveLength(0);
+  });
+
+  test("rejects a non-admin spoof over a real HTTP socket", async () => {
+    const { app, calls } = testApp(
+      "user",
+      {},
+      (botId) => botId !== "another-users-bot",
+    );
+    const server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      fetch: app.fetch,
+    });
+    try {
+      const response = await fetch(
+        `http://127.0.0.1:${server.port}/api/analytics/ingest`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            session: {
+              id: "network-spoof",
+              source: "openbot",
+              agentId: "another-users-bot",
+              status: "completed",
+            },
+          }),
+        },
+      );
+      expect(response.status).toBe(404);
+      await expect(response.json()).resolves.toEqual({
+        error: "That analytics agent is not available.",
+      });
+      expect(calls).toHaveLength(0);
+    } finally {
+      server.stop(true);
+    }
   });
 
   test("restores only the signed-in person's evaluation state", async () => {

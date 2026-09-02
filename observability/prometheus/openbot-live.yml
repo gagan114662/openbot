@@ -1,0 +1,14 @@
+global:
+  scrape_interval: 2s
+  evaluation_interval: 2s
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+rule_files:
+  - /etc/prometheus/openbot-live.rules.yml
+scrape_configs:
+  - job_name: openbot-production-engineer
+    metrics_path: /api/production-engineer/metrics
+    static_configs:
+      - targets: ["host.docker.internal:3001"]

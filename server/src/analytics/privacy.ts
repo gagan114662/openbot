@@ -1,10 +1,18 @@
 export type AnalyticsPrivacyMode =
-  "full" | "metadata_only" | "customer_enriched";
+  | "full"
+  | "metadata_only"
+  | "customer_enriched";
 
 const REDACTORS: readonly [string, RegExp][] = [
-  ["EMAIL", /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi],
-  ["PHONE", /(?<!\d)(?:\+?\d[\d ().-]{7,}\d)(?!\d)/g],
-  ["CARD", /\b(?:\d[ -]*?){13,19}\b/g],
+  ["EMAIL", /[^\s@<>]+@[^\s@<>]+\.[^\s@<>.,;:!?]+/giu],
+  ["AWS_KEY", /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/g],
+  ["GOOGLE_KEY", /\bAIza[0-9A-Za-z_-]{35}\b/g],
+  ["JWT", /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b/g],
+  // Hex boundaries matter: UUIDs and trace ids contain long digit/hyphen runs,
+  // but are correlation keys rather than phone/card data. Corrupting them
+  // breaks multi-turn joins while providing no privacy benefit.
+  ["PHONE", /(?<![A-Fa-f0-9])(?:\+?\d[\d ().-]{7,}\d)(?![A-Fa-f0-9])/g],
+  ["CARD", /(?<![A-Fa-f0-9])(?:\d[ -]*?){13,19}(?![A-Fa-f0-9])/g],
   ["SSN", /\b\d{3}-?\d{2}-?\d{4}\b/g],
   ["IP", /\b(?:\d{1,3}\.){3}\d{1,3}\b/g],
   ["SECRET", /\b(?:sk|pk|rk|xox[abprs]|gh[opusr])[_-]?[A-Za-z0-9_-]{12,}\b/g],

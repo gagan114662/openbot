@@ -104,7 +104,17 @@ export type RunAssertion = {
   depth?: number;
 };
 
-type SignedRun = RunAssertion & { exp: number };
+type SignedRun = RunAssertion & {
+  exp: number;
+  jti: string;
+  purpose: "lineage" | "tool-call";
+};
+
+type VerifiedRunAssertion = RunAssertion & {
+  assertionId: string;
+  expiresAt: number;
+  purpose: SignedRun["purpose"];
+};
 
 /**
  * Mint the assertion for one run.
@@ -117,14 +127,32 @@ export function mintRunAssertion(
   run: RunAssertion,
   encryptionKey: string,
   now: number = Date.now(),
+  purpose: SignedRun["purpose"] = "lineage",
 ): string {
   const payload: SignedRun = {
     ...run,
     depth: run.depth ?? 0,
     exp: now + RUN_TTL_MS,
+    jti: randomBytes(18).toString("base64url"),
+    purpose,
   };
   const value = Buffer.from(JSON.stringify(payload)).toString("base64url");
   return sign(value, encryptionKey, RUN_LABEL);
+}
+
+/** A bounded set of one-use tickets lets a run call several tools without making one ticket replayable. */
+export function mintToolCallAssertions(
+  run: RunAssertion,
+  encryptionKey: string,
+  count = 32,
+  now: number = Date.now(),
+): string[] {
+  if (!Number.isInteger(count) || count < 1 || count > 64) {
+    throw new Error("Tool-call assertion count must be between 1 and 64.");
+  }
+  return Array.from({ length: count }, () =>
+    mintRunAssertion(run, encryptionKey, now, "tool-call"),
+  );
 }
 
 /**
@@ -133,11 +161,11 @@ export function mintRunAssertion(
  * Nothing on any doubt: a bad signature, an expired one, a payload that is not the right shape. The
  * caller refuses when this returns null, so every unclear case fails closed.
  */
-export function readRunAssertion(
+function readVerifiedRunAssertion(
   signed: unknown,
   encryptionKey: string,
   now: number = Date.now(),
-): RunAssertion | null {
+): VerifiedRunAssertion | null {
   if (typeof signed !== "string" || !signed) return null;
 
   const value = verify(signed, encryptionKey, RUN_LABEL);
@@ -151,7 +179,9 @@ export function readRunAssertion(
       typeof payload.botId !== "string" ||
       typeof payload.actorId !== "string" ||
       typeof payload.runId !== "string" ||
-      typeof payload.exp !== "number"
+      typeof payload.exp !== "number" ||
+      typeof payload.jti !== "string" ||
+      !new Set(["lineage", "tool-call"]).has(payload.purpose ?? "")
     ) {
       return null;
     }
@@ -160,6 +190,9 @@ export function readRunAssertion(
       botId: payload.botId,
       actorId: payload.actorId,
       runId: payload.runId,
+      assertionId: payload.jti,
+      expiresAt: payload.exp,
+      purpose: payload.purpose as SignedRun["purpose"],
       ...(typeof payload.threadId === "string" && payload.threadId
         ? { threadId: payload.threadId }
         : {}),
@@ -181,6 +214,22 @@ export function readRunAssertion(
   }
 }
 
+export function readRunAssertion(
+  signed: unknown,
+  encryptionKey: string,
+  now: number = Date.now(),
+): RunAssertion | null {
+  const assertion = readVerifiedRunAssertion(signed, encryptionKey, now);
+  if (!assertion) return null;
+  const {
+    assertionId: _assertionId,
+    expiresAt: _expiresAt,
+    purpose: _purpose,
+    ...run
+  } = assertion;
+  return run;
+}
+
 export type CallVerdict =
   | {
       ok: true;
@@ -189,6 +238,8 @@ export type CallVerdict =
       runId: string;
       threadId?: string;
       depth: number;
+      /** Which credential authenticated the caller, so compatibility use can be retired by evidence. */
+      credential: "per-bot" | "legacy";
     }
   | { ok: false; status: 401 | 403; reason: string };
 
@@ -219,13 +270,16 @@ export async function authoriseAgentCall(options: {
   legacyToken?: string;
   /** Which agent holds a token hash, if any. */
   lookup: (hash: string) => Promise<{ id: string } | null>;
+  /** Atomically consumes one signed tool-call ticket. */
+  consume: (assertionId: string, expiresAt: number) => Promise<boolean>;
   now?: number;
 }): Promise<CallVerdict> {
-  const { presented, run, encryptionKey, legacyToken, lookup, now } = options;
+  const { presented, run, encryptionKey, legacyToken, lookup, consume, now } =
+    options;
 
   if (!presented) return { ok: false, status: 401, reason: "Not authorised." };
 
-  const assertion = readRunAssertion(run, encryptionKey, now);
+  const assertion = readVerifiedRunAssertion(run, encryptionKey, now);
   /*
    * Refused without saying which half was wrong.
    *
@@ -233,12 +287,18 @@ export async function authoriseAgentCall(options: {
    * token is good, which is the useful half of a guess.
    */
   if (!assertion) return { ok: false, status: 401, reason: "Not authorised." };
+  if (assertion.purpose !== "tool-call") {
+    return { ok: false, status: 401, reason: "Not authorised." };
+  }
 
-  const caller = looksLikeCallbackToken(presented)
+  const perBotCaller = looksLikeCallbackToken(presented)
     ? await lookup(hashCallbackToken(presented))
-    : legacyToken && sameToken(presented, legacyToken)
+    : null;
+  const legacyCaller =
+    !perBotCaller && legacyToken && sameToken(presented, legacyToken)
       ? { id: assertion.botId }
       : null;
+  const caller = perBotCaller ?? legacyCaller;
 
   if (!caller) return { ok: false, status: 401, reason: "Not authorised." };
 
@@ -256,12 +316,17 @@ export async function authoriseAgentCall(options: {
     };
   }
 
+  if (!(await consume(assertion.assertionId, assertion.expiresAt))) {
+    return { ok: false, status: 401, reason: "Not authorised." };
+  }
+
   return {
     ok: true,
     botId: assertion.botId,
     actorId: assertion.actorId,
     runId: assertion.runId,
     depth: assertion.depth ?? 0,
+    credential: perBotCaller ? "per-bot" : "legacy",
     ...(assertion.threadId ? { threadId: assertion.threadId } : {}),
   };
 }

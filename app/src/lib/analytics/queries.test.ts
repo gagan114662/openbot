@@ -1,5 +1,28 @@
-import { describe, expect, test } from "bun:test";
-import { type AnalyticsSession, analyticsSessionLabel } from "./queries";
+import { afterEach, describe, expect, mock, test } from "bun:test";
+import {
+  type AnalyticsSession,
+  analyticsSessionLabel,
+  fetchAnalyticsSessions,
+  revenueMicrosFromDollars,
+} from "./queries";
+
+const originalFetch = globalThis.fetch;
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+});
+
+describe("business outcome revenue", () => {
+  test("converts decimal dollars to exact integer micros", () => {
+    expect(revenueMicrosFromDollars("12.50")).toBe(12_500_000);
+    expect(revenueMicrosFromDollars("0.000001")).toBe(1);
+  });
+
+  test("refuses negative, over-precise, or non-numeric revenue", () => {
+    expect(revenueMicrosFromDollars("-1")).toBeNull();
+    expect(revenueMicrosFromDollars("1.0000001")).toBeNull();
+    expect(revenueMicrosFromDollars("twelve")).toBeNull();
+  });
+});
 
 const session = {
   id: "channel:opaque-id",
@@ -24,4 +47,18 @@ describe("analytics session labels", () => {
       "channel:opaque-id",
     );
   });
+});
+
+test("the session explorer requests one bounded page", async () => {
+  let requested = "";
+  globalThis.fetch = mock(async (input) => {
+    requested = String(input);
+    return Response.json({ sessions: [] });
+  }) as unknown as typeof fetch;
+
+  await fetchAnalyticsSessions("failed handoff", 2, 25);
+
+  expect(requested).toBe(
+    "/api/analytics/admin/sessions?limit=25&offset=50&search=failed+handoff",
+  );
 });

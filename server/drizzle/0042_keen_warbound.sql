@@ -1,0 +1,1 @@
+ALTER TABLE "shadow_evaluations" ADD COLUMN "evaluator_version" text DEFAULT 'token-jaccard/v1' NOT NULL;

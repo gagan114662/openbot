@@ -4,6 +4,7 @@ import {
   IconCode,
   IconDeviceDesktop,
   IconFileText,
+  IconHeartbeat,
   IconKey,
   IconLayoutGrid,
   IconListDetails,
@@ -12,6 +13,7 @@ import {
   IconShieldCheck,
   IconUsers,
 } from "@tabler/icons-react";
+import { useQuery } from "@tanstack/react-query";
 import {
   createFileRoute,
   Link,
@@ -31,6 +33,7 @@ import {
   ItemTitle,
 } from "@/components/ui/item";
 import { Separator } from "@/components/ui/separator";
+import { fetchDeploymentHealth } from "@/lib/system/health";
 
 export const Route = createFileRoute("/_authed/admin/")({
   component: RouteComponent,
@@ -150,11 +153,48 @@ const SECTIONS: {
 ];
 
 function RouteComponent() {
+  const health = useQuery({
+    queryKey: ["deployment-health"],
+    queryFn: fetchDeploymentHealth,
+    refetchInterval: 10_000,
+  });
+  const ready = health.data?.status === "ok";
+
   return (
     <PageShell
       description="Settings that apply to everybody in this deployment. Anything here affects every person and every Bot, which is what separates it from your own preferences."
       title="Admin"
     >
+      <PageSection
+        description="Live readiness, checked against the database used by real requests."
+        title="System status"
+      >
+        <PageRows>
+          <Item size="sm">
+            <ItemMedia>
+              <IconHeartbeat
+                className={`size-4 ${ready ? "text-emerald-600" : "text-destructive"}`}
+              />
+            </ItemMedia>
+            <ItemContent>
+              <ItemTitle>
+                {health.isPending
+                  ? "Checking deployment…"
+                  : ready
+                    ? "Ready"
+                    : "Not ready"}
+              </ItemTitle>
+              <ItemDescription>
+                {health.isPending
+                  ? "Testing required dependencies."
+                  : ready
+                    ? "API process and database are reachable."
+                    : "The API process is live, but its database is unavailable."}
+              </ItemDescription>
+            </ItemContent>
+          </Item>
+        </PageRows>
+      </PageSection>
       {SECTIONS.map((section) => (
         <PageSection
           description={section.description || undefined}

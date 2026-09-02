@@ -4,6 +4,10 @@ import {
   verifyMoneyTotal,
   verifyRiskFlags,
 } from "../shared/domain-verifiers";
+import {
+  scoreEpisode,
+  type VerifiableEpisode,
+} from "../shared/verifiable-reward";
 
 type Task = { id: string; version: string; verifier: string; input: unknown };
 const suite = parse(await Bun.file("examples/fintech/evals.yaml").text()) as {
@@ -29,3 +33,27 @@ for (const task of suite.tasks) {
   if (!result.passed) failures += 1;
 }
 if (failures > 0) process.exit(1);
+
+const episodesFlag = process.argv.indexOf("--episodes");
+if (episodesFlag >= 0) {
+  const path = process.argv[episodesFlag + 1];
+  if (!path) throw new Error("--episodes requires a JSONL path");
+  const lines = (await Bun.file(path).text()).split(/\r?\n/).filter(Boolean);
+  for (const line of lines) {
+    const record = JSON.parse(line) as
+      | { episode?: VerifiableEpisode }
+      | VerifiableEpisode;
+    const episode =
+      "episode" in record && record.episode
+        ? record.episode
+        : (record as VerifiableEpisode);
+    const scored = scoreEpisode(episode);
+    console.log(
+      `${scored.eligibleForTraining ? "PASS" : "FAIL"} recorded:${episode.id}`,
+    );
+    if (!scored.eligibleForTraining) failures += 1;
+  }
+  if (lines.length === 0)
+    throw new Error("The recorded episode file was empty.");
+  if (failures > 0) process.exit(1);
+}

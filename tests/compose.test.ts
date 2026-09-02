@@ -10,6 +10,8 @@ test("provides PostgreSQL with pgvector for local development", () => {
 
   expect(compose).toContain("postgres:");
   expect(compose).toContain("pgvector/pgvector:");
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: literal compose interpolation is the fixture under test.
+  expect(compose).toContain("max_connections=${POSTGRES_MAX_CONNECTIONS:-200}");
   // biome-ignore lint/suspicious/noTemplateCurlyInString: the literal `${...}` is the fixture — this asserts on unexpanded placeholder text, so a real template would break the test.
   expect(compose).toContain("${POSTGRES_PORT:-5432}:5432");
 });
@@ -152,4 +154,53 @@ test("carries per-Bot egress into the computer and the supervisor", () => {
 
   // Optional, because a deployment with no proxy is the ordinary case and must still start.
   expect(compose).toContain("required: false");
+});
+
+test("runs Chromium as non-root with its process sandbox enabled", () => {
+  const compose = readFileSync(
+    join(import.meta.dir, "..", "docker-compose.yml"),
+    "utf8",
+  );
+  const image = readFileSync(
+    join(import.meta.dir, "..", "agent-computer", "Dockerfile"),
+    "utf8",
+  );
+  const seccomp = JSON.parse(
+    readFileSync(
+      join(import.meta.dir, "..", "agent-computer", "seccomp_profile.json"),
+      "utf8",
+    ),
+  ) as { syscalls?: Array<{ names?: string[] }> };
+
+  expect(image).toContain("USER pwuser");
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: literal compose interpolation under test.
+  expect(compose).toContain("COMPUTER_SANDBOX: ${COMPUTER_SANDBOX:-on}");
+  expect(compose).toContain("seccomp=./agent-computer/seccomp_profile.json");
+  expect(compose).toContain("cap_add: [SYS_CHROOT]");
+  expect(
+    seccomp.syscalls?.some((rule) => rule.names?.includes("unshare")),
+  ).toBe(true);
+});
+
+test("ships a real Prometheus to Alertmanager to signed-ingress path", () => {
+  const compose = readFileSync(
+    join(import.meta.dir, "..", "docker-compose.yml"),
+    "utf8",
+  );
+  const rules = readFileSync(
+    join(
+      import.meta.dir,
+      "..",
+      "observability",
+      "prometheus",
+      "openbot-live.rules.yml",
+    ),
+    "utf8",
+  );
+
+  expect(compose).toContain("prom/prometheus:");
+  expect(compose).toContain("prom/alertmanager:");
+  expect(compose).toContain("alert-relay.mjs");
+  expect(rules).toContain("openbot_agent_failures_total > 0");
+  expect(rules).toContain("monitor_key: analytics-failure-rate");
 });

@@ -1,15 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { providerName, signInWith } from "@/lib/auth/client";
 
-/*
- * A browser origin, which the sign-in call needs for its callback URL and this environment has no
- * window to supply. Stubbed rather than designed around: where the browser sends somebody back to
- * is the browser's own business, and threading it through as an argument would only move the same
- * value to the caller.
- */
-(globalThis as { window?: unknown }).window = {
-  location: { origin: "http://localhost:3010" },
-};
+const origin = "http://localhost:3010";
 
 /**
  * Starting sign-in, for each provider a deployment can configure.
@@ -25,10 +17,14 @@ describe("signInWith", () => {
     async (provider) => {
       const asked: string[] = [];
 
-      await signInWith(provider, async (input) => {
-        asked.push(input.provider);
-        return {};
-      });
+      await signInWith(
+        provider,
+        async (input) => {
+          asked.push(input.provider);
+          return {};
+        },
+        origin,
+      );
 
       expect(asked).toEqual([provider]);
     },
@@ -37,10 +33,14 @@ describe("signInWith", () => {
   test("sends the browser back where it started", async () => {
     let callbackURL = "";
 
-    await signInWith("google", async (input) => {
-      callbackURL = input.callbackURL;
-      return {};
-    });
+    await signInWith(
+      "google",
+      async (input) => {
+        callbackURL = input.callbackURL;
+        return {};
+      },
+      origin,
+    );
 
     expect(callbackURL).toBe("http://localhost:3010");
   });
@@ -50,7 +50,7 @@ describe("signInWith", () => {
       error: { message: "That provider is not configured." },
     });
 
-    expect(signInWith("okta", refuse)).rejects.toThrow(
+    expect(signInWith("okta", refuse, origin)).rejects.toThrow(
       "That provider is not configured.",
     );
   });
@@ -64,12 +64,14 @@ describe("signInWith", () => {
   test("names the provider when the client says nothing", async () => {
     const refuse = async () => ({ error: {} });
 
-    expect(signInWith("microsoft", refuse)).rejects.toThrow("Microsoft");
+    expect(signInWith("microsoft", refuse, origin)).rejects.toThrow(
+      "Microsoft",
+    );
   });
 
   test("resolves quietly when the redirect is under way", async () => {
     expect(
-      signInWith("google", async () => ({ error: null })),
+      signInWith("google", async () => ({ error: null }), origin),
     ).resolves.toBeUndefined();
   });
 });

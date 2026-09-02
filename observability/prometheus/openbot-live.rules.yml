@@ -1,0 +1,12 @@
+groups:
+  - name: openbot-live-proof
+    rules:
+      - alert: OpenBotObservedAgentFailure
+        expr: openbot_agent_failures_total > 0
+        for: 0s
+        labels:
+          severity: warning
+          monitor_key: analytics-failure-rate
+        annotations:
+          summary: "OpenBot has observed a real failed agent session"
+          openbot_value: "{{ $value }}"

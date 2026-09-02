@@ -9,6 +9,7 @@
       "!app/src/lib/generated/application-config.ts",
       "!app/src/routeTree.gen.ts",
       "!server/drizzle",
+      "!**/.openbot",
       "!.codex-adapter-usage.json"
     ]
   },

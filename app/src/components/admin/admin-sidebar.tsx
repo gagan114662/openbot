@@ -8,6 +8,7 @@ import {
   IconLayoutGrid,
   IconListDetails,
   IconChartDots3,
+  IconHeartbeat,
   IconPuzzle,
   IconShieldCheck,
   IconUsers,
@@ -51,6 +52,11 @@ const GROUPS: {
         title: "Agent Analytics",
         icon: IconChartDots3,
         linkOptions: { to: "/admin/analytics" },
+      },
+      {
+        title: "Production Engineer",
+        icon: IconHeartbeat,
+        linkOptions: { to: "/admin/production-engineer" },
       },
       {
         title: "Credentials",

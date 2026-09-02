@@ -15,6 +15,10 @@ import {
  */
 
 describe("what the trail says a row was", () => {
+  test("names spoofed analytics attribution as a refusal", () => {
+    expect(outcomeOf("analytics.ingest_refused")).toBe("refused");
+  });
+
   test("names a hop a boundary refused as a refusal", () => {
     expect(outcomeOf("agent.handoff_refused")).toBe("refused");
   });

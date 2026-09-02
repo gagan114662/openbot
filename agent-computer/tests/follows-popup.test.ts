@@ -1,15 +1,15 @@
+import { afterAll, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, describe, expect, test } from "bun:test";
 
 /**
  * Asked for by name, like the deployment journey at the repository root: it launches a real Chromium,
  * which the machine running `bun test` is not required to have. The import is inside the test rather
  * than at the top of the file for the same reason.
  *
- *   cd agent-computer && bunx playwright install chromium
- *   OPENBOT_COMPUTER_BROWSER=1 bun test tests/follows-popup.test.ts
+ *   bunx playwright install chromium
+ *   bun run test:live-screen
  */
 const asked = process.env.OPENBOT_COMPUTER_BROWSER === "1";
 const LAUNCH_TIMEOUT_MS = 120_000;

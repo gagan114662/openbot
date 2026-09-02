@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import Docker from "dockerode";
 import {
   BOT_LABEL,
@@ -27,6 +29,12 @@ const docker = new Docker(
   process.env.DOCKER_SOCKET
     ? { socketPath: process.env.DOCKER_SOCKET }
     : undefined,
+);
+
+const chromiumSeccompProfile = readFileSync(
+  process.env.COMPUTER_SECCOMP_PROFILE ??
+    resolve(process.cwd(), "agent-computer/seccomp_profile.json"),
+  "utf8",
 );
 
 /** The port the computer listens on inside its own container. */
@@ -171,6 +179,7 @@ async function inspectOwned(names: ComputerNames): Promise<{
   status: string;
   port?: number;
   image?: string;
+  environment?: string[];
   startedAt?: string;
 } | null> {
   try {
@@ -184,6 +193,9 @@ async function inspectOwned(names: ComputerNames): Promise<{
       // The resolved image, not the tag it was started from. A tag moves when the image is
       // rebuilt; this is what the container is actually running.
       ...(info.Image ? { image: info.Image } : {}),
+      ...(Array.isArray(info.Config?.Env)
+        ? { environment: info.Config.Env }
+        : {}),
       /*
        * When this run of the container began, which is what tells two runs apart.
        *
@@ -233,6 +245,15 @@ async function runsCurrentImage(
   } catch {
     return true;
   }
+}
+
+/** Every deployment-controlled environment entry must still match exactly. */
+function runsCurrentEnvironment(
+  existing: string[] | undefined,
+  expected: string[],
+): boolean {
+  if (!existing) return expected.length === 0;
+  return expected.every((entry) => existing.includes(entry));
 }
 
 /** Long enough for a cold start with a large image, short enough that a caller is not left hanging. */
@@ -356,9 +377,16 @@ function hostConfig(names: ComputerNames, options: EnsureOptions) {
     ...(options.runtime ? { Runtime: options.runtime } : {}),
 
     // No path from inside to more privilege than it started with, whatever it manages to run.
-    SecurityOpt: ["no-new-privileges:true"],
+    SecurityOpt: [
+      "no-new-privileges:true",
+      `seccomp=${chromiumSeccompProfile}`,
+    ],
+    Init: true,
     // Chromium needs none of these, and each is a documented container escape route.
     CapDrop: ["ALL"],
+    // Required by Chromium's zygote sandbox to enter its own empty filesystem jail. All other
+    // capabilities remain dropped and no-new-privileges prevents gaining more.
+    CapAdd: ["SYS_CHROOT"],
     // A runaway Bot is a resource problem for itself, not for every other Bot on the host.
     ...(options.memoryBytes ? { Memory: options.memoryBytes } : {}),
     PidsLimit: options.pidsLimit ?? 512,
@@ -393,7 +421,11 @@ export async function ensure(
      * ended, and a Bot carrying an hour-old handover prompt into a new conversation is the symptom
      * that found this.
      */
-    if (existing && !(await runsCurrentImage(existing.image, options.image))) {
+    if (
+      existing &&
+      (!(await runsCurrentImage(existing.image, options.image)) ||
+        !runsCurrentEnvironment(existing.environment, options.environment))
+    ) {
       try {
         await docker
           .getContainer(names.container)

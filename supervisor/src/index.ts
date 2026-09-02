@@ -84,6 +84,7 @@ function environmentFor(botId: string): string[] {
     `COMPUTER_BOT_ID=${botId}`,
     // Without this the computer refuses to start; it must never answer an unauthenticated caller.
     ...(computerToken ? [`COMPUTER_TOKEN=${computerToken}`] : []),
+    `COMPUTER_SANDBOX=${process.env.COMPUTER_SANDBOX ?? "on"}`,
     // Where to ask what it is. Absent, the computer reports no identity and carries on.
     ...(spireSocketVolume
       ? ["SPIFFE_ENDPOINT_SOCKET=/tmp/spire-agent/public/api.sock"]

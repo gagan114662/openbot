@@ -1,11 +1,17 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, mock, test } from "bun:test";
 import {
+  fetchTurnEvaluation,
   humanGateTools,
   latestEvaluableTurnSessionId,
   observedTools,
   turnFinishPayload,
   turnStartPayload,
 } from "./turns";
+
+const originalFetch = globalThis.fetch;
+afterEach(() => {
+  globalThis.fetch = originalFetch;
+});
 
 const turn = {
   id: "channel:one:turn:two",
@@ -16,6 +22,21 @@ const turn = {
 };
 
 describe("native channel analytics", () => {
+  test("treats a missing evaluation as an ordinary unevaluated answer", async () => {
+    globalThis.fetch = mock(
+      async () => new Response(null, { status: 404 }),
+    ) as unknown as typeof fetch;
+    expect(await fetchTurnEvaluation("missing")).toBeNull();
+  });
+
+  test("does not disguise a failed evaluation lookup as a missing verdict", async () => {
+    globalThis.fetch = mock(
+      async () => new Response(null, { status: 503 }),
+    ) as unknown as typeof fetch;
+    expect(fetchTurnEvaluation("offline")).rejects.toThrow(
+      "Could not restore the answer evaluation.",
+    );
+  });
   test("recovers the latest answer's session id from durable messages", () => {
     expect(
       latestEvaluableTurnSessionId(

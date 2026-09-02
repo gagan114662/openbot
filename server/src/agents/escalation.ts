@@ -20,7 +20,7 @@
 
 import { z } from "zod";
 import { PUT_TO } from "../../../shared/handoff-markers";
-import { type AuditStore, recordAuditEvent } from "../audit";
+import { type AuditStore, recordAuditEventBestEffort } from "../audit";
 import type { GrantedTool } from "../plugins/tools";
 import type { RunAssertion } from "./callback-token";
 
@@ -116,25 +116,29 @@ export function escalationTool(options: {
        * later: the Bot stopped, the person was never asked, and without a row nothing says so.
        */
       if (auditStore) {
-        await recordAuditEvent(auditStore, {
-          eventType:
-            "reached" in outcome
-              ? "agent.escalated"
-              : "agent.escalation_failed",
-          targetType: "agent",
-          targetId: from.botId,
-          ...(from.actorId ? { actorUserId: from.actorId } : {}),
-          payload: {
-            bot: from.botId,
-            run: from.runId,
-            ...(from.threadId ? { threadId: from.threadId } : {}),
-            question: parsed.data.question,
-            ...(parsed.data.why ? { why: parsed.data.why } : {}),
-            ...("reached" in outcome
-              ? { reached: outcome.reached }
-              : { reason: outcome.refusal }),
+        await recordAuditEventBestEffort(
+          auditStore,
+          {
+            eventType:
+              "reached" in outcome
+                ? "agent.escalated"
+                : "agent.escalation_failed",
+            targetType: "agent",
+            targetId: from.botId,
+            ...(from.actorId ? { actorUserId: from.actorId } : {}),
+            payload: {
+              bot: from.botId,
+              run: from.runId,
+              ...(from.threadId ? { threadId: from.threadId } : {}),
+              question: parsed.data.question,
+              ...(parsed.data.why ? { why: parsed.data.why } : {}),
+              ...("reached" in outcome
+                ? { reached: outcome.reached }
+                : { reason: outcome.refusal }),
+            },
           },
-        });
+          "escalation.route",
+        );
       }
 
       return "reached" in outcome

@@ -4,7 +4,7 @@ import {
   IconChevronRight,
   IconPlug,
 } from "@tabler/icons-react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import * as React from "react";
 import {
@@ -14,6 +14,7 @@ import {
   PageShell,
 } from "@/components/layout/page-shell";
 import { RowMark } from "@/components/layout/row-mark";
+import { Button } from "@/components/ui/button";
 import {
   Item,
   ItemActions,
@@ -22,6 +23,7 @@ import {
   ItemTitle,
 } from "@/components/ui/item";
 import { Separator } from "@/components/ui/separator";
+import { decideToolRequestMutationOptions } from "@/lib/plugins/mutations";
 import {
   type CatalogueItem,
   connectionsQueryOptions,
@@ -93,7 +95,11 @@ function summaryFor(
 }
 
 function RouteComponent() {
+  const queryClient = useQueryClient();
   const plugins = useQuery(pluginsPageQueryOptions());
+  const decideRequest = useMutation(
+    decideToolRequestMutationOptions(queryClient),
+  );
   const connections = useQuery(connectionsQueryOptions());
 
   const connected = new Set(
@@ -120,6 +126,68 @@ function RouteComponent() {
         </p>
       ) : (
         <>
+          <PageSection
+            description="Bots may request a missing capability, but only an administrator can grant it. Every decision is audited."
+            title="Capability requests"
+          >
+            {decideRequest.isError ? (
+              <p className="mb-3 text-destructive text-sm" role="alert">
+                {decideRequest.error instanceof Error
+                  ? decideRequest.error.message
+                  : "That capability request could not be decided."}
+              </p>
+            ) : null}
+            {(plugins.data?.toolRequests ?? []).filter(
+              (request) => request.status === "pending",
+            ).length === 0 ? (
+              <PageEmpty>No capability requests are waiting.</PageEmpty>
+            ) : (
+              <PageRows>
+                {(plugins.data?.toolRequests ?? [])
+                  .filter((request) => request.status === "pending")
+                  .map((request, index, pending) => (
+                    <React.Fragment key={request.id}>
+                      <Item size="sm">
+                        <ItemContent>
+                          <ItemTitle>
+                            {request.catalogueKey} for {request.agentId}
+                          </ItemTitle>
+                          <ItemDescription>{request.reason}</ItemDescription>
+                        </ItemContent>
+                        <ItemActions>
+                          <Button
+                            disabled={decideRequest.isPending}
+                            onClick={() =>
+                              decideRequest.mutate({
+                                requestId: request.id,
+                                decision: "rejected",
+                              })
+                            }
+                            size="sm"
+                            variant="ghost"
+                          >
+                            Reject
+                          </Button>
+                          <Button
+                            disabled={decideRequest.isPending}
+                            onClick={() =>
+                              decideRequest.mutate({
+                                requestId: request.id,
+                                decision: "approved",
+                              })
+                            }
+                            size="sm"
+                          >
+                            Approve and grant
+                          </Button>
+                        </ItemActions>
+                      </Item>
+                      {index !== pending.length - 1 && <Separator />}
+                    </React.Fragment>
+                  ))}
+              </PageRows>
+            )}
+          </PageSection>
           <PageSection
             description="Added for the whole deployment. Open one to set what it needs and which Bots hold its tools."
             title="Connected"

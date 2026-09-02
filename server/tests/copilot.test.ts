@@ -2,7 +2,7 @@ import { describe, expect, spyOn, test } from "bun:test";
 import type { BaseEvent, RunAgentInput } from "@ag-ui/client";
 import { AbstractAgent, HttpAgent } from "@ag-ui/client";
 import { BuiltInAgent } from "@copilotkit/runtime/v2";
-import { from, lastValueFrom, toArray } from "rxjs";
+import { from, lastValueFrom, NEVER, toArray } from "rxjs";
 import { z } from "zod";
 import {
   EXECUTION_GUIDANCE,
@@ -15,7 +15,12 @@ import {
   registeredAgentFromRow,
   requiresToolEvidence,
   resolveRuntimeAgents,
+  runWithAgentDeadline,
+  runWithContextCompaction,
   runWithEvidenceRequirement,
+  runWithInferenceShadow,
+  setContextCapsuleRecorder,
+  setInferenceShadowRecorder,
   standingRoleMessage,
 } from "../src/copilot";
 import { grantedToolGuidance } from "../src/plugins/tools";
@@ -64,6 +69,46 @@ function answerEvents(text: string): BaseEvent[] {
 }
 
 describe("retrieved-evidence enforcement", () => {
+  test("shadows the final output emitted by a real agent stream", async () => {
+    let release: (() => void) | undefined;
+    const observed = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const shadows: unknown[] = [];
+    setInferenceShadowRecorder(async (input) => {
+      shadows.push(input);
+      release?.();
+    });
+    const input = evidenceInput("Run the actual primary path.");
+    await lastValueFrom(
+      runWithInferenceShadow(input, () =>
+        from(answerEvents("emitted primary output")),
+      ),
+    );
+    await observed;
+    expect(shadows).toEqual([
+      { run: input, primaryOutput: "emitted primary output" },
+    ]);
+    setInferenceShadowRecorder(undefined);
+  });
+
+  test("aborts a built-in run that stops producing events", async () => {
+    let aborted = 0;
+    await expect(
+      lastValueFrom(
+        runWithAgentDeadline(
+          evidenceInput("Keep working forever."),
+          () => NEVER,
+          20,
+          () => {
+            aborted += 1;
+          },
+        ),
+      ),
+    ).rejects.toThrow("timed out after 20ms");
+    expect(aborted).toBe(1);
+  });
+
   test("classifies explicit evidence requests without gating ordinary work", () => {
     for (const request of [
       "Research the latest policy and cite the exact URLs.",
@@ -79,6 +124,39 @@ describe("retrieved-evidence enforcement", () => {
     ]) {
       expect(requiresToolEvidence(request)).toBeFalse();
     }
+  });
+
+  test("publishes compaction metadata on the finished event for the UI", async () => {
+    const capsules: unknown[] = [];
+    setContextCapsuleRecorder(async (capsule) => {
+      capsules.push(capsule);
+    });
+    const agent = new ScriptedEvidenceAgent([
+      answerEvents("Still responsive."),
+    ]);
+    const input = evidenceInput("Reply normally.");
+    input.messages = Array.from({ length: 14 }, (_, index) => ({
+      id: `message-${index}`,
+      role: index % 2 === 0 ? "user" : "assistant",
+      content: `${index}:${"x".repeat(4_000)}`,
+    }));
+
+    const events = await lastValueFrom(
+      runWithContextCompaction(input, (prepared) => agent.run(prepared)).pipe(
+        toArray(),
+      ),
+    );
+    const finished = events.find((event) => event.type === "RUN_FINISHED");
+
+    expect(finished).toMatchObject({
+      result: { openbotContextCompaction: { omittedMessages: 2 } },
+    });
+    expect(capsules).toHaveLength(1);
+    expect(capsules[0]).toMatchObject({
+      runId: "run-evidence",
+      threadId: "thread-evidence",
+      messages: input.messages.slice(0, 2),
+    });
   });
 
   test("rejects a memory-only draft and publishes the evidence-backed retry", async () => {
@@ -140,6 +218,34 @@ describe("retrieved-evidence enforcement", () => {
     );
   });
 
+  test("synthesizes a complete lifecycle when an unsupported upstream omits it", async () => {
+    const incomplete = [
+      {
+        type: "TEXT_MESSAGE_CONTENT",
+        messageId: "unsupported",
+        delta: "Remembered answer",
+      },
+    ] as BaseEvent[];
+    const agent = new ScriptedEvidenceAgent([incomplete, incomplete]);
+
+    const events = await lastValueFrom(
+      runWithEvidenceRequirement(agent, evidenceInput("Verify this.")).pipe(
+        toArray(),
+      ),
+    );
+
+    expect(events[0]).toMatchObject({
+      type: "RUN_STARTED",
+      threadId: "thread-evidence",
+      runId: "run-evidence",
+    });
+    expect(events.at(-1)).toMatchObject({
+      type: "RUN_FINISHED",
+      threadId: "thread-evidence",
+      runId: "run-evidence",
+    });
+  });
+
   test("rejects citations that did not appear in any retrieved tool result", async () => {
     const unsupportedCitation = [
       {
@@ -163,10 +269,7 @@ describe("retrieved-evidence enforcement", () => {
         1,
       ),
     ] as BaseEvent[];
-    const agent = new ScriptedEvidenceAgent([
-      unsupportedCitation,
-      unsupportedCitation,
-    ]);
+    const agent = new ScriptedEvidenceAgent([unsupportedCitation]);
 
     const events = await lastValueFrom(
       runWithEvidenceRequirement(
@@ -176,11 +279,48 @@ describe("retrieved-evidence enforcement", () => {
     );
     const rendered = JSON.stringify(events);
 
-    expect(agent.inputs).toHaveLength(2);
+    // A tool already ran. Retrying the whole turn could repeat a non-idempotent side effect.
+    expect(agent.inputs).toHaveLength(1);
     expect(rendered).not.toContain("invented-source");
     expect(rendered).toContain(
       "I could not verify this request with the tools available",
     );
+  });
+
+  test("never replays a tool-bearing turn merely to repair its draft", async () => {
+    const sideEffect = [
+      {
+        type: "RUN_STARTED",
+        threadId: "thread-evidence",
+        runId: "run-evidence",
+      },
+      {
+        type: "TOOL_CALL_START",
+        toolCallId: "send-1",
+        toolCallName: "send_customer_email",
+      },
+      { type: "TOOL_CALL_END", toolCallId: "send-1" },
+      ...answerEvents("The email was sent, according to my memory.").slice(1),
+    ] as BaseEvent[];
+    const agent = new ScriptedEvidenceAgent([
+      sideEffect,
+      answerEvents("This second attempt must never run."),
+    ]);
+
+    const events = await lastValueFrom(
+      runWithEvidenceRequirement(
+        agent,
+        evidenceInput(
+          "Verify the current policy and cite the exact source URL.",
+        ),
+      ).pipe(toArray()),
+    );
+
+    expect(agent.inputs).toHaveLength(1);
+    expect(JSON.stringify(events)).toContain(
+      "I could not verify this request with the tools available",
+    );
+    expect(JSON.stringify(events)).not.toContain("second attempt");
   });
 
   test("publishes citations that are traceable to retrieved results", async () => {
@@ -221,6 +361,102 @@ describe("retrieved-evidence enforcement", () => {
 
     expect(agent.inputs).toHaveLength(1);
     expect(JSON.stringify(events)).toContain(source);
+  });
+
+  test("fails closed when a retry omits literal link targets", async () => {
+    const source = "https://official.example/auth";
+    const retry = [
+      {
+        type: "RUN_STARTED",
+        threadId: "thread-evidence",
+        runId: "run-evidence",
+      },
+      {
+        type: "TOOL_CALL_START",
+        toolCallId: "fetch-1",
+        toolCallName: "fetch_web_page",
+      },
+      { type: "TOOL_CALL_END", toolCallId: "fetch-1" },
+      {
+        type: "TOOL_CALL_RESULT",
+        messageId: "result-1",
+        toolCallId: "fetch-1",
+        content: JSON.stringify({
+          finalUrl: source,
+          text: "Current instructions",
+        }),
+      },
+      ...answerEvents(
+        "Current instructions. Source: Official authentication guide",
+      ).slice(1),
+    ] as BaseEvent[];
+    const agent = new ScriptedEvidenceAgent([
+      answerEvents("Remembered instructions"),
+      retry,
+    ]);
+
+    const events = await lastValueFrom(
+      runWithEvidenceRequirement(
+        agent,
+        evidenceInput("Verify this and cite the exact source URL."),
+      ).pipe(toArray()),
+    );
+    const rendered = JSON.stringify(events);
+
+    expect(agent.inputs).toHaveLength(2);
+    expect(rendered).not.toContain("Retrieved source URLs");
+    expect(rendered).not.toContain(source);
+    expect(rendered).toContain("I could not verify this request");
+  });
+
+  test("coalesces buffered text deltas before publishing markdown", async () => {
+    const supported = [
+      {
+        type: "RUN_STARTED",
+        threadId: "thread-evidence",
+        runId: "run-evidence",
+      },
+      {
+        type: "TOOL_CALL_START",
+        toolCallId: "fetch-1",
+        toolCallName: "fetch_web_page",
+      },
+      { type: "TOOL_CALL_END", toolCallId: "fetch-1" },
+      {
+        type: "TEXT_MESSAGE_START",
+        messageId: "answer",
+        role: "assistant",
+      },
+      {
+        type: "TEXT_MESSAGE_CONTENT",
+        messageId: "answer",
+        delta: "```bash\n",
+      },
+      {
+        type: "TEXT_MESSAGE_CONTENT",
+        messageId: "answer",
+        delta: "codex login\n```",
+      },
+      { type: "TEXT_MESSAGE_END", messageId: "answer" },
+      {
+        type: "RUN_FINISHED",
+        threadId: "thread-evidence",
+        runId: "run-evidence",
+      },
+    ] as BaseEvent[];
+    const agent = new ScriptedEvidenceAgent([supported]);
+
+    const events = await lastValueFrom(
+      runWithEvidenceRequirement(agent, evidenceInput("Verify this.")).pipe(
+        toArray(),
+      ),
+    );
+    const content = events.filter(
+      (event) => event.type === "TEXT_MESSAGE_CONTENT",
+    );
+
+    expect(content).toHaveLength(1);
+    expect(content[0]).toMatchObject({ delta: "```bash\ncodex login\n```" });
   });
 });
 
@@ -734,11 +970,14 @@ describe("standing agent roles", () => {
       undefined,
       async () => [
         {
-          name: "message_bot",
-          ref: "bot/message_bot",
-          description: "Hand work to another Bot.",
-          parameters: z.object({ bot: z.string(), task: z.string() }),
-          execute: async () => "queued",
+          name: "request_catalogue_tool",
+          ref: "bot/request_catalogue_tool",
+          description: "Request an ungranted capability from an administrator.",
+          parameters: z.object({
+            catalogueKey: z.string(),
+            reason: z.string(),
+          }),
+          execute: async () => "pending administrator approval",
         },
       ],
     );
@@ -748,12 +987,12 @@ describe("standing agent roles", () => {
 
     const sent = endpoint.requests.at(-1);
     expect(sent?.tools).toEqual([
-      expect.objectContaining({ name: "message_bot" }),
+      expect.objectContaining({ name: "request_catalogue_tool" }),
     ]);
     expect(
       (sent?.forwardedProps as { openbotDeploymentTools?: string[] })
         ?.openbotDeploymentTools,
-    ).toEqual(["message_bot"]);
+    ).toEqual(["request_catalogue_tool"]);
   });
 
   test("resolves a deleted coworker as a tombstone that never reaches its endpoint", async () => {

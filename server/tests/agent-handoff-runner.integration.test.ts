@@ -1,13 +1,14 @@
 import { afterAll, beforeEach, describe, expect, test } from "bun:test";
 import { randomUUID } from "node:crypto";
-import { eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
+import { createEvolutionCheckpointGate } from "../src/agents/evolution-checkpoints";
 import {
   createHandoffRunner,
   type HandoffWork,
 } from "../src/agents/handoff-runner";
-import type { AuditStore } from "../src/audit";
+import { createAuditStore, type AuditStore } from "../src/audit";
 import { createDatabase } from "../src/db/client";
-import { workItems } from "../src/db/schema";
+import { auditEvents, evolutionCheckpoints, workItems } from "../src/db/schema";
 import { createWorkQueue } from "../src/work/queue";
 import { TEST_POOL } from "./support/database";
 
@@ -24,7 +25,7 @@ const database = createDatabase(
   TEST_POOL,
 );
 const queue = createWorkQueue(database);
-const kind = "bot.message";
+const kind = `bot.message.test.runner.${randomUUID()}`;
 
 const silent: AuditStore = { insert: async () => {} };
 
@@ -50,6 +51,55 @@ function hop(run: string, n: number): HandoffWork {
 }
 
 describe("a batch of hops and a lease that can run out", () => {
+  test("two concurrent hops in one thread have independent verified lineage", async () => {
+    const run = randomUUID();
+    const targets = [`concurrent-a-${run}`, `concurrent-b-${run}`];
+    for (const [index, target] of targets.entries()) {
+      await queue.offer({
+        kind,
+        key: `${run}:${index}`,
+        payload: { ...hop(run, index), toBotId: target } as unknown as Record<
+          string,
+          unknown
+        >,
+      });
+    }
+    const shared = {
+      queue,
+      sign: () => ({ lineage: "signed", toolCalls: [] }),
+      auditStore: createAuditStore(database),
+      evolution: createEvolutionCheckpointGate(database),
+      kind,
+      delivery: { deliver: async () => ({ answer: "verified answer" }) },
+    };
+    const [left, right] = await Promise.all([
+      createHandoffRunner({ ...shared, owner: `replica-a-${run}` }).sweep(),
+      createHandoffRunner({ ...shared, owner: `replica-b-${run}` }).sweep(),
+    ]);
+    expect([...left.delivered, ...right.delivered].sort()).toEqual(
+      targets.sort(),
+    );
+    const rollbacks = await database
+      .select()
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.eventType, "agent.evolution_rolled_back"),
+          inArray(auditEvents.targetId, targets),
+        ),
+      );
+    expect(rollbacks).toHaveLength(0);
+    const checkpoints = await database
+      .select({ chainId: evolutionCheckpoints.chainId })
+      .from(evolutionCheckpoints)
+      .where(
+        inArray(evolutionCheckpoints.chainId, [
+          `thread-1:${run}:0`,
+          `thread-1:${run}:1`,
+        ]),
+      );
+    expect(checkpoints).toHaveLength(2);
+  });
   /*
    * A claim leases the whole batch from one moment, and the batch is delivered one at a time. A
    * heartbeat that only covers the hop in flight leaves the rest on a lease that expires while the
@@ -70,12 +120,13 @@ describe("a batch of hops and a lease that can run out", () => {
     const held = Promise.withResolvers<void>();
     const shared = {
       queue,
-      sign: () => "signed",
+      sign: () => ({ lineage: "signed", toolCalls: [] }),
       auditStore: silent,
       // Small enough to drive in milliseconds; the property is one duration outrunning another.
       leaseMs: 400,
       renewEveryMs: 100,
       limit: 3,
+      kind,
     };
 
     const slow = createHandoffRunner({
@@ -132,12 +183,13 @@ describe("a batch of hops and a lease that can run out", () => {
     const slow = createHandoffRunner({
       queue,
       owner: "replica-a",
-      sign: () => "signed",
+      sign: () => ({ lineage: "signed", toolCalls: [] }),
       auditStore: silent,
       leaseMs: 400,
       // Never refreshed, which is what a paused process looks like from the database's side.
       renewEveryMs: 60_000,
       limit: 2,
+      kind,
       delivery: {
         deliver: async ({ work }) => {
           ran.push(work.toBotId);

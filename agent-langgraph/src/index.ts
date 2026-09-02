@@ -279,9 +279,17 @@ async function callTool(
  * Opaque here on purpose: this process cannot read it and has no reason to. It carries it back when it
  * calls a tool, and the deployment that signed it is the only thing that can open it.
  */
-function runAssertionOf(input: RunAgentInput): string {
-  const props = input.forwardedProps as { openbotRun?: unknown } | undefined;
-  return typeof props?.openbotRun === "string" ? props.openbotRun : "";
+function toolRunAssertionsOf(input: RunAgentInput): () => string {
+  const props = input.forwardedProps as
+    | { openbotToolRuns?: unknown }
+    | undefined;
+  const assertions = Array.isArray(props?.openbotToolRuns)
+    ? props.openbotToolRuns.filter(
+        (value): value is string => typeof value === "string",
+      )
+    : [];
+  let index = 0;
+  return () => assertions[index++] ?? "";
 }
 
 /**
@@ -324,7 +332,7 @@ function callsTheSurface(
  */
 function buildGraph(input: RunAgentInput) {
   const model = buildModel();
-  const run = runAssertionOf(input);
+  const nextToolRun = toolRunAssertionsOf(input);
 
   const tools = toBoundTools(input);
   const bound = tools.length > 0 ? model.bindTools(tools) : model;
@@ -346,7 +354,7 @@ function buildGraph(input: RunAgentInput) {
           .filter((call) => ours.has(call.name))
           .map(async (call) => {
             const text = await callTool(
-              run,
+              nextToolRun(),
               call.name,
               (call.args ?? {}) as Record<string, unknown>,
             );

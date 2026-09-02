@@ -361,10 +361,8 @@ describe("deployment configuration", () => {
     ).toThrow("Sign-in requires BETTER_AUTH_SECRET");
   });
 
-  // A turn that is ended is a turn somebody loses, so an unset variable leaves every stream alone
-  // rather than acquiring a timeout the deployment never asked for. `.env.example` ships a value.
-  test("leaves the stall watchdog off when nothing is configured", () => {
-    expect(loadConfig(baseEnvironment).agentStallTimeoutMs).toBe(0);
+  test("gives every deployment a bounded run even when nothing is configured", () => {
+    expect(loadConfig(baseEnvironment).agentStallTimeoutMs).toBe(120_000);
   });
 
   test("takes a timeout in milliseconds, and zero as switching it off", () => {
@@ -387,7 +385,7 @@ describe("deployment configuration", () => {
         loadConfig({ ...baseEnvironment, AGENT_STALL_TIMEOUT_MS: value });
       if (value === "") {
         // An empty value is an absent one, which is the off case rather than a malformed one.
-        expect(attempt().agentStallTimeoutMs).toBe(0);
+        expect(attempt().agentStallTimeoutMs).toBe(120_000);
         return;
       }
       expect(attempt).toThrow("AGENT_STALL_TIMEOUT_MS");

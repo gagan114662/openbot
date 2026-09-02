@@ -28,4 +28,13 @@ describe("merging durable thread history", () => {
       message("local"),
     ]);
   });
+
+  test("a delayed pull restores durable order ahead of newer local arrivals", () => {
+    expect(
+      mergeStoredMessages(
+        [message("first"), message("delayed-reply")],
+        [message("first"), message("newer-local")],
+      ).map(({ id }) => id),
+    ).toEqual(["first", "delayed-reply", "newer-local"]);
+  });
 });

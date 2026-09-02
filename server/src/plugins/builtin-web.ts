@@ -1,4 +1,6 @@
 import { lookup } from "node:dns/promises";
+import { request as requestHttp } from "node:http";
+import { request as requestHttps } from "node:https";
 import { checkNavigationTarget } from "../computer/target";
 import { MAX_RESULT_CHARS, type McpCallResult, type McpTool } from "./mcp";
 
@@ -102,14 +104,19 @@ function stringArg(args: Record<string, unknown>, key: string): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
-async function assertPublicUrl(raw: string): Promise<URL> {
+export type ResolvedTarget = { url: URL; address: string; family: number };
+
+async function assertPublicUrl(
+  raw: string,
+  resolve: typeof lookup = lookup,
+): Promise<ResolvedTarget> {
   const verdict = checkNavigationTarget(raw);
   if (!verdict.allowed) throw new Error(verdict.reason);
   const url = new URL(verdict.url);
   if (url.username || url.password)
     throw new Error("Web addresses containing credentials are refused.");
 
-  const addresses = await lookup(url.hostname, { all: true, verbatim: true });
+  const addresses = await resolve(url.hostname, { all: true, verbatim: true });
   if (addresses.length === 0)
     throw new Error("That host has no network address.");
   for (const { address } of addresses) {
@@ -122,68 +129,118 @@ async function assertPublicUrl(raw: string): Promise<URL> {
       );
     }
   }
-  return url;
+  const chosen = addresses[0];
+  if (!chosen) throw new Error("That host has no network address.");
+  return { url, address: chosen.address, family: chosen.family };
 }
 
-async function boundedBody(response: Response): Promise<string> {
-  const declared = Number(response.headers.get("content-length") ?? "0");
-  if (declared > MAX_DOWNLOAD_BYTES)
-    throw new Error("The response is larger than the 2 MB tool limit.");
-  const reader = response.body?.getReader();
-  if (!reader) return "";
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  while (true) {
-    const next = await reader.read();
-    if (next.done) break;
-    size += next.value.byteLength;
-    if (size > MAX_DOWNLOAD_BYTES) {
-      await reader.cancel();
-      throw new Error("The response is larger than the 2 MB tool limit.");
-    }
-    chunks.push(next.value);
-  }
-  const body = new Uint8Array(size);
-  let offset = 0;
-  for (const chunk of chunks) {
-    body.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return new TextDecoder().decode(body);
-}
+type PinnedResponse = {
+  status: number;
+  headers: Headers;
+  body: string;
+};
 
-async function safeFetch(
-  raw: string,
-): Promise<{ response: Response; body: string; finalUrl: string }> {
-  let url = await assertPublicUrl(raw);
-  for (let redirect = 0; redirect <= MAX_REDIRECTS; redirect += 1) {
-    const response = await fetch(url, {
-      redirect: "manual",
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-      headers: {
-        accept:
-          "text/html, application/json, application/xml, text/xml, text/plain;q=0.9",
-        "user-agent": "OpenBot-WebTools/1.0",
+type PinnedRequest = (target: ResolvedTarget) => Promise<PinnedResponse>;
+
+/** Connect to the address that passed policy, while retaining the hostname for HTTP and TLS. */
+export async function requestPinned(
+  target: ResolvedTarget,
+): Promise<PinnedResponse> {
+  return new Promise((resolve, reject) => {
+    const secure = target.url.protocol === "https:";
+    const request = (secure ? requestHttps : requestHttp)(
+      {
+        protocol: target.url.protocol,
+        hostname: target.address,
+        family: target.family,
+        port: target.url.port || (secure ? 443 : 80),
+        path: `${target.url.pathname}${target.url.search}`,
+        method: "GET",
+        servername: secure ? target.url.hostname : undefined,
+        headers: {
+          host: target.url.host,
+          accept:
+            "text/html, application/json, application/xml, text/xml, text/plain;q=0.9",
+          "user-agent": "OpenBot-WebTools/1.0",
+        },
       },
-    });
-    if (response.status >= 300 && response.status < 400) {
-      const location = response.headers.get("location");
-      if (!location)
-        throw new Error(
-          "The server returned a redirect without a destination.",
+      (response) => {
+        const headers = new Headers();
+        for (const [name, value] of Object.entries(response.headers)) {
+          if (Array.isArray(value))
+            for (const item of value) headers.append(name, item);
+          else if (value !== undefined) headers.set(name, value);
+        }
+        const declared = Number(headers.get("content-length") ?? "0");
+        if (declared > MAX_DOWNLOAD_BYTES) {
+          response.destroy();
+          reject(new Error("The response is larger than the 2 MB tool limit."));
+          return;
+        }
+        const chunks: Buffer[] = [];
+        let size = 0;
+        response.on("data", (chunk: Buffer) => {
+          size += chunk.byteLength;
+          if (size > MAX_DOWNLOAD_BYTES) {
+            response.destroy(
+              new Error("The response is larger than the 2 MB tool limit."),
+            );
+            return;
+          }
+          chunks.push(chunk);
+        });
+        response.on("end", () =>
+          resolve({
+            status: response.statusCode ?? 0,
+            headers,
+            body: Buffer.concat(chunks).toString("utf8"),
+          }),
         );
-      if (redirect === MAX_REDIRECTS)
-        throw new Error("The page redirected too many times.");
-      url = await assertPublicUrl(new URL(location, url).toString());
-      continue;
-    }
-    const body = await boundedBody(response);
-    if (!response.ok)
-      throw new Error(`The public server returned HTTP ${response.status}.`);
-    return { response, body, finalUrl: url.toString() };
-  }
-  throw new Error("The page redirected too many times.");
+        response.on("error", reject);
+      },
+    );
+    request.setTimeout(TIMEOUT_MS, () =>
+      request.destroy(new Error("The public server took too long to answer.")),
+    );
+    request.on("error", reject);
+    request.end();
+  });
 }
+
+export function createSafeFetcher(
+  dependencies: { resolve?: typeof lookup; request?: PinnedRequest } = {},
+) {
+  const resolve = dependencies.resolve ?? lookup;
+  const request = dependencies.request ?? requestPinned;
+  return async (
+    raw: string,
+  ): Promise<{ response: PinnedResponse; body: string; finalUrl: string }> => {
+    let target = await assertPublicUrl(raw, resolve);
+    for (let redirect = 0; redirect <= MAX_REDIRECTS; redirect += 1) {
+      const response = await request(target);
+      if (response.status >= 300 && response.status < 400) {
+        const location = response.headers.get("location");
+        if (!location)
+          throw new Error(
+            "The server returned a redirect without a destination.",
+          );
+        if (redirect === MAX_REDIRECTS)
+          throw new Error("The page redirected too many times.");
+        target = await assertPublicUrl(
+          new URL(location, target.url).toString(),
+          resolve,
+        );
+        continue;
+      }
+      if (response.status < 200 || response.status >= 300)
+        throw new Error(`The public server returned HTTP ${response.status}.`);
+      return { response, body: response.body, finalUrl: target.url.toString() };
+    }
+    throw new Error("The page redirected too many times.");
+  };
+}
+
+const safeFetch = createSafeFetcher();
 
 function decode(text: string): string {
   return text
@@ -197,11 +254,25 @@ function decode(text: string): string {
     .replace(/&#39;|&apos;/gi, "'");
 }
 
-function textFromHtml(html: string): string {
+export function textFromHtml(html: string): string {
+  /*
+   * Prefer the semantic document body over global navigation and footer chrome. A live OpenAI docs
+   * fetch returned more than 20,000 capped characters, most of them product navigation, before the
+   * actual authentication page. Feeding that into every later turn wastes context and makes the
+   * relevant evidence harder for the model to find. Article is narrower than main, so prefer it.
+   */
+  const documentBody =
+    html.match(/<article\b[^>]*>([\s\S]*?)<\/article>/i)?.[1] ??
+    html.match(/<main\b[^>]*>([\s\S]*?)<\/main>/i)?.[1] ??
+    html;
   return decode(
-    html
+    documentBody
       .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
       .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
+      .replace(
+        /<(?:nav|header|footer|aside)\b[^>]*>[\s\S]*?<\/(?:nav|header|footer|aside)>/gi,
+        " ",
+      )
       .replace(/<[^>]+>/g, " ")
       .replace(/\s+/g, " ")
       .trim(),

@@ -148,6 +148,18 @@ export type WorkQueue = {
     reason?: string;
   }) => Promise<boolean>;
   /**
+   * Park work behind transient backpressure without spending an execution attempt.
+   * `claim` incremented the counter before the caller could discover the contention, so this
+   * atomically returns that attempt while releasing the lease.
+   */
+  defer: (input: {
+    kind: string;
+    key: string;
+    owner: string;
+    delayMs: number;
+    reason?: string;
+  }) => Promise<boolean>;
+  /**
    * Drop what is done with, older than the retention window. Returns how many went.
    *
    * Both kinds of done: finished, and given up on. An item at its attempt cap is not finished and was
@@ -380,6 +392,22 @@ export function createWorkQueue(database: Database): WorkQueue {
         .where(ours(kind, key, owner))
         .returning({ key: workItems.key });
       return Boolean(released);
+    },
+
+    async defer({ kind, key, owner, delayMs, reason }) {
+      const [deferred] = await database
+        .update(workItems)
+        .set({
+          claimedBy: null,
+          leaseUntil: null,
+          runAt: fromNow(delayMs),
+          attempts: sql`greatest(${workItems.attempts} - 1, 0)`,
+          updatedAt: sql`now()`,
+          ...(reason === undefined ? {} : { lastError: reason }),
+        })
+        .where(ours(kind, key, owner))
+        .returning({ key: workItems.key });
+      return Boolean(deferred);
     },
 
     async purge({

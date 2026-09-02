@@ -29,11 +29,11 @@ import {
   recordChannelActivityMutationOptions,
   setChannelBusyMutationOptions,
 } from "@/lib/channels/mutations";
+import type { AgentChannel } from "@/lib/channels/queries";
 import {
-  type AgentChannel,
-  type ChannelSummary,
-  channelKeys,
-} from "@/lib/channels/queries";
+  isResync,
+  subscribeChannelEvents,
+} from "@/lib/channels/use-channel-events";
 import { useActiveBot } from "@/lib/copilot/active-bot";
 import { ConversationProvider } from "@/lib/copilot/conversation";
 import { afterMs, joinWithin } from "@/lib/copilot/join-thread";
@@ -44,7 +44,6 @@ import {
   readThreadMessages,
 } from "@/lib/copilot/thread-messages";
 import { useSkillCommands } from "@/lib/plugins/skill-commands";
-import { queryClient } from "@/query-client";
 import { newId } from "../../lib/new-id";
 
 /**
@@ -59,6 +58,16 @@ const JOIN_DEADLINE_MS = 1500;
  * Backstop for a message typed before the runtime agent exists; it must not be discarded.
  */
 const SEND_WITHOUT_RUNTIME_AFTER_MS = 1500;
+
+/** Attach the failure handler synchronously so a fire-and-forget UI turn never reaches the browser
+ * as an unhandled rejection. Exported for a causal test: both seed and component-button paths use
+ * this exact boundary. */
+export function startBackgroundTurn(
+  turn: Promise<void>,
+  onFailure: (error: unknown) => void,
+) {
+  void turn.catch(onFailure);
+}
 
 /**
  * One channel's conversation with one coworker.
@@ -206,39 +215,20 @@ export function ChannelChat({
    * A turn nobody here streamed, surfaced while the channel is open.
    *
    * A relayed handoff answer runs on the server and lands in this thread with no browser attached.
-   * The roster hears about it — the activity socket patches the channel-list cache — but this
-   * transcript restores history once, on mount, and would show the new turn only after leaving and
-   * coming back. So it watches that same cache: when this channel's `lastMessageAt` advances to a
-   * moment a Bot authored, the durable history is read again. Riding the roster's own cache rather
-   * than a second subscription means "the sidebar updated" and "the transcript refreshes" are the
-   * one signal, and cannot drift apart.
+   * The activity socket is the source, not the roster cache it also patches. A deep link may have no
+   * roster cache at all, and reconnect recovery must refresh the conversation as well as the list.
    *
-   * APPENDED BY ID, NOT COMPARED BY LENGTH. The stored history is not the local transcript: it
-   * keeps only what `readableTurns` can parse, and the local side keeps tool lines the platform
-   * does not hand back — so after a headless turn the stored read can be shorter than the screen
-   * and still hold the news. What is new is exactly the messages whose ids this transcript has
-   * never seen; appending them leaves everything local intact, and this tab's own turns echo back
-   * with ids already on screen and append nothing.
+   * MERGED BY THE SAME RULE AS INITIAL RESTORE. Durable history owns historical order; local-only
+   * ids are concurrent arrivals and belong afterwards. Appending only the newly-seen ids allowed an
+   * older delayed pull to place a stored turn after a newer local turn.
    *
    * Retried briefly, because the roster is patched when the turn is on record with the runner and
    * the platform's read of the thread can be a beat behind it.
    */
   useEffect(() => {
-    const authoredAt = () => {
-      const cache = queryClient.getQueryData<{
-        pages: { channels: ChannelSummary[] }[];
-      }>(channelKeys.list());
-      const summary = cache?.pages
-        .flatMap((page) => page.channels)
-        .find((row) => row.id === channel.id);
-      // Only a Bot's turn is news here; a person's own line arrives through the run that sent it.
-      if (!summary || summary.lastMessageAgentId === null) return null;
-      return summary.lastMessageAt;
-    };
-
-    let lastSeen = authoredAt();
-
+    let pullGeneration = 0;
     const pull = () => {
+      const generation = ++pullGeneration;
       void (async () => {
         for (const delayMs of [0, 750, 1500]) {
           if (delayMs > 0) {
@@ -248,22 +238,32 @@ export function ChannelChat({
             channel.threadId,
             runtimeAgentId,
           );
+          if (generation !== pullGeneration) return;
           const current = agentRef.current;
-          const seen = new Set(current.messages.map((message) => message.id));
-          const fresh = stored.messages.filter(
-            (message) => !seen.has(message.id),
-          );
-          if (fresh.length === 0) continue;
-          current.setMessages([...current.messages, ...fresh]);
+          const merged = mergeStoredMessages(stored.messages, current.messages);
+          if (
+            merged.length === current.messages.length &&
+            merged.every(
+              (message, index) => message === current.messages[index],
+            )
+          ) {
+            continue;
+          }
+          current.setMessages(merged);
           return;
         }
       })();
     };
 
-    return queryClient.getQueryCache().subscribe(() => {
-      const at = authoredAt();
-      if (at && at !== lastSeen) {
-        lastSeen = at;
+    return subscribeChannelEvents((event) => {
+      if (
+        event === "connected" ||
+        isResync(event) ||
+        (event.channelId === channel.id &&
+          !event.deleted &&
+          event.pinned === undefined &&
+          event.busy === undefined)
+      ) {
         pull();
       }
     });
@@ -276,6 +276,9 @@ export function ChannelChat({
 
   // Run failures arrive as events and are reported only for turns started in this mount.
   const [runError, setRunError] = useState<string | null>(null);
+  const [compactedMessages, setCompactedMessages] = useState<number | null>(
+    null,
+  );
   const [evaluation, setEvaluation] = useState<{
     sessionId: string;
     state: "ready" | "saving" | "saved" | "error";
@@ -338,9 +341,9 @@ export function ChannelChat({
     let current = true;
     void fetchTurnEvaluation(sessionId)
       .then((saved) => {
-        if (!current || !saved || saved.status !== "completed") return;
+        if (!current) return;
         setEvaluation(
-          saved.taskCompleted === null
+          saved?.status !== "completed" || saved.taskCompleted === null
             ? { sessionId, state: "ready" }
             : {
                 sessionId,
@@ -349,7 +352,11 @@ export function ChannelChat({
               },
         );
       })
-      .catch(() => undefined);
+      // The visible answer is evaluable even when its verification lookup is temporarily offline.
+      // A failed lookup used to erase the feedback prompt altogether.
+      .catch(() => {
+        if (current) setEvaluation({ sessionId, state: "ready" });
+      });
     return () => {
       current = false;
     };
@@ -587,9 +594,20 @@ export function ChannelChat({
       onRunFailed: ({ error }) => fail(stoppedReason(error)),
       onRunFinishedEvent: ({ event }) => {
         const result = event.result as
-          | { openbotAnalytics?: typeof completedRunAnalytics.current }
+          | {
+              openbotAnalytics?: typeof completedRunAnalytics.current;
+              openbotContextCompaction?: { omittedMessages?: unknown };
+            }
           | undefined;
         completedRunAnalytics.current = result?.openbotAnalytics ?? null;
+        const omitted = result?.openbotContextCompaction?.omittedMessages;
+        setCompactedMessages(
+          typeof omitted === "number" &&
+            Number.isSafeInteger(omitted) &&
+            omitted > 0
+            ? omitted
+            : null,
+        );
         const wasOurs = awaitingReply.current;
         awaitingReply.current = false;
         if (!wasOurs) return;
@@ -612,7 +630,10 @@ export function ChannelChat({
    * Component buttons speak as user turns without forcing every transcript card to re-render.
    */
   const askFromComponent = useCallback((text: string) => {
-    void sayRef.current(text);
+    startBackgroundTurn(sayRef.current(text), (error) => {
+      awaitingReply.current = false;
+      setRunError(stoppedReason(error));
+    });
   }, []);
 
   /**
@@ -624,8 +645,14 @@ export function ChannelChat({
     if (!pending) return;
     seedRef.current = null;
 
-    void sayRef.current(
-      typeof pending.content === "string" ? pending.content : "",
+    startBackgroundTurn(
+      sayRef.current(
+        typeof pending.content === "string" ? pending.content : "",
+      ),
+      (error) => {
+        awaitingReply.current = false;
+        setRunError(stoppedReason(error));
+      },
     );
 
     // Keep `seed` in state; transcriptMessages gives it up once the agent holds a user turn.
@@ -652,6 +679,13 @@ export function ChannelChat({
            * it — and they are independent, so neither is an `else` for the other.
            */
           <>
+            {compactedMessages !== null ? (
+              <p className="pb-2 text-sm text-muted-foreground" role="status">
+                Context compacted: {compactedMessages} older messages were
+                omitted while system instructions and complete tool-call groups
+                were retained.
+              </p>
+            ) : null}
             {evaluation ? (
               <fieldset
                 className="mb-2 flex items-center gap-2 text-sm text-muted-foreground"

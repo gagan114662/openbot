@@ -33,6 +33,8 @@ const sensitiveKeys = new Set([
 ]);
 
 export const auditEventTypes = [
+  /** A caller tried to attribute analytics to a Bot they cannot use. */
+  "analytics.ingest_refused",
   "configuration.changed",
   "credential.created",
   "credential.rotated",
@@ -49,6 +51,8 @@ export const auditEventTypes = [
   "connector.sync_succeeded",
   "connector.sync_failed",
   "knowledge.searched",
+  /** An administrator declined a generated monitor threshold change. */
+  "production.tuning_rejected",
   /**
    * Which coworker an untagged message was routed to, and why.
    *
@@ -155,6 +159,14 @@ export const auditEventTypes = [
    * which tool it named, and why it was refused.
    */
   "mcp.callback_refused",
+  /**
+   * A proved Bot still presented the deployment-wide compatibility credential.
+   *
+   * Temporary by design: this is the observable exit gate for removing AGENT_TOOL_TOKEN. The row
+   * names only the proved Bot, tool and run—not the credential—and can disappear with the legacy
+   * authorization branch after production has observed a zero-use migration window.
+   */
+  "mcp.legacy_callback_used",
   /*
    * An administrator registered this deployment's OAuth client with a vendor.
    *
@@ -363,6 +375,8 @@ export const auditEventTypes = [
   "agent.handoff_delivered",
   "agent.handoff_failed",
   "agent.handoff_retried",
+  "agent.evolution_promoted",
+  "agent.evolution_rolled_back",
   /*
    * A Bot asking a person instead.
    *
@@ -386,6 +400,14 @@ export const auditEventTypes = [
    * withholds; the offered credential never does.
    */
   "routines.dispatch_refused",
+  /** A dump and manifest reached off-host storage and were downloaded with matching hashes. */
+  "operations.backup_verified",
+  /** A backup was restored into a disposable database and its critical tables were readable. */
+  "operations.restore_drill_verified",
+  /** A merged change was observed and production monitors were derived from its intent. */
+  "production.deployment_observed",
+  /** An administrator resolved, dismissed, or reopened a production issue. */
+  "production.issue_status_changed",
 ] as const;
 
 export type AuditEventType = (typeof auditEventTypes)[number];
@@ -478,6 +500,34 @@ export async function recordAuditEvent(
     ...event,
     payload: redactAuditPayload(event.payload) as Record<string, unknown>,
   });
+}
+
+/**
+ * Record observability that must not become a dependency of the operation it observes.
+ *
+ * Use this only after the caller has deliberately chosen fail-open auditing for its boundary. The
+ * structured stderr event is the alert path: silently swallowing the database failure would make
+ * the operation succeed while leaving operators no indication that its trail is incomplete.
+ */
+export async function recordAuditEventBestEffort(
+  store: AuditStore,
+  event: AuditEventInput,
+  operation: string,
+): Promise<boolean> {
+  try {
+    await recordAuditEvent(store, event);
+    return true;
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        type: "audit-write-failed",
+        operation,
+        eventType: event.eventType,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
+    return false;
+  }
 }
 
 export function createAuditStore(database: Database): AuditStore {

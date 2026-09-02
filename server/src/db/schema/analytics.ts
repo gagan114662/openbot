@@ -1,5 +1,6 @@
 import { sql } from "drizzle-orm";
 import {
+  bigint,
   boolean,
   index,
   integer,
@@ -85,12 +86,12 @@ export const analyticsSessions = pgTable(
     technicalFailure: boolean("technical_failure").notNull().default(false),
     toolFailure: boolean("tool_failure").notNull().default(false),
     negativeFeedback: boolean("negative_feedback").notNull().default(false),
-    totalTokens: integer("total_tokens").notNull().default(0),
-    costMicros: integer("cost_micros").notNull().default(0),
-    latencyMs: integer("latency_ms"),
-    properties: jsonb("properties")
+    totalTokens: bigint("total_tokens", { mode: "number" })
       .notNull()
-      .default(sql`'{}'::jsonb`),
+      .default(0),
+    costMicros: bigint("cost_micros", { mode: "number" }).notNull().default(0),
+    latencyMs: integer("latency_ms"),
+    properties: jsonb("properties").notNull().default(sql`'{}'::jsonb`),
     startedAt: timestamp("started_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -133,14 +134,12 @@ export const analyticsEvents = pgTable(
     promptVersion: text("prompt_version"),
     replayId: text("replay_id"),
     latencyMs: integer("latency_ms"),
-    inputTokens: integer("input_tokens"),
-    outputTokens: integer("output_tokens"),
-    costMicros: integer("cost_micros"),
+    inputTokens: bigint("input_tokens", { mode: "number" }),
+    outputTokens: bigint("output_tokens", { mode: "number" }),
+    costMicros: bigint("cost_micros", { mode: "number" }),
     success: boolean("success"),
     errorType: text("error_type"),
-    properties: jsonb("properties")
-      .notNull()
-      .default(sql`'{}'::jsonb`),
+    properties: jsonb("properties").notNull().default(sql`'{}'::jsonb`),
     occurredAt: timestamp("occurred_at", { withTimezone: true })
       .notNull()
       .defaultNow(),
@@ -182,12 +181,10 @@ export const analyticsSpans = pgTable(
     model: text("model"),
     toolName: text("tool_name"),
     latencyMs: integer("latency_ms"),
-    inputTokens: integer("input_tokens"),
-    outputTokens: integer("output_tokens"),
-    costMicros: integer("cost_micros"),
-    attributes: jsonb("attributes")
-      .notNull()
-      .default(sql`'{}'::jsonb`),
+    inputTokens: bigint("input_tokens", { mode: "number" }),
+    outputTokens: bigint("output_tokens", { mode: "number" }),
+    costMicros: bigint("cost_micros", { mode: "number" }),
+    attributes: jsonb("attributes").notNull().default(sql`'{}'::jsonb`),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull(),
     endedAt: timestamp("ended_at", { withTimezone: true }),
     createdAt: createdAt(),
@@ -247,9 +244,7 @@ export const analyticsDatasets = pgTable("analytics_datasets", {
   id: uuid("id").primaryKey().defaultRandom(),
   name: text("name").notNull(),
   description: text("description").notNull().default(""),
-  query: jsonb("query")
-    .notNull()
-    .default(sql`'{}'::jsonb`),
+  query: jsonb("query").notNull().default(sql`'{}'::jsonb`),
   golden: boolean("golden").notNull().default(false),
   createdBy: text("created_by").notNull(),
   createdAt: createdAt(),
@@ -285,6 +280,7 @@ export const analyticsEvalRuns = pgTable("analytics_eval_runs", {
   baselineScore: integer("baseline_score"),
   aggregateScore: integer("aggregate_score"),
   regression: boolean("regression").notNull().default(false),
+  failureReason: text("failure_reason"),
   startedAt: timestamp("started_at", { withTimezone: true }),
   finishedAt: timestamp("finished_at", { withTimezone: true }),
   createdBy: text("created_by").notNull(),
@@ -304,9 +300,7 @@ export const analyticsEvalResults = pgTable(
     category: text("category"),
     passed: boolean("passed"),
     explanation: text("explanation"),
-    evidence: jsonb("evidence")
-      .notNull()
-      .default(sql`'{}'::jsonb`),
+    evidence: jsonb("evidence").notNull().default(sql`'{}'::jsonb`),
     createdAt: createdAt(),
   },
   (table) => [primaryKey({ columns: [table.runId, table.sessionId] })],

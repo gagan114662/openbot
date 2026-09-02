@@ -315,6 +315,17 @@ function Row({
             <span className="italic">, reported by the Bot itself</span>
           </div>
         ) : null}
+        {event.eventType === "production.tuning_rejected" ? (
+          <div className="mt-0.5 text-xs text-muted-foreground">
+            {typeof payload.rejectedThreshold === "number" &&
+            typeof payload.retainedThreshold === "number"
+              ? `Rejected threshold ${payload.rejectedThreshold}; retained ${payload.retainedThreshold}`
+              : "The proposed threshold was rejected"}
+            {typeof payload.reason === "string" && payload.reason ? (
+              <div className="w-[22rem] break-words">{payload.reason}</div>
+            ) : null}
+          </div>
+        ) : null}
         {failed && typeof payload.failure === "string" ? (
           <div className="mt-0.5 text-xs text-muted-foreground">
             {payload.failure}
@@ -365,14 +376,20 @@ const DISCOVERY_REASONS: Record<string, string> = {
 };
 
 const NAMED_TARGETS = new Set([
+  "backup",
   "component",
   "mcp_tool",
   "mcp_server",
   "skill",
   "credential",
+  "production_monitor",
+  "pull_request",
 ]);
 
 const DECISIONS: Record<string, string> = {
+  "production.deployment_observed": "Created monitors from merged PR",
+  "production.issue_status_changed": "Changed production issue status",
+  "analytics.ingest_refused": "Blocked spoofed analytics",
   "bot.declined": "The Bot declined",
   // Not a refusal, so not the refusal colour: nothing was blocked. The Bot was asked and never
   // answered, which is the same complaint as an action that was allowed and then did not happen.
@@ -408,9 +425,13 @@ const DECISIONS: Record<string, string> = {
   "mcp.call_failed": "The server did not answer",
   // Not "Blocked": nothing about the Bot was judged, because nothing proved which Bot it was.
   "mcp.callback_refused": "Could not prove which Bot it was",
+  "mcp.legacy_callback_used": "Used the compatibility callback token",
 
   "configuration.changed": "Configuration changed",
   "credential.created": "Credential saved",
+  "operations.backup_verified": "Off-host backup verified",
+  "operations.restore_drill_verified": "Restore drill verified",
+  "production.tuning_rejected": "Proposal rejected",
 };
 
 function hostOf(url: string): string {

@@ -12,11 +12,35 @@ const database = createDatabase(
 );
 const store = createAnalyticsStore(database);
 const sessionId = `ownership-${crypto.randomUUID()}`;
+const createdIds = [sessionId];
 
 afterAll(async () => {
-  await database
-    .delete(analyticsSessions)
-    .where(eq(analyticsSessions.id, sessionId));
+  for (const id of createdIds)
+    await database
+      .delete(analyticsSessions)
+      .where(eq(analyticsSessions.id, id));
+});
+
+test("browser ingestion replaces a client id with a stable unguessable server id", async () => {
+  process.env.ANALYTICS_SESSION_HMAC_KEY =
+    "test-only-session-key-with-at-least-32-bytes";
+  const clientId = `client-${crypto.randomUUID()}`;
+  const input = {
+    session: {
+      id: clientId,
+      source: "ownership-proof",
+      status: "running" as const,
+    },
+  };
+  const first = await store.ingestClient("owner-a", input);
+  const retry = await store.ingestClient("owner-a", input);
+  createdIds.push(first.sessionId);
+  expect(first.sessionId).not.toBe(clientId);
+  expect(first.sessionId).toMatch(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+  );
+  expect(retry.sessionId).toBe(first.sessionId);
+  delete process.env.ANALYTICS_SESSION_HMAC_KEY;
 });
 
 test("a user cannot overwrite another user or agent through a chosen session id", async () => {

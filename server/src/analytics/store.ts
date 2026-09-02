@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import {
   and,
   desc,
@@ -262,6 +262,60 @@ function behavioralClusters(rows: Array<{ id: string; tokens: string[] }>) {
 export function createAnalyticsStore(database: Database, tenantId?: string) {
   let llmJudge: ((prompt: string) => Promise<string>) | undefined;
   return {
+    async ingestClient(actorUserId: string, input: AnalyticsIngest) {
+      const [namedSession] = await database
+        .select({
+          userId: analyticsSessions.userId,
+          agentId: analyticsSessions.agentId,
+        })
+        .from(analyticsSessions)
+        .where(eq(analyticsSessions.id, input.session.id))
+        .limit(1);
+      if (namedSession) {
+        if (
+          namedSession.userId !== actorUserId ||
+          (namedSession.agentId ?? undefined) !== input.session.agentId
+        ) {
+          await database.insert(auditEvents).values({
+            actorUserId,
+            eventType: "analytics.session_ownership_refused",
+            targetType: "analytics_session",
+            targetId: input.session.id,
+            payload: {
+              attemptedAgentId: input.session.agentId,
+              reason: "client-named-foreign-session",
+            },
+          });
+          throw new Error(
+            "Analytics session belongs to another user or agent.",
+          );
+        }
+        return this.ingest(actorUserId, input);
+      }
+      const key =
+        process.env.ANALYTICS_SESSION_HMAC_KEY ??
+        process.env.KEY_ENCRYPTION_KEY;
+      if (!key)
+        throw new Error(
+          "ANALYTICS_SESSION_HMAC_KEY or KEY_ENCRYPTION_KEY is required.",
+        );
+      const digest = Buffer.from(
+        createHmac("sha256", key)
+          .update(
+            `${actorUserId}\0${input.session.agentId ?? ""}\0${input.session.id}`,
+          )
+          .digest()
+          .subarray(0, 16),
+      );
+      digest[6] = ((digest[6] ?? 0) & 0x0f) | 0x40;
+      digest[8] = ((digest[8] ?? 0) & 0x3f) | 0x80;
+      const hex = digest.toString("hex");
+      const serverSessionId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+      return this.ingest(actorUserId, {
+        ...input,
+        session: { ...input.session, id: serverSessionId },
+      });
+    },
     setLlmJudge(judge: (prompt: string) => Promise<string>) {
       llmJudge = judge;
     },
@@ -564,7 +618,7 @@ export function createAnalyticsStore(database: Database, tenantId?: string) {
       if (
         owner &&
         (owner.userId !== actorUserId ||
-          owner.agentId !== input.session.agentId)
+          (owner.agentId ?? undefined) !== input.session.agentId)
       ) {
         await database.insert(auditEvents).values({
           actorUserId,

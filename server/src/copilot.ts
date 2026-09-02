@@ -96,7 +96,9 @@ type RegisteredUnavailableAgent = {
 };
 
 export type RegisteredAgent =
-  RegisteredBuiltInAgent | RegisteredRemoteAgent | RegisteredUnavailableAgent;
+  | RegisteredBuiltInAgent
+  | RegisteredRemoteAgent
+  | RegisteredUnavailableAgent;
 
 type AgentRunInput = Parameters<AbstractAgent["run"]>[0];
 type AgentMessage = AgentRunInput["messages"][number];
@@ -488,7 +490,8 @@ export type RuntimeEpisodeRecord = {
 };
 
 let persistRuntimeEpisode:
-  ((record: RuntimeEpisodeRecord) => Promise<void>) | undefined;
+  | ((record: RuntimeEpisodeRecord) => Promise<void>)
+  | undefined;
 
 /** Install the deployment-owned durable sink once at boot. Tests and embedded runtimes may omit it. */
 export function setRuntimeEpisodeRecorder(
@@ -565,7 +568,8 @@ function recordRuntimeEpisode(
   const finished = [...events]
     .reverse()
     .find((event) => event.type === "RUN_FINISHED") as
-    (BaseEvent & { result?: { openbotAnalytics?: unknown } }) | undefined;
+    | (BaseEvent & { result?: { openbotAnalytics?: unknown } })
+    | undefined;
   const rawUsage = finished?.result?.openbotAnalytics;
   const usage =
     rawUsage && typeof rawUsage === "object" && !Array.isArray(rawUsage)

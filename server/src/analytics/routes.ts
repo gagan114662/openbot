@@ -130,7 +130,10 @@ export function createAnalyticsRoutes(
       );
     }
     try {
-      return context.json(await store.ingest(context.var.actor.id, body), 202);
+      return context.json(
+        await store.ingestClient(context.var.actor.id, body),
+        202,
+      );
     } catch (error) {
       if (error instanceof Error && error.message.includes("another user")) {
         return context.json(

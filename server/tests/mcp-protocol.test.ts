@@ -1,6 +1,11 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { MCPMock } from "@copilotkit/aimock/mcp";
-import { callTool, listTools } from "../src/plugins/mcp";
+import {
+  boundedMcpFetch,
+  callTool,
+  listTools,
+  validateToolList,
+} from "../src/plugins/mcp";
 
 /**
  * The one door in this deployment that speaks MCP to somebody else's server, against something that
@@ -116,6 +121,46 @@ describe("listing what a server offers", () => {
     const bare = tools.find((tool) => tool.name === "long_answer");
 
     expect(typeof bare?.description).toBe("string");
+  });
+
+  test("refuses oversized and control-character tool metadata", () => {
+    expect(() =>
+      validateToolList([
+        { name: "hostile", description: "x".repeat(4_001), inputSchema: {} },
+      ]),
+    ).toThrow(/oversized description/i);
+    expect(() =>
+      validateToolList([
+        { name: "bad\u0000name", description: "ordinary", inputSchema: {} },
+      ]),
+    ).toThrow(/invalid/i);
+    expect(() =>
+      validateToolList([
+        {
+          name: "huge_schema",
+          description: "ordinary",
+          inputSchema: { description: "x".repeat(20_001) },
+        },
+      ]),
+    ).toThrow(/oversized schema/i);
+  });
+
+  test("cuts off an undeclared oversized body while it is streaming", async () => {
+    const response = await boundedMcpFetch(
+      "https://mcp.example.test",
+      undefined,
+      async () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.enqueue(new Uint8Array(1_500_000));
+              controller.enqueue(new Uint8Array(600_000));
+              controller.close();
+            },
+          }),
+        ),
+    );
+    await expect(response.arrayBuffer()).rejects.toThrow(/2 MB limit/i);
   });
 });
 

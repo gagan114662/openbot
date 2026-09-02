@@ -59,6 +59,14 @@ export type ThreadLock = {
   release: (input: { threadId: string; runId: string }) => Promise<void>;
 };
 
+/** A healthy conversation lock held by another run; this is backpressure, not a failed attempt. */
+export class ThreadBusyError extends Error {
+  constructor(readonly threadId: string) {
+    super(`${threadId} is busy with another run; the hop will be tried again`);
+    this.name = "ThreadBusyError";
+  }
+}
+
 export function createHandoffDelivery(options: {
   /**
    * The addressed Bot, built for the person whose conversation this is.
@@ -157,7 +165,7 @@ export function createHandoffDelivery(options: {
   } = options;
 
   return {
-    async deliver({ work, message, shown, assertion }) {
+    async deliver({ work, message, shown, assertion, toolAssertions }) {
       const agent = await agentFor({
         actorId: work.actorId,
         botId: work.toBotId,
@@ -285,9 +293,7 @@ export function createHandoffDelivery(options: {
            * and is tried again: a person mid-question, or the Bot that asked still finishing its own
            * sentence, is a wait rather than a failure.
            */
-          throw new Error(
-            `${where.threadId} is busy with another run; the hop will be tried again`,
-          );
+          throw new ThreadBusyError(where.threadId);
         }
 
         const runId = held.runId;
@@ -372,7 +378,12 @@ export function createHandoffDelivery(options: {
                  * gone. It is what stops the addressed Bot handing the work on for ever, and it is
                  * signed, so the Bot cannot edit its own depth on the way past.
                  */
-                forwardedProps: { openbotRun: assertion },
+                forwardedProps: {
+                  openbotRun: assertion,
+                  ...(toolAssertions
+                    ? { openbotToolRuns: toolAssertions }
+                    : {}),
+                },
               },
             }),
             deadlineMs,

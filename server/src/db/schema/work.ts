@@ -96,3 +96,12 @@ export const workItems = pgTable(
     index("work_items_claimable_idx").on(table.kind, table.runAt),
   ],
 );
+
+/** Shared compare-and-set checkpoint for continuous agent evolution across replicas. */
+export const evolutionCheckpoints = pgTable("evolution_checkpoints", {
+  chainId: text("chain_id").primaryKey(),
+  stateHash: text("state_hash").notNull(),
+  version: integer("version").notNull().default(0),
+  evidenceHash: text("evidence_hash").notNull(),
+  updatedAt: updatedAt(),
+});

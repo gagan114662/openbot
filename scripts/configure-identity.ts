@@ -24,6 +24,7 @@ function setValue(source: string, name: string, value: string): string {
 const provider = argument("--provider") as Provider | undefined;
 const admin = argument("--admin")?.trim().toLowerCase();
 const envPath = resolve(argument("--env-file") ?? ".env");
+const clientJsonPath = argument("--client-json");
 
 if (!provider || !["google", "microsoft", "okta"].includes(provider)) {
   throw new Error("Use --provider google, microsoft, or okta.");
@@ -36,6 +37,28 @@ if (!admin || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(admin)) {
 
 let source = await Bun.file(envPath).text();
 const prefix = provider.toUpperCase();
+if (clientJsonPath) {
+  if (provider !== "google") {
+    throw new Error(
+      "--client-json currently accepts Google OAuth client JSON only.",
+    );
+  }
+  const document = (await Bun.file(resolve(clientJsonPath)).json()) as {
+    web?: { client_id?: unknown; client_secret?: unknown };
+    installed?: { client_id?: unknown; client_secret?: unknown };
+  };
+  const client = document.web ?? document.installed;
+  if (
+    typeof client?.client_id !== "string" ||
+    typeof client.client_secret !== "string"
+  ) {
+    throw new Error(
+      "The Google OAuth client JSON has no client id or client secret.",
+    );
+  }
+  source = setValue(source, "GOOGLE_OAUTH_CLIENT_ID", client.client_id);
+  source = setValue(source, "GOOGLE_OAUTH_CLIENT_SECRET", client.client_secret);
+}
 const clientId = environmentValue(source, `${prefix}_OAUTH_CLIENT_ID`);
 const clientSecret = environmentValue(source, `${prefix}_OAUTH_CLIENT_SECRET`);
 if (!clientId || !clientSecret) {

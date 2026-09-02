@@ -1,6 +1,28 @@
-const ports = [3101, 3102];
-const requestCount = 200;
-const concurrency = 20;
+const ports = (process.env.OPENBOT_REPLICA_DRILL_PORTS ?? "3101,3102")
+  .split(",")
+  .map((value) => Number.parseInt(value, 10));
+const requestCount = Number.parseInt(
+  process.env.OPENBOT_REPLICA_DRILL_REQUESTS ?? "200",
+  10,
+);
+const concurrency = Number.parseInt(
+  process.env.OPENBOT_REPLICA_DRILL_CONCURRENCY ?? "20",
+  10,
+);
+if (
+  ports.length !== 2 ||
+  ports.some((port) => !Number.isInteger(port) || port < 1024 || port > 65_535)
+) {
+  throw new Error("OPENBOT_REPLICA_DRILL_PORTS must name two usable ports");
+}
+if (!Number.isInteger(requestCount) || requestCount < 1) {
+  throw new Error("OPENBOT_REPLICA_DRILL_REQUESTS must be a positive integer");
+}
+if (!Number.isInteger(concurrency) || concurrency < 1) {
+  throw new Error(
+    "OPENBOT_REPLICA_DRILL_CONCURRENCY must be a positive integer",
+  );
+}
 const processes = ports.map((port) =>
   Bun.spawn(["bun", "--env-file=../.env", "src/index.ts"], {
     cwd: "server",

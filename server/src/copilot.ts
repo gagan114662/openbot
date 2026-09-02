@@ -8,14 +8,34 @@ import {
 } from "@copilotkit/runtime/v2";
 import { createCopilotHonoHandler } from "@copilotkit/runtime/v2/hono";
 import type { Observable } from "rxjs";
-import { defer, from, lastValueFrom, switchMap, toArray } from "rxjs";
+import {
+  catchError,
+  defer,
+  from,
+  lastValueFrom,
+  map,
+  mergeMap,
+  switchMap,
+  TimeoutError,
+  takeUntil,
+  tap,
+  throwError,
+  timer,
+  toArray,
+} from "rxjs";
 import { z } from "zod";
 import {
   COMPUTER_GUIDANCE,
   EXECUTION_GUIDANCE,
   PROVENANCE_GUIDANCE,
 } from "../../shared/bot-prompt";
+import type {
+  ScoredEpisode,
+  VerifiableEpisode,
+} from "../../shared/verifiable-reward";
+import { compactMessages } from "./agents/context-compaction";
 import type { AgentActor } from "./agents/profile-types";
+import { verifyRuntimeEpisode } from "./analytics/runtime-verification";
 import type { AgentFetch, StallGuard } from "./channels/stall-guard";
 import type { DeploymentConfig } from "./config";
 import type { SelectableSkill, Selection } from "./plugins/selection";
@@ -292,13 +312,18 @@ export function requiresToolEvidence(text: string): boolean {
 const EVIDENCE_RETRY_INSTRUCTION = [
   "Your previous draft was rejected because it did not prove the requested retrieved evidence.",
   "Call at least one relevant granted read tool now before answering. Use its returned evidence, cite",
-  "only exact final URLs present in the tool result when the person requested URLs, and never say you verified or read a source",
+  "only exact final URLs present in the tool result when the person requested URLs. Write each as a literal",
+  "https:// URL in the answer, not only as linked label text. Never say you verified or read a source",
   "unless that tool actually returned it. If the tools fail or cannot establish the claim, state the",
   "precise limitation instead of filling the gap from memory.",
 ].join(" ");
 
 const NO_EVIDENCE_ANSWER =
   "I could not verify this request with the tools available in this run. I have not treated my own memory as current or sourced evidence, so I cannot honestly provide the requested verified answer yet.";
+
+/** Explicit deployment policy. Default false: missing model citations fail closed. */
+const EVIDENCE_AUTO_CITE =
+  process.env.OPENBOT_EVIDENCE_AUTO_CITE?.trim().toLowerCase() === "true";
 
 function calledATool(events: readonly BaseEvent[]): boolean {
   return events.some((event) => event.type === "TOOL_CALL_START");
@@ -361,6 +386,61 @@ function hasRequiredEvidence(
   );
 }
 
+/** Add literal citations from tool results when a remote transport emitted only linked labels. */
+function appendRetrievedUrlCitations(
+  events: readonly BaseEvent[],
+  requestText: string,
+): BaseEvent[] {
+  if (!asksForSourceUrls(requestText)) return [...events];
+  const cited = urlsIn(textFromEvents(events, "TEXT_MESSAGE_CONTENT"));
+  if (cited.size > 0) return [...events];
+  const retrieved = [
+    ...urlsIn(textFromEvents(events, "TOOL_CALL_RESULT")),
+  ].slice(0, 10);
+  if (retrieved.length === 0) return [...events];
+
+  const endIndex = events.findLastIndex(
+    (event) => event.type === "TEXT_MESSAGE_END",
+  );
+  if (endIndex < 0) return [...events];
+  const end = events[endIndex];
+  if (!("messageId" in end) || typeof end.messageId !== "string")
+    return [...events];
+  const appendix = {
+    type: "TEXT_MESSAGE_CONTENT",
+    messageId: end.messageId,
+    delta: `\n\nRetrieved source URLs:\n${retrieved.map((url) => `- ${url}`).join("\n")}`,
+  } as BaseEvent;
+  return [...events.slice(0, endIndex), appendix, ...events.slice(endIndex)];
+}
+
+/** Collapse buffered text fragments before replay so incremental Markdown cannot race stale state. */
+function coalesceTextDeltas(events: readonly BaseEvent[]): BaseEvent[] {
+  const compacted: BaseEvent[] = [];
+  for (const event of events) {
+    const previous = compacted.at(-1);
+    if (
+      event.type === "TEXT_MESSAGE_CONTENT" &&
+      previous?.type === "TEXT_MESSAGE_CONTENT" &&
+      "messageId" in event &&
+      "messageId" in previous &&
+      event.messageId === previous.messageId &&
+      "delta" in event &&
+      "delta" in previous &&
+      typeof event.delta === "string" &&
+      typeof previous.delta === "string"
+    ) {
+      compacted[compacted.length - 1] = {
+        ...previous,
+        delta: previous.delta + event.delta,
+      } as BaseEvent;
+    } else {
+      compacted.push(event);
+    }
+  }
+  return compacted;
+}
+
 function evidenceGateMetrics(
   events: readonly BaseEvent[],
   requestText: string,
@@ -395,8 +475,169 @@ function recordEvidenceGate(
   );
 }
 
+export type RuntimeEpisodeRecord = {
+  run: RunAgentInput;
+  episode: VerifiableEpisode;
+  scored: ScoredEpisode;
+  /** Observable execution metadata only: names/ids and provider usage, never arguments/results. */
+  toolCalls: Array<{ id: string; name: string }>;
+  usage?: {
+    model?: string;
+    inputTokens?: number;
+    outputTokens?: number;
+    totalTokens?: number;
+  };
+};
+
+let persistRuntimeEpisode:
+  | ((record: RuntimeEpisodeRecord) => Promise<void>)
+  | undefined;
+
+/** Install the deployment-owned durable sink once at boot. Tests and embedded runtimes may omit it. */
+export function setRuntimeEpisodeRecorder(
+  recorder: ((record: RuntimeEpisodeRecord) => Promise<void>) | undefined,
+) {
+  persistRuntimeEpisode = recorder;
+}
+
+function recordRuntimeEpisode(
+  input: RunAgentInput,
+  events: readonly BaseEvent[],
+  requireGrounding: boolean,
+) {
+  const { episode, scored } = verifyRuntimeEpisode({
+    run: input,
+    events,
+    requireGrounding,
+  });
+  console.info(
+    JSON.stringify({
+      type: "verifiable-episode",
+      runId: input.runId,
+      episodeId: episode.id,
+      eligibleForTraining: scored.eligibleForTraining,
+      scalarReward: scored.scalarReward,
+      verifiers: episode.verifierResults.map((result) => ({
+        id: result.id,
+        version: result.version,
+        passed: result.passed,
+        score: result.score,
+        critical: result.critical === true,
+      })),
+      reasons: scored.reasons,
+    }),
+  );
+  const toolCalls = events.flatMap((event) => {
+    if (event.type !== "TOOL_CALL_START") return [];
+    const value = event as BaseEvent & {
+      toolCallId?: unknown;
+      toolCallName?: unknown;
+    };
+    return typeof value.toolCallId === "string" &&
+      typeof value.toolCallName === "string"
+      ? [{ id: value.toolCallId, name: value.toolCallName }]
+      : [];
+  });
+  const finished = [...events]
+    .reverse()
+    .find((event) => event.type === "RUN_FINISHED") as
+    | (BaseEvent & { result?: { openbotAnalytics?: unknown } })
+    | undefined;
+  const rawUsage = finished?.result?.openbotAnalytics;
+  const usage =
+    rawUsage && typeof rawUsage === "object" && !Array.isArray(rawUsage)
+      ? Object.fromEntries(
+          Object.entries(rawUsage as Record<string, unknown>).filter(
+            ([key, value]) =>
+              (key === "model" && typeof value === "string") ||
+              (["inputTokens", "outputTokens", "totalTokens"].includes(key) &&
+                typeof value === "number" &&
+                Number.isSafeInteger(value) &&
+                value >= 0),
+          ),
+        )
+      : undefined;
+  void persistRuntimeEpisode?.({
+    run: input,
+    episode,
+    scored,
+    toolCalls,
+    ...(usage ? { usage } : {}),
+  }).catch((error) => {
+    // Analytics must not turn a correct answer into an outage, but a lost episode must be visible.
+    console.error(
+      JSON.stringify({
+        type: "verifiable-episode-persist-failed",
+        runId: input.runId,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    );
+  });
+  return scored.eligibleForTraining;
+}
+
 function endedWithRunError(events: readonly BaseEvent[]): boolean {
   return events.some((event) => event.type === "RUN_ERROR");
+}
+
+function compactRun(input: RunAgentInput) {
+  const compacted = compactMessages(input.messages);
+  if (compacted.compacted) {
+    console.info(
+      JSON.stringify({
+        type: "context-compacted",
+        runId: input.runId,
+        omittedMessages: compacted.omittedMessages,
+        capsuleChecksum: compacted.capsuleChecksum,
+      }),
+    );
+  }
+  return {
+    compacted,
+    input: compacted.compacted
+      ? { ...input, messages: compacted.messages }
+      : input,
+  };
+}
+
+function exposeCompactionEvent(
+  event: BaseEvent,
+  omittedMessages: number,
+): BaseEvent {
+  if (event.type !== "RUN_FINISHED" || omittedMessages < 1) return event;
+  const current =
+    event.result &&
+    typeof event.result === "object" &&
+    !Array.isArray(event.result)
+      ? event.result
+      : {};
+  return {
+    ...event,
+    result: {
+      ...current,
+      openbotContextCompaction: { omittedMessages },
+    },
+  };
+}
+
+/** Compact every long run, including ordinary requests that do not enter the evidence gate. */
+export function runWithContextCompaction(
+  input: RunAgentInput,
+  runAttempt: (input: RunAgentInput) => Observable<BaseEvent>,
+): Observable<BaseEvent> {
+  return defer(() => {
+    const prepared = compactRun(input);
+    const observed: BaseEvent[] = [];
+    return runAttempt(prepared.input).pipe(
+      tap((event) => observed.push(event)),
+      map((event) =>
+        exposeCompactionEvent(event, prepared.compacted.omittedMessages),
+      ),
+      tap({
+        complete: () => recordRuntimeEpisode(prepared.input, observed, false),
+      }),
+    );
+  });
 }
 
 async function eventsFromObservable(
@@ -416,7 +657,12 @@ function noEvidenceEvents(
     .find((event) => event.type === "RUN_FINISHED");
   const messageId = `evidence-required:${input.runId}`;
   return [
-    ...(started ? [started] : []),
+    started ??
+      ({
+        type: "RUN_STARTED",
+        threadId: input.threadId,
+        runId: input.runId,
+      } as BaseEvent),
     {
       type: "TEXT_MESSAGE_START",
       messageId,
@@ -428,7 +674,12 @@ function noEvidenceEvents(
       delta: NO_EVIDENCE_ANSWER,
     } as BaseEvent,
     { type: "TEXT_MESSAGE_END", messageId } as BaseEvent,
-    ...(finished ? [finished] : []),
+    finished ??
+      ({
+        type: "RUN_FINISHED",
+        threadId: input.threadId,
+        runId: input.runId,
+      } as BaseEvent),
   ];
 }
 
@@ -460,29 +711,77 @@ function runEvidenceAttempts(
 ): Observable<BaseEvent> {
   return defer(async () => {
     try {
-      const requestText = latestUserText(input.messages);
-      const first = await eventsFromObservable(runAttempt(input));
-      const firstAccepted = hasRequiredEvidence(first, requestText);
-      recordEvidenceGate(input, "first", first, requestText, firstAccepted);
-      if (firstAccepted || endedWithRunError(first)) return first;
-
-      const retry = await eventsFromObservable(
-        runAttempt({
-          ...input,
-          messages: [
-            {
-              id: `evidence-retry:${input.runId}`,
-              role: "system",
-              content: EVIDENCE_RETRY_INSTRUCTION,
-            },
-            ...input.messages,
-          ],
-        }),
+      const prepared = compactRun(input);
+      const { compacted } = prepared;
+      const runInput = prepared.input;
+      const exposeCompaction = (events: BaseEvent[]): BaseEvent[] => {
+        if (!compacted.compacted) return events;
+        return events.map((event) =>
+          exposeCompactionEvent(event, compacted.omittedMessages),
+        );
+      };
+      const requestText = latestUserText(runInput.messages);
+      const first = coalesceTextDeltas(
+        await eventsFromObservable(runAttempt(runInput)),
       );
-      const retryAccepted = hasRequiredEvidence(retry, requestText);
-      recordEvidenceGate(input, "retry", retry, requestText, retryAccepted);
-      if (retryAccepted || endedWithRunError(retry)) return retry;
-      return noEvidenceEvents(retry, input);
+      const firstEligible = recordRuntimeEpisode(
+        runInput,
+        first,
+        asksForSourceUrls(requestText),
+      );
+      const firstAccepted =
+        hasRequiredEvidence(first, requestText) && firstEligible;
+      recordEvidenceGate(input, "first", first, requestText, firstAccepted);
+      if (firstAccepted || endedWithRunError(first))
+        return exposeCompaction(first);
+
+      /*
+       * A retry may repeat every tool the first draft already executed. That is harmless for a
+       * search and catastrophic for a tool that sent a message, changed infrastructure or charged
+       * money. Retry only the case the corrective instruction was designed for: the model did not
+       * call a tool at all. Once any tool ran, an unsupported answer fails closed and the caller can
+       * deliberately start another run instead of this gate silently replaying side effects.
+       */
+      if (calledATool(first)) {
+        return exposeCompaction(noEvidenceEvents(first, input));
+      }
+
+      const retry = coalesceTextDeltas(
+        await eventsFromObservable(
+          runAttempt({
+            ...runInput,
+            messages: [
+              {
+                id: `evidence-retry:${input.runId}`,
+                role: "system",
+                content: EVIDENCE_RETRY_INSTRUCTION,
+              },
+              ...runInput.messages,
+            ],
+          }),
+        ),
+      );
+      const repairedRetry = EVIDENCE_AUTO_CITE
+        ? appendRetrievedUrlCitations(retry, requestText)
+        : retry;
+      const retryEligible = recordRuntimeEpisode(
+        runInput,
+        repairedRetry,
+        asksForSourceUrls(requestText),
+      );
+      const retryAccepted =
+        hasRequiredEvidence(repairedRetry, requestText) && retryEligible;
+      recordEvidenceGate(
+        input,
+        "retry",
+        repairedRetry,
+        requestText,
+        retryAccepted,
+      );
+      if (retryAccepted || endedWithRunError(retry)) {
+        return exposeCompaction(repairedRetry);
+      }
+      return exposeCompaction(noEvidenceEvents(retry, input));
     } catch (error) {
       console.error(
         JSON.stringify({
@@ -510,6 +809,30 @@ class EvidenceRequiredAgent extends AbstractAgent {
 
   run(input: RunAgentInput): Observable<BaseEvent> {
     return runWithEvidenceRequirement(this.inner, input);
+  }
+
+  getCapabilities() {
+    return this.inner.getCapabilities?.() ?? Promise.resolve({});
+  }
+
+  abortRun(): void {
+    this.inner.abortRun();
+    super.abortRun();
+  }
+}
+
+class ContextCompactedAgent extends AbstractAgent {
+  constructor(
+    identity: { agentId: string; description: string },
+    private readonly inner: AbstractAgent,
+  ) {
+    super(identity);
+  }
+
+  run(input: RunAgentInput): Observable<BaseEvent> {
+    return runWithContextCompaction(input, (prepared) =>
+      this.inner.run(prepared),
+    );
   }
 
   getCapabilities() {
@@ -556,6 +879,8 @@ export async function buildAgents(
   agentFetch?: AgentFetch,
   /** How a run gets its tool for handing work on. Absent means no Bot is offered one. */
   handoff?: HandoffForRun,
+  /** Total/idle deadline for a built-in run. Zero explicitly disables it. */
+  runTimeoutMs = 120_000,
 ): Promise<Record<string, AbstractAgent>> {
   const vendors = await loadVendors().catch(() => [] as readonly string[]);
   return Object.fromEntries(
@@ -574,6 +899,7 @@ export async function buildAgents(
           selection,
           agentFetch,
           handoff,
+          runTimeoutMs,
         ),
       ]),
     ),
@@ -592,6 +918,7 @@ async function buildAgent(
   selection?: ToolSelection,
   agentFetch?: AgentFetch,
   handoff?: HandoffForRun,
+  runTimeoutMs = 120_000,
 ): Promise<AbstractAgent> {
   if (agent.type === "unavailable") {
     return new UnavailableAgent(agent);
@@ -722,8 +1049,12 @@ async function buildAgent(
             { agentId: agent.id, description: agent.name },
             built,
           )
-        : built;
+        : new ContextCompactedAgent(
+            { agentId: agent.id, description: agent.name },
+            built,
+          );
     },
+    runTimeoutMs,
   );
 }
 
@@ -909,7 +1240,13 @@ function remoteAgentWithStandingRole(
          * one shared secret.
          */
         ...(signRun
-          ? { openbotRun: signRun(agent.id, input.runId, input.threadId) }
+          ? (() => {
+              const signed = signRun(agent.id, input.runId, input.threadId);
+              return {
+                openbotRun: signed.lineage,
+                openbotToolRuns: signed.toolCalls,
+              };
+            })()
           : /*
              * Absent means this deployment cannot sign, so the agent is given nothing to hand back
              * and its tool calls will be refused. That is the right direction to fail: a Bot that
@@ -933,13 +1270,46 @@ function remoteAgentWithStandingRole(
             runWith(offered, attemptInput, next);
           return requiresToolEvidence(latestUserText(input.messages))
             ? runEvidenceAttempts(input, run)
-            : run(input);
+            : runWithContextCompaction(input, run);
         }),
       ),
     ),
   );
 
   return remote;
+}
+
+/**
+ * Put a total deadline around one built-in run.
+ *
+ * Remote agents have a byte-level stall guard because their failure mode is a socket that remains
+ * open without producing another event. A built-in agent has no fetch seam; its observable is the
+ * boundary we own. Zero remains an explicit operator escape hatch, matching AGENT_STALL_TIMEOUT_MS.
+ */
+export function runWithAgentDeadline(
+  input: RunAgentInput,
+  run: () => Observable<BaseEvent>,
+  timeoutMs: number,
+  abort: () => void,
+): Observable<BaseEvent> {
+  if (timeoutMs <= 0) return run();
+  return run().pipe(
+    takeUntil(
+      timer(timeoutMs).pipe(
+        mergeMap(() => throwError(() => new TimeoutError())),
+      ),
+    ),
+    catchError((error) => {
+      if (!(error instanceof TimeoutError)) return throwError(() => error);
+      abort();
+      return throwError(
+        () =>
+          new Error(
+            `Bot run ${input.runId} timed out after ${timeoutMs}ms without completing.`,
+          ),
+      );
+    }),
+  );
 }
 
 /**
@@ -969,15 +1339,18 @@ class RunBuiltAgent extends AbstractAgent {
   /** The same Bot with nothing narrowed, kept to answer questions that are not about one run. */
   private whole: AbstractAgent;
   private build: (input: RunAgentInput) => Promise<AbstractAgent>;
+  private runTimeoutMs: number;
 
   constructor(
     identity: { agentId: string; description: string },
     whole: AbstractAgent,
     build: (input: RunAgentInput) => Promise<AbstractAgent>,
+    runTimeoutMs = 120_000,
   ) {
     super(identity);
     this.whole = whole;
     this.build = build;
+    this.runTimeoutMs = runTimeoutMs;
   }
 
   run(input: RunAgentInput): Observable<BaseEvent> {
@@ -985,7 +1358,12 @@ class RunBuiltAgent extends AbstractAgent {
       from(this.build(input)).pipe(
         switchMap((agent) => {
           this.inner = agent;
-          return agent.run(input);
+          return runWithAgentDeadline(
+            input,
+            () => agent.run(input),
+            this.runTimeoutMs,
+            () => agent.abortRun(),
+          );
         }),
       ),
     );
@@ -1015,6 +1393,7 @@ class RunBuiltAgent extends AbstractAgent {
     const cloned = super.clone() as RunBuiltAgent;
     cloned.whole = this.whole;
     cloned.build = this.build;
+    cloned.runTimeoutMs = this.runTimeoutMs;
     // Deliberately not the inner agent. A clone is a new run, and inheriting the last run's agent
     // would point `abortRun` at something already finished.
     cloned.inner = undefined;
@@ -1065,6 +1444,7 @@ export async function resolveRuntimeAgents(
    * theirs to see at all; what narrows is what gets built.
    */
   onlyBotId?: string,
+  runTimeoutMs = 120_000,
 ): Promise<Record<string, AbstractAgent>> {
   const all = await loadAgents();
   if (all.length === 0) {
@@ -1095,6 +1475,7 @@ export async function resolveRuntimeAgents(
     selection,
     agentFetch,
     handoff,
+    runTimeoutMs,
   );
 }
 
@@ -1113,7 +1494,7 @@ export type SignRun = (
   runId: string,
   /** Which conversation, so a Bot handing work on cannot choose where the answer lands. */
   threadId: string,
-) => string;
+) => { lineage: string; toolCalls: string[] };
 
 /** Who is asking. Agent visibility is decided per person, so a run has to know this first. */
 export type IdentifyActor = (request: Request) => Promise<AgentActor>;
@@ -1165,6 +1546,7 @@ export function createRequestAgents(
    * roster that person can see, so a Bot must never be able to address one they cannot.
    */
   handoffForActor?: (actorId: string) => HandoffForRun,
+  runTimeoutMs = 120_000,
 ) {
   return async ({ request }: { request: Request }) => {
     const actor = await identifyActor(request);
@@ -1180,6 +1562,8 @@ export function createRequestAgents(
       selectionForActor?.(actor.id),
       agentFetch,
       handoffForActor?.(actor.id),
+      undefined,
+      runTimeoutMs,
     );
   };
 }
@@ -1341,6 +1725,7 @@ export function mountCopilotRuntime(
       // see is still absent; what this skips is constructing the other Bots and asking the database
       // what each of them was granted, on every delivery and again on every retry.
       input.botId,
+      config.agentStallTimeoutMs,
     );
     return agents[input.botId] ?? null;
   };
@@ -1409,6 +1794,7 @@ export function mountCopilotRuntime(
       selectionForActor,
       agentFetch,
       handoffForActor,
+      config.agentStallTimeoutMs,
     ) as never,
   });
 

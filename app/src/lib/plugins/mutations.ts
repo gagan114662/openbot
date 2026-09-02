@@ -63,6 +63,24 @@ export function invalidatePlugins(queryClient: QueryClient) {
   return queryClient.invalidateQueries({ queryKey: pluginKeys.all });
 }
 
+export function decideToolRequestMutationOptions(queryClient: QueryClient) {
+  return mutationOptions({
+    mutationFn: async (variables: {
+      requestId: string;
+      decision: "approved" | "rejected";
+    }) =>
+      client(
+        `/api/plugins/tool-requests/${encodeURIComponent(variables.requestId)}/decision`,
+        {
+          method: "POST",
+          body: { decision: variables.decision },
+          fallback: "That capability request could not be decided.",
+        },
+      ),
+    onSuccess: () => invalidatePlugins(queryClient),
+  });
+}
+
 /**
  * Grant one plugin to one Bot, and refetch nothing.
  *

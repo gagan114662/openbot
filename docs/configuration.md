@@ -51,7 +51,7 @@ at `agent-langgraph` on a laptop.
 | `GOOGLE_GENERATIVE_AI_BASE_URL` | unset                   | Google-compatible endpoint that key is spent against.               |
 | `BOT_MODEL`          | provider default from Bot code/env | Model used by the shipped Bots.                                     |
 | `BOT_RESPONSES_API`  | `false`                            | Makes `agent-langgraph` use the OpenAI Responses API.               |
-| `AGENT_STALL_TIMEOUT_MS` | unset (off)                    | How long a Bot's stream may produce nothing before the turn is ended for it. |
+| `AGENT_STALL_TIMEOUT_MS` | `120000`                       | How long a Bot run may produce nothing before the turn is ended for it. Set `0` only to explicitly disable the boundary. |
 | `AGENT_TOOL_TOKEN`   | unset; `start.sh` generates one    | The secret a framework Bot presents when it calls a granted tool back through this server. |
 | `APP_DIST_DIR`       | unset                              | Where the built app is, when this process serves it. Set inside the container image; unset in development, where Vite serves the app. |
 | `AUDIT_RETENTION_DAYS` | unset                            | Whole number of days to keep audit rows; older ones are removed. Unset keeps the trail forever. |
@@ -87,11 +87,11 @@ nothing — no session, no same-origin access to the app, no route into your dat
 libraries from a CDN, which is the reason a deployment that must not reach the public internet from a
 browser tab should leave this unset.
 
-**`AGENT_STALL_TIMEOUT_MS`** watches for the failure a Bot has that nothing else in the trail can
-show: a stream that stops producing anything. Every other audit row is something that happened, and
-this one is the absence of anything happening, which leaves no trace of its own. Ending the turn
-writes `agent.stream_stalled`. Unset or `0` switches it off and nothing is watched. `.env.example`
-ships `60000`, so a new clone has it on and an upgraded deployment does not acquire it unasked.
+**`AGENT_STALL_TIMEOUT_MS`** bounds both kinds of Bot this deployment runs. A remote Bot whose
+stream stops producing anything is ended by its byte-level watchdog and writes
+`agent.stream_stalled`; a built-in Bot whose model/tool loop exceeds the same deadline is aborted at
+its run boundary. Unset uses the safe two-minute default. `0` explicitly switches both boundaries
+off. `.env.example` chooses the tighter one-minute local-development value.
 
 **`AGENT_TOOL_TOKEN`** exists because a framework Bot runs its own loop in its own process and still
 may not reach a vendor directly. It calls the deployment that granted the tool, which is where the
@@ -108,6 +108,31 @@ It is one of a pair, and they are not interchangeable: `MANAGED_AGENT_TOKEN` is 
 itself to a Bot, this is a Bot proving itself to the server. Rotating either means the process
 holding the old one refuses every call, which is why `start.sh` restarts the server and recreates the
 Bot containers on a run that mints one.
+
+The deployment-wide value is a compatibility credential for the bundled Bots, not the long-term
+identity model. A registered remote Bot receives its own `obot_agt_…` callback token; the server
+matches that token to the Bot named by a short-lived assertion. Tool calls now receive a bounded
+set of individually signed, single-use tickets, consumed through PostgreSQL so a captured request
+cannot be replayed on another replica. New integrations should use per-Bot callback tokens. The
+compatibility credential remains only until the bundled launchers have completed that migration;
+removing it means deleting the non-`obot_agt_` branch in `authoriseAgentCall` and then removing
+`AGENT_TOOL_TOKEN` from the launch scripts and chart in the same release.
+
+The removal is staged and has an observable exit gate:
+
+1. Provision a per-Bot `obot_agt_…` callback token for every bundled and remote adapter, and pass
+   that token only to its owning process.
+2. Watch the Audit page for `mcp.legacy_callback_used`. Each row names the proved Bot and tool but
+   never the token. Keep the compatibility value while any such row appears.
+3. After a complete credential-rotation window with zero legacy rows (seven days is the production
+   default), remove `AGENT_TOOL_TOKEN` from the environment and restart every adapter. Tool calls
+   using the old token then fail closed while per-Bot calls continue.
+4. In the next release, remove generation from `scripts/start.sh`, the Compose/chart wiring, the
+   `agentToolToken` config field, and the legacy branch in `authoriseAgentCall`. Remove the audit
+   event only after the branch is gone.
+
+Rollback during steps 1–3 is restoring the compatibility value and restarting the adapters; it does
+not invalidate per-Bot tokens. Step 4 is a code release and follows the ordinary release rollback.
 
 **`WORKER_SHARED_SECRET`** is the same shape of secret for a different pair: it is what the routines
 worker presents to `/internal/routines/run` to prove a routine's dispatch actually came from it. The
@@ -213,6 +238,14 @@ What is registered belongs to the deployment rather than to whoever registered i
 administrator sees the same list and can remove any of it, and a provider outlives the person who
 added it. The client secret and any SAML signing material are encrypted at rest with
 `KEY_ENCRYPTION_KEY`.
+
+Key rotation is an offline, single-writer maintenance operation. Stop every OpenBot server replica,
+then run `bun run key:rotate`. Before changing any database row, the command fsyncs the complete
+replacement environment to `.env.rotation-pending`. It also holds a deployment-wide PostgreSQL
+advisory lock and locks the credential tables for the rotation transaction. If the process is
+interrupted after the database commit, rerun the same command with replicas still stopped: it
+detects the pending key, verifies the committed ciphertext, and atomically completes the environment
+file replacement. Never delete `.env.rotation-pending` during recovery.
 
 The redirect URI to register with each provider is `<BETTER_AUTH_URL>/api/auth/callback/<provider>`,
 where `<provider>` is `google`, `microsoft` or `okta`.
@@ -501,6 +534,27 @@ Refs are `serverId/toolName`, the same form a grant is written in. A package may
 Slugs are lowercase letters, digits and hyphens. If a package ships a slug somebody in the deployment already wrote a skill under, theirs keeps the name, the package loses that skill, and startup continues.
 
 Omit the file entirely for a package with no skills.
+
+## Production Engineer merged-PR webhook
+
+Set `PRODUCTION_ENGINEER_GITHUB_WEBHOOK_SECRET` and configure the same value on a GitHub repository
+webhook at `/api/production-engineer/github-webhook`, with `application/json` content and only Pull
+request events enabled. The endpoint verifies `x-hub-signature-256`, ignores unmerged pull requests,
+loads the merged pull request's changed paths from GitHub's pinned API, and creates or updates the
+matching production monitors. Set `GITHUB_TOKEN` when the repository is private or unauthenticated
+GitHub API quota is insufficient.
+
+The generated alert rules are available to administrators at
+`/api/production-engineer/prometheus-rules`. Prometheus can scrape the emitted, database-backed
+counters from `/api/production-engineer/metrics`; these are the exact metric names used by the
+generated rules.
+
+To send firing alerts back for investigation, set
+`PRODUCTION_ENGINEER_ALERTMANAGER_WEBHOOK_SECRET` and configure Alertmanager to POST its JSON body to
+`/api/production-engineer/alertmanager-webhook`. The sender must calculate HMAC-SHA256 over the exact
+raw request body and supply `x-openbot-signature-256: sha256=<hex>`. Unsigned or altered payloads are
+rejected before triage. The generated rules provide the required `monitor_key` label and
+`openbot_value` annotation.
 
 ## Change workflow
 

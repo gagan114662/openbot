@@ -1,6 +1,9 @@
 services:
   postgres:
     image: pgvector/pgvector:pg17
+    # Headroom for the API, migrations and one guarded test suite. The suite lock below the app
+    # prevents a second run from converting this finite budget into hundreds of fake regressions.
+    command: ["postgres", "-c", "max_connections=${POSTGRES_MAX_CONNECTIONS:-200}"]
     # Off the network the Bots are on, because a Bot's computer is on it and a Bot has a shell.
     #
     # With no `networks:` anywhere, Compose puts every service on one network with DNS by service

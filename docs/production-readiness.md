@@ -37,7 +37,7 @@ Open upstream issues observed on 2026-09-01:
 - [#280](https://github.com/CopilotKit/OpenBot/issues/280): opt-in reviewed long-term memory. Implemented as an optional `memory.yaml`; only entries with reviewer, timestamp, source, and approved status enter a Bot role.
 - [#219](https://github.com/CopilotKit/OpenBot/issues/219): built-in acceptance test and Hermes bridge. The live deployment smoke test and Codex adapter cover the acceptance-test/protocol pattern; no Hermes bridge is included.
 - [#193](https://github.com/CopilotKit/OpenBot/issues/193): routines. The current repository already contains the worker, leases, renewal, failure caps, disabling, and delivery recording described by the issue; load and cold-resume drills remain deployment work.
-- [#86](https://github.com/CopilotKit/OpenBot/issues/86): content governance. This fork adds deterministic secret, SSN, valid payment-card, and prompt-injection scanning before the Codex adapter sends deployment tool arguments.
+- [#86](https://github.com/CopilotKit/OpenBot/issues/86): content governance. This fork applies deterministic secret, SSN, valid payment-card, and prompt-injection scanning before both the Codex adapter and the main Copilot runtime send deployment tool arguments. Main-runtime refusals are audited without persisting matching values.
 - [#2](https://github.com/CopilotKit/OpenBot/issues/2): dependency dashboard. Keep automated dependency PRs and pinned action digests in the normal release process.
 
 ## Battle tests run

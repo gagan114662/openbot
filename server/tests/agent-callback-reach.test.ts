@@ -17,12 +17,21 @@ describe("remote agent reach-tool callbacks", () => {
       },
     };
     const seen: unknown[] = [];
+    const auditRows: {
+      eventType: string;
+      agentId?: string | null;
+      targetId: string;
+    }[] = [];
     const args: Parameters<typeof createApp> = [config];
+    args[12] = {
+      insert: async (row) => void auditRows.push(row),
+    } as never;
     args[14] = pluginStore as never;
     args[25] = async (input) => {
       seen.push(input);
       return input.name === "message_bot" ? { text: "handoff queued" } : null;
     };
+    args[26] = async () => true;
     const app = createApp(...args);
     const run = mintRunAssertion(
       {
@@ -33,6 +42,8 @@ describe("remote agent reach-tool callbacks", () => {
         depth: 2,
       },
       config.keyEncryptionKey,
+      Date.now(),
+      "tool-call",
     );
 
     const response = await app.request(
@@ -53,6 +64,14 @@ describe("remote agent reach-tool callbacks", () => {
 
     expect(response.status).toBe(200);
     expect(await response.json()).toEqual({ text: "handoff queued" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(auditRows).toContainEqual(
+      expect.objectContaining({
+        eventType: "mcp.legacy_callback_used",
+        targetId: "message_bot",
+        payload: expect.objectContaining({ botId: "general-assistant" }),
+      }),
+    );
     expect(pluginCalls).toBe(0);
     expect(seen).toEqual([
       {
@@ -82,10 +101,13 @@ describe("remote agent reach-tool callbacks", () => {
       },
     } as never;
     args[25] = async () => null;
+    args[26] = async () => true;
     const app = createApp(...args);
     const run = mintRunAssertion(
       { botId: "knowledge", actorId: "person-7", runId: "run-10" },
       config.keyEncryptionKey,
+      Date.now(),
+      "tool-call",
     );
 
     const response = await app.request(

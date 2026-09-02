@@ -21,6 +21,7 @@ import { beforeAll, describe, expect, test } from "bun:test";
 const asked = process.env.OPENBOT_SMOKE === "1";
 const API = process.env.OPENBOT_API_URL ?? "http://localhost:3001";
 const BOT = process.env.OPENBOT_SMOKE_BOT ?? "risk-analyst";
+const AUTH_COOKIE = process.env.OPENBOT_SMOKE_COOKIE;
 
 /** Long enough for a computer to be created and Chromium to answer on a cold deployment. */
 const COMPUTER_TIMEOUT_MS = 180_000;
@@ -28,7 +29,11 @@ const COMPUTER_TIMEOUT_MS = 180_000;
 async function api(path: string, init?: RequestInit): Promise<Response> {
   return fetch(`${API}${path}`, {
     ...init,
-    headers: { "content-type": "application/json", ...(init?.headers ?? {}) },
+    headers: {
+      "content-type": "application/json",
+      ...(AUTH_COOKIE ? { cookie: AUTH_COOKIE } : {}),
+      ...(init?.headers ?? {}),
+    },
   });
 }
 
@@ -50,6 +55,12 @@ beforeAll(async () => {
   if (!reachable) {
     throw new Error(
       `No deployment is answering at ${API}. Start one with \`bash scripts/start.sh\`, or set OPENBOT_API_URL.`,
+    );
+  }
+  const authenticated = await api("/api/me");
+  if (!authenticated.ok) {
+    throw new Error(
+      "The live smoke journey needs an authenticated session. Set OPENBOT_SMOKE_COOKIE to the Cookie header from a signed-in local session.",
     );
   }
 });

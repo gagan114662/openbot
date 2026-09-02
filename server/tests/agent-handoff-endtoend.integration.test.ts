@@ -43,6 +43,7 @@ const ASKER = `e2e-asker-${suite}`;
 const TARGET = `e2e-target-${suite}`;
 const ACTOR = `e2e-actor-${suite}`;
 const RUN = `e2e-run-${suite}`;
+const KIND = `bot.message.test.e2e.${suite}`;
 
 const queue = createWorkQueue(database);
 const auditStore = createAuditStore(database);
@@ -68,6 +69,7 @@ const desk = createHandoffDesk({
     ).some((row) => row.ref === toBotId),
   auditStore,
   caps: { maxDepth: 2, maxPerRun: 3 },
+  kind: KIND,
 });
 
 async function clean() {
@@ -139,9 +141,10 @@ describe("a hop, from the tool call to the delivery", () => {
     // A different process entirely, sharing nothing but the row.
     const delivered: Array<{ work: HandoffWork; message: string }> = [];
     const runner = createHandoffRunner({
+      kind: KIND,
       queue: createWorkQueue(database),
       owner: `replica-${suite}`,
-      sign: () => "signed",
+      sign: () => ({ lineage: "signed", toolCalls: [] }),
       auditStore,
       delivery: {
         deliver: async ({ work, message }) => {
@@ -189,9 +192,10 @@ describe("a hop, from the tool call to the delivery", () => {
       return {
         seen,
         runner: createHandoffRunner({
+          kind: KIND,
           queue: createWorkQueue(database),
           owner,
-          sign: () => "signed",
+          sign: () => ({ lineage: "signed", toolCalls: [] }),
           auditStore,
           delivery: {
             deliver: async ({ work }) => {
@@ -229,9 +233,10 @@ describe("a hop, from the tool call to the delivery", () => {
     await tool?.execute({ bot: "Target", task: "have a look" });
 
     const runner = createHandoffRunner({
+      kind: KIND,
       queue: createWorkQueue(database),
       owner: `replica-${suite}`,
-      sign: () => "signed",
+      sign: () => ({ lineage: "signed", toolCalls: [] }),
       auditStore,
       delivery: { deliver: async () => ({ answer: null }) },
     });

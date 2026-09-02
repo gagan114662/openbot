@@ -18,6 +18,27 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 /** How long a server gets before we give up on it, for a listing and for a call. */
 const LIST_TIMEOUT_MS = 15_000;
 const CALL_TIMEOUT_MS = 60_000;
+const MAX_HTTP_RESPONSE_BYTES = 2_000_000;
+export const MAX_TOOL_COUNT = 200;
+export const MAX_TOOL_NAME_CHARS = 200;
+export const MAX_TOOL_DESCRIPTION_CHARS = 4_000;
+export const MAX_TOOL_SCHEMA_CHARS = 20_000;
+function stripUnsafeControlCharacters(value: string): string {
+  return [...value]
+    .filter((character) => {
+      const code = character.codePointAt(0) ?? 0;
+      return !(
+        code <= 8 ||
+        code === 11 ||
+        code === 12 ||
+        (code >= 14 && code <= 31) ||
+        code === 127 ||
+        (code >= 0x202a && code <= 0x202e) ||
+        (code >= 0x2066 && code <= 0x2069)
+      );
+    })
+    .join("");
+}
 
 /**
  * The most result text a call may return.
@@ -83,6 +104,70 @@ export type McpTool = {
   description: string;
   inputSchema: Record<string, unknown>;
 };
+
+export function validateToolList(tools: readonly McpTool[]): McpTool[] {
+  if (tools.length > MAX_TOOL_COUNT) {
+    throw new McpServerError(
+      `The vendor advertised more than ${MAX_TOOL_COUNT} tools.`,
+    );
+  }
+  return tools.map((tool) => {
+    const name = stripUnsafeControlCharacters(tool.name);
+    const description = stripUnsafeControlCharacters(tool.description);
+    if (!name || name !== tool.name || name.length > MAX_TOOL_NAME_CHARS) {
+      throw new McpServerError(
+        "The vendor advertised an invalid or oversized tool name.",
+      );
+    }
+    if (description.length > MAX_TOOL_DESCRIPTION_CHARS) {
+      throw new McpServerError(
+        `The vendor advertised an oversized description for ${name}.`,
+      );
+    }
+    const schemaText = JSON.stringify(tool.inputSchema);
+    if (schemaText.length > MAX_TOOL_SCHEMA_CHARS) {
+      throw new McpServerError(
+        `The vendor advertised an oversized schema for ${name}.`,
+      );
+    }
+    return { name, description, inputSchema: tool.inputSchema };
+  });
+}
+
+/** Bound the wire stream before the MCP SDK buffers and parses it. */
+export async function boundedMcpFetch(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+  fetchImpl: typeof fetch = fetch,
+): Promise<Response> {
+  const response = await fetchImpl(input, init);
+  const declared = Number(response.headers.get("content-length") ?? "0");
+  if (declared > MAX_HTTP_RESPONSE_BYTES) {
+    await response.body?.cancel().catch(() => {});
+    throw new McpServerError("The MCP response exceeded the 2 MB limit.");
+  }
+  if (!response.body) return response;
+  let received = 0;
+  const bounded = response.body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        received += chunk.byteLength;
+        if (received > MAX_HTTP_RESPONSE_BYTES) {
+          controller.error(
+            new McpServerError("The MCP response exceeded the 2 MB limit."),
+          );
+          return;
+        }
+        controller.enqueue(chunk);
+      },
+    }),
+  );
+  return new Response(bounded, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: response.headers,
+  });
+}
 
 export class McpServerError extends Error {
   constructor(message: string) {
@@ -212,6 +297,7 @@ async function withClient<T>(
     requestInit: connection.token
       ? { headers: { Authorization: `Bearer ${connection.token}` } }
       : undefined,
+    fetch: boundedMcpFetch,
   });
   const client = new Client({ name: "openbot", version: "1.0.0" });
 
@@ -244,11 +330,13 @@ export async function listTools(connection: Connection): Promise<McpTool[]> {
     const result = await client.listTools(undefined, {
       timeout: LIST_TIMEOUT_MS,
     });
-    return result.tools.map((tool) => ({
-      name: tool.name,
-      description: tool.description ?? "",
-      inputSchema: (tool.inputSchema ?? {}) as Record<string, unknown>,
-    }));
+    return validateToolList(
+      result.tools.map((tool) => ({
+        name: tool.name,
+        description: tool.description ?? "",
+        inputSchema: (tool.inputSchema ?? {}) as Record<string, unknown>,
+      })),
+    );
   });
 }
 

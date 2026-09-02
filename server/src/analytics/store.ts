@@ -1,16 +1,43 @@
-import { and, desc, eq, gte, ilike, inArray, lte, or, sql } from "drizzle-orm";
+import { createHash, randomUUID } from "node:crypto";
+import {
+  and,
+  desc,
+  eq,
+  gte,
+  ilike,
+  inArray,
+  lt,
+  lte,
+  or,
+  sql,
+} from "drizzle-orm";
+import type {
+  ScoredEpisode,
+  VerifiableEpisode,
+} from "../../../shared/verifiable-reward";
+import { scoreEpisode } from "../../../shared/verifiable-reward";
 import type { Database } from "../db/client";
 import {
+  analyticsDatasetSessions,
+  analyticsDatasets,
+  analyticsEvalResults,
+  analyticsEvalRuns,
+  analyticsEvaluators,
+  analyticsEvaluatorVersions,
   analyticsEvents,
   analyticsFeedback,
+  analyticsReviews,
   analyticsSessions,
+  analyticsSessionTopics,
   analyticsSpans,
+  analyticsTopics,
   auditEvents,
 } from "../db/schema";
 import {
   type AnalyticsPrivacyMode,
   contentForPrivacyMode,
   redactAnalyticsProperties,
+  redactAnalyticsText,
 } from "./privacy";
 import { toolRefFromModelName, verifyToolExecution } from "./tool-verifier";
 
@@ -85,6 +112,7 @@ export type AnalyticsQuery = {
   from?: Date;
   to?: Date;
   limit?: number;
+  offset?: number;
 };
 
 export type AnalyticsStore = ReturnType<typeof createAnalyticsStore>;
@@ -95,8 +123,369 @@ function date(value: string | undefined): Date | undefined {
   return Number.isNaN(parsed.valueOf()) ? undefined : parsed;
 }
 
+const CLUSTER_DIMENSIONS = 48;
+const CLUSTER_STOP_WORDS = new Set([
+  "agent",
+  "openbot",
+  "runtime",
+  "channel",
+  "completed",
+  "unknown",
+  "turn",
+]);
+
+function clusterTokens(parts: Array<string | null | undefined>) {
+  return (
+    parts
+      .join(" ")
+      .toLowerCase()
+      .match(/[a-z0-9][a-z0-9_.:-]{2,}/g)
+      ?.filter((token) => !CLUSTER_STOP_WORDS.has(token)) ?? []
+  );
+}
+
+function tokenBucket(token: string) {
+  let hash = 2166136261;
+  for (const character of token) {
+    hash ^= character.charCodeAt(0);
+    hash = Math.imul(hash, 16777619);
+  }
+  return Math.abs(hash) % CLUSTER_DIMENSIONS;
+}
+
+function clusterVector(tokens: readonly string[]) {
+  const vector = Array.from({ length: CLUSTER_DIMENSIONS }, () => 0);
+  for (const token of tokens) vector[tokenBucket(token)] += 1;
+  const magnitude = Math.sqrt(
+    vector.reduce((sum, value) => sum + value ** 2, 0),
+  );
+  return magnitude === 0 ? vector : vector.map((value) => value / magnitude);
+}
+
+const vectorDistance = (left: readonly number[], right: readonly number[]) =>
+  1 - left.reduce((sum, value, index) => sum + value * (right[index] ?? 0), 0);
+
+function behavioralClusters(rows: Array<{ id: string; tokens: string[] }>) {
+  if (rows.length === 0) return [];
+  const vectors = rows.map((row) => clusterVector(row.tokens));
+  const count = Math.max(1, Math.min(8, Math.ceil(Math.sqrt(rows.length / 2))));
+  const centroids = [vectors[0] ?? []];
+  while (centroids.length < count) {
+    let farthest = 0;
+    let farthestDistance = -1;
+    vectors.forEach((vector, index) => {
+      const distance = Math.min(
+        ...centroids.map((centroid) => vectorDistance(vector, centroid)),
+      );
+      if (distance > farthestDistance) {
+        farthest = index;
+        farthestDistance = distance;
+      }
+    });
+    centroids.push([...(vectors[farthest] ?? [])]);
+  }
+  let assignments = vectors.map(() => 0);
+  for (let pass = 0; pass < 10; pass += 1) {
+    assignments = vectors.map((vector) => {
+      const distances = centroids.map((centroid) =>
+        vectorDistance(vector, centroid),
+      );
+      return distances.indexOf(Math.min(...distances));
+    });
+    for (let cluster = 0; cluster < centroids.length; cluster += 1) {
+      const members = vectors.filter(
+        (_, index) => assignments[index] === cluster,
+      );
+      if (members.length === 0) continue;
+      centroids[cluster] = Array.from(
+        { length: CLUSTER_DIMENSIONS },
+        (_, dimension) =>
+          members.reduce((sum, vector) => sum + (vector[dimension] ?? 0), 0) /
+          members.length,
+      );
+    }
+  }
+  return rows.map((row, index) => ({
+    ...row,
+    cluster: assignments[index] ?? 0,
+  }));
+}
+
 export function createAnalyticsStore(database: Database) {
+  let llmJudge: ((prompt: string) => Promise<string>) | undefined;
   return {
+    setLlmJudge(judge: (prompt: string) => Promise<string>) {
+      llmJudge = judge;
+    },
+    /** Persist a privacy-safe, replayable runtime episode before evaluators consume it. */
+    async recordRuntimeEpisode(input: {
+      actorUserId?: string;
+      agentId?: string;
+      threadId?: string;
+      episode: VerifiableEpisode;
+      scored: ScoredEpisode;
+      toolCalls?: Array<{ id: string; name: string }>;
+      usage?: {
+        model?: string;
+        inputTokens?: number;
+        outputTokens?: number;
+        totalTokens?: number;
+      };
+    }) {
+      const occurredAt = new Date();
+      await database.transaction(async (tx) => {
+        await tx
+          .insert(analyticsSessions)
+          .values({
+            id: input.episode.id,
+            userId: input.actorUserId ?? null,
+            agentId: input.agentId ?? null,
+            source: "openbot-runtime",
+            privacyMode: "metadata_only",
+            status:
+              input.episode.terminatedBecause === "success"
+                ? "completed"
+                : "failed",
+            taskCompleted: input.scored.eligibleForTraining,
+            technicalFailure: input.episode.terminatedBecause === "failure",
+            model: input.usage?.model,
+            totalTokens: input.usage?.totalTokens ?? 0,
+            properties: {
+              threadId: input.threadId,
+              taskId: input.episode.taskId,
+              taskVersion: input.episode.taskVersion,
+            },
+            startedAt: occurredAt,
+            endedAt: occurredAt,
+          })
+          .onConflictDoUpdate({
+            target: analyticsSessions.id,
+            set: {
+              status:
+                input.episode.terminatedBecause === "success"
+                  ? "completed"
+                  : "failed",
+              taskCompleted: input.scored.eligibleForTraining,
+              model: input.usage?.model,
+              totalTokens: input.usage?.totalTokens ?? 0,
+              endedAt: occurredAt,
+              updatedAt: occurredAt,
+            },
+          });
+        const inserted = await tx
+          .insert(analyticsEvents)
+          .values({
+            sessionId: input.episode.id,
+            source: "openbot-runtime",
+            idempotencyKey: `${input.episode.id}:episode:${input.episode.finalStateHash}`,
+            eventType: "agent.verification.episode",
+            name: "Live verifiable reward episode",
+            userId: input.actorUserId ?? null,
+            agentId: input.agentId ?? null,
+            success: input.scored.eligibleForTraining,
+            properties: {
+              episode: input.episode,
+              scored: input.scored,
+            },
+            occurredAt,
+          })
+          .onConflictDoNothing()
+          .returning({ id: analyticsEvents.id });
+        if (input.toolCalls && input.toolCalls.length > 0) {
+          await tx
+            .insert(analyticsEvents)
+            .values(
+              input.toolCalls.map((tool) => ({
+                sessionId: input.episode.id,
+                source: "openbot-runtime",
+                idempotencyKey: `${input.episode.id}:tool:${tool.id}`,
+                eventType: "agent.tool.observed",
+                name: tool.name,
+                userId: input.actorUserId ?? null,
+                agentId: input.agentId ?? null,
+                model: input.usage?.model,
+                success: true,
+                properties: {
+                  toolCallId: tool.id,
+                  executionSurface: "server-runtime",
+                },
+                occurredAt,
+              })),
+            )
+            .onConflictDoNothing();
+        }
+        if (input.usage) {
+          await tx
+            .insert(analyticsEvents)
+            .values({
+              sessionId: input.episode.id,
+              source: "openbot-runtime",
+              idempotencyKey: `${input.episode.id}:usage:${input.episode.finalStateHash}`,
+              eventType: "agent.run.usage",
+              name: "Runtime model usage",
+              userId: input.actorUserId ?? null,
+              agentId: input.agentId ?? null,
+              model: input.usage.model,
+              inputTokens: input.usage.inputTokens,
+              outputTokens: input.usage.outputTokens,
+              success: input.episode.terminatedBecause === "success",
+              properties: { totalTokens: input.usage.totalTokens },
+              occurredAt,
+            })
+            .onConflictDoNothing();
+        }
+        const debtFailure = input.episode.verifierResults.find(
+          (result) => result.id === "technical-debt-budget" && !result.passed,
+        );
+        if (inserted.length > 0 && debtFailure) {
+          await tx.insert(analyticsReviews).values({
+            sessionId: input.episode.id,
+            reviewerId: "unassigned",
+            status: "pending",
+            label: "technical-debt-budget",
+            errorCategory: "maintainability",
+            note: `Automatic promotion was refused: ${input.scored.reasons.join("; ")}`,
+          });
+        }
+      });
+      return { episodeId: input.episode.id };
+    },
+    /** Record an administrator-confirmed product outcome without rewriting its source session. */
+    async recordBusinessOutcome(
+      actorUserId: string,
+      sessionId: string,
+      input: { name: string; success: boolean; revenueMicros: number },
+    ) {
+      const [session] = await database
+        .select({ agentId: analyticsSessions.agentId })
+        .from(analyticsSessions)
+        .where(eq(analyticsSessions.id, sessionId))
+        .limit(1);
+      if (!session) throw new Error("Analytics session not found.");
+      const [event] = await database
+        .insert(analyticsEvents)
+        .values({
+          sessionId,
+          source: "openbot-admin",
+          idempotencyKey: `business-outcome:${sessionId}:${randomUUID()}`,
+          eventType: "agent.business.outcome",
+          name: input.name,
+          userId: actorUserId,
+          agentId: session.agentId,
+          success: input.success,
+          properties: { revenueMicros: input.revenueMicros },
+        })
+        .returning();
+      if (!event) throw new Error("Business outcome was not recorded.");
+      return event;
+    },
+    /**
+     * Close traces whose browser disappeared without delivering a terminal event.
+     * The conditional update is the lease: concurrent replicas can sweep safely and only the
+     * process that changed a row emits its idempotent abandonment event.
+     */
+    async abandonStaleSessions(cutoff: Date, limit = 500) {
+      if (!(cutoff instanceof Date) || Number.isNaN(cutoff.valueOf())) {
+        throw new Error("A valid stale-session cutoff is required.");
+      }
+      const cappedLimit = Math.max(1, Math.min(5_000, Math.floor(limit)));
+      return database.transaction(async (tx) => {
+        const candidates = await tx
+          .select({ id: analyticsSessions.id })
+          .from(analyticsSessions)
+          .where(
+            and(
+              eq(analyticsSessions.status, "running"),
+              lt(analyticsSessions.updatedAt, cutoff),
+            ),
+          )
+          .orderBy(analyticsSessions.updatedAt)
+          .limit(cappedLimit)
+          .for("update", { skipLocked: true });
+        if (candidates.length === 0) return 0;
+
+        const ids = candidates.map(({ id }) => id);
+        const endedAt = new Date();
+        const closed = await tx
+          .update(analyticsSessions)
+          .set({
+            status: "abandoned",
+            technicalFailure: true,
+            endedAt,
+            updatedAt: endedAt,
+          })
+          .where(
+            and(
+              inArray(analyticsSessions.id, ids),
+              eq(analyticsSessions.status, "running"),
+            ),
+          )
+          .returning({
+            id: analyticsSessions.id,
+            userId: analyticsSessions.userId,
+            agentId: analyticsSessions.agentId,
+            startedAt: analyticsSessions.startedAt,
+          });
+        if (closed.length > 0) {
+          await tx
+            .insert(analyticsEvents)
+            .values(
+              closed.map((session) => ({
+                sessionId: session.id,
+                source: "openbot-session-sweeper",
+                idempotencyKey: `${session.id}:abandoned:v1`,
+                eventType: "agent.turn.abandoned",
+                name: "Stale channel turn abandoned",
+                userId: session.userId,
+                agentId: session.agentId,
+                latencyMs: Math.max(
+                  0,
+                  endedAt.getTime() - session.startedAt.getTime(),
+                ),
+                success: false,
+                errorType: "terminal_event_missing",
+                properties: {
+                  cutoff: cutoff.toISOString(),
+                  verifierVersion: 1,
+                },
+                occurredAt: endedAt,
+              })),
+            )
+            .onConflictDoNothing();
+        }
+        return closed.length;
+      });
+    },
+
+    /** Delete one bounded retention batch. Child events and spans follow the session cascade. */
+    async purgeSessionsBefore(cutoff: Date, limit = 1_000) {
+      const cappedLimit = Math.max(1, Math.min(10_000, Math.floor(limit)));
+      return database.transaction(async (tx) => {
+        const [lock] = await tx.execute<{ acquired: boolean }>(
+          sql`select pg_try_advisory_xact_lock(hashtext('openbot.analytics-retention')) as acquired`,
+        );
+        if (!lock?.acquired) return null;
+        const candidates = await tx
+          .select({ id: analyticsSessions.id })
+          .from(analyticsSessions)
+          .where(lt(analyticsSessions.startedAt, cutoff))
+          .orderBy(analyticsSessions.startedAt)
+          .limit(cappedLimit)
+          .for("update", { skipLocked: true });
+        if (candidates.length === 0) return 0;
+        const deleted = await tx
+          .delete(analyticsSessions)
+          .where(
+            inArray(
+              analyticsSessions.id,
+              candidates.map(({ id }) => id),
+            ),
+          )
+          .returning({ id: analyticsSessions.id });
+        return deleted.length;
+      });
+    },
+
     async ingest(actorUserId: string, input: AnalyticsIngest) {
       const mode = input.session.privacyMode ?? "metadata_only";
       const now = new Date();
@@ -125,8 +514,8 @@ export function createAnalyticsStore(database: Database) {
             status: input.session.status ?? "running",
             intent: input.session.intent?.slice(0, 500),
             summary:
-              mode === "customer_enriched"
-                ? input.session.summary?.slice(0, 10_000)
+              mode === "customer_enriched" && input.session.summary
+                ? redactAnalyticsText(input.session.summary.slice(0, 10_000))
                 : contentForPrivacyMode(input.session.summary, mode),
             replayId: input.session.replayId?.slice(0, 500),
             replayUrl: input.session.replayUrl?.slice(0, 2_000),
@@ -351,7 +740,8 @@ export function createAnalyticsStore(database: Database) {
         .from(analyticsSessions)
         .where(conditions.length ? and(...conditions) : undefined)
         .orderBy(desc(analyticsSessions.startedAt))
-        .limit(Math.min(Math.max(query.limit ?? 50, 1), 200));
+        .limit(Math.min(Math.max(query.limit ?? 50, 1), 200))
+        .offset(Math.min(Math.max(query.offset ?? 0, 0), 100_000));
       const verificationRows = rows.length
         ? await database
             .select({
@@ -523,7 +913,7 @@ export function createAnalyticsStore(database: Database) {
         .where(eq(analyticsSessions.id, sessionId))
         .limit(1);
       if (!session) return null;
-      const [events, spans, feedback] = await Promise.all([
+      const [events, spans, feedback, reviews, topics] = await Promise.all([
         database
           .select()
           .from(analyticsEvents)
@@ -539,8 +929,25 @@ export function createAnalyticsStore(database: Database) {
           .from(analyticsFeedback)
           .where(eq(analyticsFeedback.sessionId, sessionId))
           .orderBy(analyticsFeedback.createdAt),
+        database
+          .select()
+          .from(analyticsReviews)
+          .where(eq(analyticsReviews.sessionId, sessionId))
+          .orderBy(desc(analyticsReviews.updatedAt)),
+        database
+          .select({
+            id: analyticsTopics.id,
+            name: analyticsTopics.name,
+            source: analyticsSessionTopics.source,
+          })
+          .from(analyticsSessionTopics)
+          .innerJoin(
+            analyticsTopics,
+            eq(analyticsSessionTopics.topicId, analyticsTopics.id),
+          )
+          .where(eq(analyticsSessionTopics.sessionId, sessionId)),
       ]);
-      return { session, events, spans, feedback };
+      return { session, events, spans, feedback, reviews, topics };
     },
 
     async overview() {
@@ -599,8 +1006,8 @@ export function createAnalyticsStore(database: Database) {
           totalHumanWaitMs: sql<number>`coalesce(sum(${totalHumanWait}), 0)::int`,
           totalToolCalls: sql<number>`coalesce(sum(${recordedToolCalls}), 0)::int`,
           avgToolCalls: sql<number>`coalesce(avg(${recordedToolCalls}), 0)::float`,
-          totalTokens: sql<number>`coalesce(sum(${analyticsSessions.totalTokens}), 0)::int`,
-          costMicros: sql<number>`coalesce(sum(${analyticsSessions.costMicros}), 0)::int`,
+          totalTokens: sql<number>`coalesce(sum(${analyticsSessions.totalTokens}), 0)::float8`,
+          costMicros: sql<number>`coalesce(sum(${analyticsSessions.costMicros}), 0)::float8`,
         })
         .from(analyticsSessions)
         .leftJoin(
@@ -618,7 +1025,7 @@ export function createAnalyticsStore(database: Database) {
           avgLatencyMs: sql<number>`coalesce(avg(${totalLatency}), 0)::int`,
           avgActiveLatencyMs: sql<number>`coalesce(avg(${activeLatency}), 0)::int`,
           failureRate: sql<number>`coalesce(avg(case when ${analyticsSessions.technicalFailure} or ${analyticsSessions.toolFailure} then 1 else 0 end), 0)::float`,
-          costMicros: sql<number>`coalesce(sum(${analyticsSessions.costMicros}), 0)::int`,
+          costMicros: sql<number>`coalesce(sum(${analyticsSessions.costMicros}), 0)::float8`,
         })
         .from(analyticsSessions)
         .leftJoin(
@@ -632,6 +1039,757 @@ export function createAnalyticsStore(database: Database) {
         .groupBy(analyticsSessions.model)
         .orderBy(desc(sql`count(*)`));
       return { totals, models };
+    },
+
+    /** Operational surface for the evaluation assets that used to be schema-only. */
+    async governance() {
+      const [
+        evaluators,
+        datasets,
+        runs,
+        reviews,
+        topics,
+        toolUsage,
+        outcomes,
+        topicScorecards,
+        [episodeCounts],
+        [debtReviewCounts],
+      ] = await Promise.all([
+        database
+          .select()
+          .from(analyticsEvaluators)
+          .orderBy(desc(analyticsEvaluators.updatedAt))
+          .limit(50),
+        database
+          .select()
+          .from(analyticsDatasets)
+          .orderBy(desc(analyticsDatasets.updatedAt))
+          .limit(50),
+        database
+          .select()
+          .from(analyticsEvalRuns)
+          .orderBy(desc(analyticsEvalRuns.createdAt))
+          .limit(50),
+        database
+          .select()
+          .from(analyticsReviews)
+          .orderBy(desc(analyticsReviews.updatedAt))
+          .limit(50),
+        database
+          .select()
+          .from(analyticsTopics)
+          .orderBy(analyticsTopics.name)
+          .limit(100),
+        database
+          .select({
+            agentId: analyticsEvents.agentId,
+            tool: analyticsEvents.name,
+            // A browser turn and the server runtime may observe the same call.
+            // The stable AG-UI call id makes that one action, not two billable uses.
+            calls: sql<number>`count(distinct coalesce(${analyticsEvents.properties}->>'toolCallId', ${analyticsEvents.id}::text))::int`,
+            costMicros: sql<number>`coalesce(sum(${analyticsEvents.costMicros}), 0)::float8`,
+          })
+          .from(analyticsEvents)
+          .where(eq(analyticsEvents.eventType, "agent.tool.observed"))
+          .groupBy(analyticsEvents.agentId, analyticsEvents.name)
+          .orderBy(desc(sql`count(*)`))
+          .limit(100),
+        database
+          .select({
+            name: analyticsEvents.name,
+            agentId: analyticsEvents.agentId,
+            conversions: sql<number>`count(*) filter (where ${analyticsEvents.success} = true)::int`,
+            revenueMicros: sql<number>`coalesce(sum(case when ${analyticsEvents.properties}->>'revenueMicros' ~ '^[0-9]+$' then (${analyticsEvents.properties}->>'revenueMicros')::bigint else 0 end), 0)::float8`,
+            taskSuccessRate: sql<number>`coalesce(avg(case when ${analyticsSessions.taskCompleted} = true then 1 when ${analyticsSessions.taskCompleted} = false then 0 else null end), 0)::float8`,
+          })
+          .from(analyticsEvents)
+          .innerJoin(
+            analyticsSessions,
+            eq(analyticsEvents.sessionId, analyticsSessions.id),
+          )
+          .where(eq(analyticsEvents.eventType, "agent.business.outcome"))
+          .groupBy(analyticsEvents.name, analyticsEvents.agentId)
+          .limit(100),
+        database
+          .select({
+            topicId: analyticsTopics.id,
+            name: analyticsTopics.name,
+            sessions: sql<number>`count(*)::int`,
+            successRate: sql<number>`coalesce(avg(case when ${analyticsSessions.taskCompleted} = true then 1 when ${analyticsSessions.taskCompleted} = false then 0 else null end), 0)::float8`,
+          })
+          .from(analyticsSessionTopics)
+          .innerJoin(
+            analyticsTopics,
+            eq(analyticsSessionTopics.topicId, analyticsTopics.id),
+          )
+          .innerJoin(
+            analyticsSessions,
+            eq(analyticsSessionTopics.sessionId, analyticsSessions.id),
+          )
+          .groupBy(analyticsTopics.id, analyticsTopics.name)
+          .orderBy(desc(sql`count(*)`))
+          .limit(100),
+        database
+          .select({ count: sql<number>`count(*)::int` })
+          .from(analyticsEvents)
+          .where(eq(analyticsEvents.eventType, "agent.verification.episode")),
+        database
+          .select({ count: sql<number>`count(*)::int` })
+          .from(analyticsReviews)
+          .where(eq(analyticsReviews.label, "technical-debt-budget")),
+      ]);
+      const journeySessions = await database
+        .select({
+          id: analyticsSessions.id,
+          agentId: analyticsSessions.agentId,
+          taskCompleted: analyticsSessions.taskCompleted,
+          status: analyticsSessions.status,
+          properties: analyticsSessions.properties,
+          startedAt: analyticsSessions.startedAt,
+          endedAt: analyticsSessions.endedAt,
+        })
+        .from(analyticsSessions)
+        .where(sql`${analyticsSessions.properties}->>'threadId' is not null`)
+        .orderBy(analyticsSessions.startedAt)
+        .limit(2_000);
+      const journeyOutcomes =
+        journeySessions.length > 0
+          ? await database
+              .select({
+                sessionId: analyticsEvents.sessionId,
+                success: analyticsEvents.success,
+                properties: analyticsEvents.properties,
+              })
+              .from(analyticsEvents)
+              .where(
+                and(
+                  eq(analyticsEvents.eventType, "agent.business.outcome"),
+                  inArray(
+                    analyticsEvents.sessionId,
+                    journeySessions.map((session) => session.id),
+                  ),
+                ),
+              )
+          : [];
+      const outcomesBySession = new Map<
+        string,
+        { conversions: number; revenueMicros: number }
+      >();
+      for (const outcome of journeyOutcomes) {
+        const current = outcomesBySession.get(outcome.sessionId) ?? {
+          conversions: 0,
+          revenueMicros: 0,
+        };
+        const properties = outcome.properties as Record<string, unknown>;
+        const revenue = Number(properties.revenueMicros ?? 0);
+        current.conversions += outcome.success === true ? 1 : 0;
+        current.revenueMicros +=
+          Number.isSafeInteger(revenue) && revenue >= 0 ? revenue : 0;
+        outcomesBySession.set(outcome.sessionId, current);
+      }
+      const groupedJourneys = new Map<string, typeof journeySessions>();
+      for (const session of journeySessions) {
+        const properties = session.properties as Record<string, unknown>;
+        const threadId =
+          typeof properties.threadId === "string" ? properties.threadId : "";
+        if (!threadId) continue;
+        const turns = groupedJourneys.get(threadId) ?? [];
+        turns.push(session);
+        groupedJourneys.set(threadId, turns);
+      }
+      const journeys = [...groupedJourneys.entries()]
+        .filter(([, turns]) => turns.length >= 2)
+        .map(([threadId, turns]) => {
+          const first = turns[0];
+          const last = turns.at(-1);
+          const business = turns.reduce(
+            (sum, turn) => {
+              const value = outcomesBySession.get(turn.id);
+              return {
+                conversions: sum.conversions + (value?.conversions ?? 0),
+                revenueMicros: sum.revenueMicros + (value?.revenueMicros ?? 0),
+              };
+            },
+            { conversions: 0, revenueMicros: 0 },
+          );
+          return {
+            threadId,
+            agentId: last?.agentId ?? first?.agentId ?? null,
+            turns: turns.length,
+            firstOutcome: first?.taskCompleted ?? null,
+            lastOutcome: last?.taskCompleted ?? null,
+            improved:
+              first?.taskCompleted === false && last?.taskCompleted === true,
+            conversions: business.conversions,
+            revenueMicros: business.revenueMicros,
+            startedAt: first?.startedAt,
+            endedAt: last?.endedAt ?? last?.startedAt,
+          };
+        })
+        .sort(
+          (left, right) =>
+            (right.endedAt?.getTime() ?? 0) - (left.endedAt?.getTime() ?? 0),
+        )
+        .slice(0, 100);
+      return {
+        evaluators,
+        datasets,
+        runs,
+        reviews,
+        topics,
+        toolUsage,
+        outcomes,
+        topicScorecards,
+        journeys,
+        verifiedEpisodes: episodeCounts?.count ?? 0,
+        debtReviews: debtReviewCounts?.count ?? 0,
+      };
+    },
+
+    async clusterTopics() {
+      const sessions = await database
+        .select({
+          id: analyticsSessions.id,
+          intent: analyticsSessions.intent,
+          summary: analyticsSessions.summary,
+          source: analyticsSessions.source,
+          agentId: analyticsSessions.agentId,
+          model: analyticsSessions.model,
+          status: analyticsSessions.status,
+        })
+        .from(analyticsSessions)
+        .orderBy(desc(analyticsSessions.startedAt))
+        .limit(1_000);
+      if (sessions.length === 0) return { assigned: 0, clusters: 0 };
+      const eventRows = await database
+        .select({
+          sessionId: analyticsEvents.sessionId,
+          eventType: analyticsEvents.eventType,
+          name: analyticsEvents.name,
+        })
+        .from(analyticsEvents)
+        .where(
+          inArray(
+            analyticsEvents.sessionId,
+            sessions.map((session) => session.id),
+          ),
+        );
+      const eventsBySession = new Map<string, string[]>();
+      for (const event of eventRows) {
+        const values = eventsBySession.get(event.sessionId) ?? [];
+        values.push(event.eventType, event.name);
+        eventsBySession.set(event.sessionId, values);
+      }
+      const humanRows = await database
+        .select({ sessionId: analyticsSessionTopics.sessionId })
+        .from(analyticsSessionTopics)
+        .where(eq(analyticsSessionTopics.source, "human"));
+      const human = new Set(humanRows.map((row) => row.sessionId));
+      const clustered = behavioralClusters(
+        sessions
+          .filter((session) => !human.has(session.id))
+          .map((session) => ({
+            id: session.id,
+            tokens: clusterTokens([
+              session.intent,
+              session.summary,
+              session.source,
+              session.agentId,
+              session.model,
+              session.status,
+              ...(eventsBySession.get(session.id) ?? []),
+            ]),
+          })),
+      );
+      const labels = new Map<number, string>();
+      for (const row of clustered) {
+        if (labels.has(row.cluster)) continue;
+        const frequency = new Map<string, number>();
+        for (const member of clustered.filter(
+          (item) => item.cluster === row.cluster,
+        )) {
+          for (const token of member.tokens)
+            frequency.set(token, (frequency.get(token) ?? 0) + 1);
+        }
+        const distinctive = [...frequency.entries()]
+          .sort(
+            (left, right) =>
+              right[1] - left[1] || left[0].localeCompare(right[0]),
+          )
+          .slice(0, 2)
+          .map(([token]) => token.replaceAll(/[_.:-]+/g, " "))
+          .join(" + ");
+        labels.set(
+          row.cluster,
+          `Behavior · ${distinctive || `cluster ${row.cluster + 1}`}`,
+        );
+      }
+      await database.transaction(async (tx) => {
+        await tx
+          .delete(analyticsSessionTopics)
+          .where(eq(analyticsSessionTopics.source, "cluster"));
+        for (const row of clustered) {
+          const name =
+            labels.get(row.cluster) ?? `Behavior · cluster ${row.cluster + 1}`;
+          const [topic] = await tx
+            .insert(analyticsTopics)
+            .values({
+              name,
+              description:
+                "Unsupervised cluster of intent and observed runtime behavior.",
+            })
+            .onConflictDoUpdate({
+              target: analyticsTopics.name,
+              set: { updatedAt: new Date() },
+            })
+            .returning({ id: analyticsTopics.id });
+          if (topic)
+            await tx.insert(analyticsSessionTopics).values({
+              sessionId: row.id,
+              topicId: topic.id,
+              confidence: 70,
+              source: "cluster",
+            });
+        }
+      });
+      return { assigned: clustered.length, clusters: labels.size };
+    },
+
+    async ensureBuiltInEvaluators(actorUserId: string) {
+      const builtIns = [
+        {
+          name: "Task Completion",
+          description: "Whether the session reached its declared outcome.",
+          definition: { signal: "task_completion", threshold: 1 },
+        },
+        {
+          name: "Helpfulness",
+          description: "Explicit rating and negative-feedback quality signal.",
+          definition: { signal: "helpfulness", threshold: 70 },
+        },
+        {
+          name: "User Friction",
+          description: "Human waits, failures, and repeated tool activity.",
+          definition: { signal: "user_friction", threshold: 70 },
+        },
+      ] as const;
+      for (const builtIn of builtIns) {
+        const [existing] = await database
+          .select({ id: analyticsEvaluators.id })
+          .from(analyticsEvaluators)
+          .where(eq(analyticsEvaluators.name, builtIn.name))
+          .limit(1);
+        if (existing) continue;
+        await database.transaction(async (tx) => {
+          const [created] = await tx
+            .insert(analyticsEvaluators)
+            .values({
+              name: builtIn.name,
+              description: builtIn.description,
+              kind: "code",
+              scoreType: "numeric",
+              lifecycle: "active",
+              activeVersion: 1,
+              createdBy: actorUserId,
+            })
+            .returning({ id: analyticsEvaluators.id });
+          if (!created) return;
+          await tx.insert(analyticsEvaluatorVersions).values({
+            evaluatorId: created.id,
+            version: 1,
+            definition: builtIn.definition,
+            createdBy: actorUserId,
+          });
+        });
+      }
+      return this.governance();
+    },
+
+    async createEvaluator(
+      actorUserId: string,
+      input: {
+        name: string;
+        description?: string;
+        kind: "code" | "llm_judge";
+        scoreType: "binary" | "categorical" | "numeric";
+        definition: Record<string, unknown>;
+      },
+    ) {
+      return database.transaction(async (tx) => {
+        const [evaluator] = await tx
+          .insert(analyticsEvaluators)
+          .values({
+            name: input.name,
+            description: input.description ?? "",
+            kind: input.kind,
+            scoreType: input.scoreType,
+            lifecycle: "active",
+            activeVersion: 1,
+            createdBy: actorUserId,
+          })
+          .returning();
+        if (!evaluator) throw new Error("Evaluator was not created.");
+        await tx.insert(analyticsEvaluatorVersions).values({
+          evaluatorId: evaluator.id,
+          version: 1,
+          definition: input.definition,
+          createdBy: actorUserId,
+        });
+        return evaluator;
+      });
+    },
+
+    async createDataset(
+      actorUserId: string,
+      input: {
+        name: string;
+        description?: string;
+        golden?: boolean;
+        sessionIds?: string[];
+      },
+    ) {
+      return database.transaction(async (tx) => {
+        const [dataset] = await tx
+          .insert(analyticsDatasets)
+          .values({
+            name: input.name,
+            description: input.description ?? "",
+            golden: input.golden === true,
+            query: {},
+            createdBy: actorUserId,
+          })
+          .returning();
+        if (!dataset) throw new Error("Dataset was not created.");
+        const ids = [...new Set(input.sessionIds ?? [])];
+        if (ids.length > 0) {
+          await tx.insert(analyticsDatasetSessions).values(
+            ids.map((sessionId) => ({
+              datasetId: dataset.id,
+              sessionId,
+              addedBy: actorUserId,
+            })),
+          );
+        }
+        return dataset;
+      });
+    },
+
+    async reviewSession(
+      actorUserId: string,
+      sessionId: string,
+      input: {
+        status: string;
+        label?: string;
+        errorCategory?: string;
+        note?: string;
+      },
+    ) {
+      const [review] = await database
+        .insert(analyticsReviews)
+        .values({
+          sessionId,
+          reviewerId: actorUserId,
+          status: input.status,
+          label: input.label ?? null,
+          errorCategory: input.errorCategory ?? null,
+          note: input.note ?? null,
+        })
+        .returning();
+      return review;
+    },
+
+    async classifyTopic(
+      sessionId: string,
+      input: { name: string; description?: string; confidence?: number },
+    ) {
+      return database.transaction(async (tx) => {
+        const [topic] = await tx
+          .insert(analyticsTopics)
+          .values({ name: input.name, description: input.description ?? "" })
+          .onConflictDoUpdate({
+            target: analyticsTopics.name,
+            set: {
+              description: input.description ?? "",
+              updatedAt: new Date(),
+            },
+          })
+          .returning();
+        if (!topic) throw new Error("Topic was not created.");
+        await tx
+          .insert(analyticsSessionTopics)
+          .values({
+            sessionId,
+            topicId: topic.id,
+            confidence: Math.max(0, Math.min(100, input.confidence ?? 100)),
+            source: "human",
+          })
+          .onConflictDoUpdate({
+            target: [
+              analyticsSessionTopics.sessionId,
+              analyticsSessionTopics.topicId,
+            ],
+            set: {
+              confidence: Math.max(0, Math.min(100, input.confidence ?? 100)),
+              source: "human",
+            },
+          });
+        return topic;
+      });
+    },
+
+    async runEvaluator(
+      actorUserId: string,
+      evaluatorId: string,
+      datasetId?: string,
+      calibration = false,
+      claimedRunId?: string,
+    ) {
+      const [evaluator] = await database
+        .select()
+        .from(analyticsEvaluators)
+        .where(eq(analyticsEvaluators.id, evaluatorId))
+        .limit(1);
+      if (!evaluator?.activeVersion)
+        throw new Error("Evaluator has no active version.");
+      const [version] = await database
+        .select()
+        .from(analyticsEvaluatorVersions)
+        .where(
+          and(
+            eq(analyticsEvaluatorVersions.evaluatorId, evaluatorId),
+            eq(analyticsEvaluatorVersions.version, evaluator.activeVersion),
+          ),
+        )
+        .limit(1);
+      if (!version) throw new Error("Evaluator version is missing.");
+      const definition = version.definition as {
+        signal?: string;
+        threshold?: number;
+      };
+      const sessionRows = datasetId
+        ? await database
+            .select({ session: analyticsSessions })
+            .from(analyticsDatasetSessions)
+            .innerJoin(
+              analyticsSessions,
+              eq(analyticsDatasetSessions.sessionId, analyticsSessions.id),
+            )
+            .where(eq(analyticsDatasetSessions.datasetId, datasetId))
+        : await database
+            .select({ session: analyticsSessions })
+            .from(analyticsSessions)
+            .orderBy(desc(analyticsSessions.startedAt))
+            .limit(500);
+      const [run] = claimedRunId
+        ? await database
+            .select()
+            .from(analyticsEvalRuns)
+            .where(
+              and(
+                eq(analyticsEvalRuns.id, claimedRunId),
+                eq(analyticsEvalRuns.evaluatorId, evaluatorId),
+                eq(analyticsEvalRuns.status, "running"),
+              ),
+            )
+            .limit(1)
+        : await database
+            .insert(analyticsEvalRuns)
+            .values({
+              evaluatorId,
+              evaluatorVersion: evaluator.activeVersion,
+              datasetId: datasetId ?? null,
+              calibration,
+              status: "running",
+              startedAt: new Date(),
+              createdBy: actorUserId,
+            })
+            .returning();
+      if (!run) throw new Error("Evaluation run was not created.");
+      const scores = await Promise.all(
+        sessionRows.map(async ({ session }) => {
+          const properties = session.properties as Record<string, unknown>;
+          const humanWait = Number(properties.humanWaitMs ?? 0);
+          const toolCalls = Number(properties.toolCalls ?? 0);
+          let explanation = `${definition.signal ?? "code"} score`;
+          let score =
+            definition.signal === "task_completion"
+              ? session.taskCompleted === true
+                ? 100
+                : 0
+              : definition.signal === "helpfulness"
+                ? session.negativeFeedback
+                  ? 0
+                  : session.taskCompleted === true
+                    ? 100
+                    : 50
+                : Math.max(
+                    0,
+                    100 -
+                      (session.technicalFailure ? 50 : 0) -
+                      (session.toolFailure ? 30 : 0) -
+                      Math.min(
+                        20,
+                        humanWait / 1_000 + Math.max(0, toolCalls - 5),
+                      ),
+                  );
+          if (evaluator.kind === "llm_judge") {
+            if (!llmJudge) throw new Error("The LLM judge is not configured.");
+            const judged = JSON.parse(
+              await llmJudge(
+                `Return one JSON object with numeric score from 0 to 100 and a short explanation.\nRubric: ${JSON.stringify(definition)}\nPrivacy-safe session: ${JSON.stringify({ intent: session.intent, summary: session.summary, status: session.status, taskCompleted: session.taskCompleted, technicalFailure: session.technicalFailure, toolFailure: session.toolFailure })}`,
+              ),
+            ) as { score?: unknown; explanation?: unknown };
+            if (
+              typeof judged.score !== "number" ||
+              !Number.isFinite(judged.score)
+            ) {
+              throw new Error("The LLM judge returned no finite score.");
+            }
+            score = Math.max(0, Math.min(100, judged.score));
+            explanation =
+              typeof judged.explanation === "string"
+                ? judged.explanation.slice(0, 2_000)
+                : "LLM judge score";
+          }
+          return {
+            sessionId: session.id,
+            score: Math.round(score),
+            explanation,
+          };
+        }),
+      );
+      const threshold = definition.threshold ?? 70;
+      await database.transaction(async (tx) => {
+        if (scores.length > 0) {
+          await tx.insert(analyticsEvalResults).values(
+            scores.map((result) => ({
+              runId: run.id,
+              sessionId: result.sessionId,
+              numericScore: result.score,
+              passed: result.score >= threshold,
+              explanation: result.explanation,
+              evidence: { evaluatorVersion: evaluator.activeVersion },
+            })),
+          );
+        }
+        const aggregate =
+          scores.length === 0
+            ? 0
+            : Math.round(
+                scores.reduce((sum, item) => sum + item.score, 0) /
+                  scores.length,
+              );
+        const previous = await tx
+          .select({ aggregateScore: analyticsEvalRuns.aggregateScore })
+          .from(analyticsEvalRuns)
+          .where(
+            and(
+              eq(analyticsEvalRuns.evaluatorId, evaluatorId),
+              eq(analyticsEvalRuns.status, "completed"),
+            ),
+          )
+          .orderBy(desc(analyticsEvalRuns.finishedAt))
+          .limit(1);
+        const baseline = previous[0]?.aggregateScore ?? null;
+        const regression = baseline !== null && aggregate < baseline - 10;
+        await tx
+          .update(analyticsEvalRuns)
+          .set({
+            status: "completed",
+            aggregateScore: aggregate,
+            baselineScore: baseline,
+            regression,
+            finishedAt: new Date(),
+          })
+          .where(eq(analyticsEvalRuns.id, run.id));
+        if (regression && scores[0]) {
+          await tx.insert(analyticsEvents).values({
+            sessionId: scores[0].sessionId,
+            source: "openbot-evaluator",
+            idempotencyKey: `regression:${run.id}`,
+            eventType: "analytics.evaluator.regression",
+            name: `${evaluator.name} regressed`,
+            userId: actorUserId,
+            success: false,
+            properties: { evaluatorId, runId: run.id, baseline, aggregate },
+          });
+        }
+      });
+      return { runId: run.id, sessions: scores.length };
+    },
+
+    async runScheduledEvaluators(actorUserId = "analytics-scheduler") {
+      const active = await database
+        .select({
+          id: analyticsEvaluators.id,
+          activeVersion: analyticsEvaluators.activeVersion,
+        })
+        .from(analyticsEvaluators)
+        .where(eq(analyticsEvaluators.lifecycle, "active"));
+      const ran: string[] = [];
+      for (const evaluator of active) {
+        const claimedRun = await database.transaction(async (tx) => {
+          const lockKey = `openbot:analytics-evaluator:${evaluator.id}`;
+          const lockResult = await tx.execute(
+            sql`select pg_try_advisory_xact_lock(hashtext(${lockKey})) as acquired`,
+          );
+          const acquired = Boolean(
+            (lockResult[0] as { acquired?: boolean } | undefined)?.acquired,
+          );
+          if (!acquired) return null;
+          const [recent] = await tx
+            .select({ createdAt: analyticsEvalRuns.createdAt })
+            .from(analyticsEvalRuns)
+            .where(eq(analyticsEvalRuns.evaluatorId, evaluator.id))
+            .orderBy(desc(analyticsEvalRuns.createdAt))
+            .limit(1);
+          if (
+            recent &&
+            Date.now() - recent.createdAt.getTime() < 24 * 60 * 60_000
+          ) {
+            return null;
+          }
+          if (!evaluator.activeVersion) return null;
+          const [run] = await tx
+            .insert(analyticsEvalRuns)
+            .values({
+              evaluatorId: evaluator.id,
+              evaluatorVersion: evaluator.activeVersion,
+              calibration: false,
+              status: "running",
+              startedAt: new Date(),
+              createdBy: actorUserId,
+            })
+            .returning({ id: analyticsEvalRuns.id });
+          return run ?? null;
+        });
+        if (!claimedRun) continue;
+        // The durable row is the cross-replica claim. Run only after releasing the transaction's
+        // connection, so a one-connection deployment cannot deadlock itself here.
+        await this.runEvaluator(
+          actorUserId,
+          evaluator.id,
+          undefined,
+          false,
+          claimedRun.id,
+        );
+        ran.push(evaluator.id);
+      }
+      return ran;
+    },
+
+    async recordedEpisodes(limit = 200) {
+      const rows = await database
+        .select({ properties: analyticsEvents.properties })
+        .from(analyticsEvents)
+        .where(eq(analyticsEvents.eventType, "agent.verification.episode"))
+        .orderBy(desc(analyticsEvents.occurredAt))
+        .limit(Math.max(1, Math.min(2_000, Math.floor(limit))));
+      return rows.flatMap((row) => {
+        const properties = row.properties as Record<string, unknown>;
+        const episode = properties.episode;
+        return episode && typeof episode === "object" ? [{ episode }] : [];
+      });
     },
 
     async verifyToolEvidence(actorUserId: string, sessionId: string) {
@@ -765,6 +1923,54 @@ export function createAnalyticsStore(database: Database) {
         };
       }
       const occurredAt = new Date();
+      const episode = {
+        id: sessionId,
+        taskId: "live-tool-execution",
+        taskVersion: "2",
+        agentVersion: session.agentId ?? "unknown",
+        model: "runtime-selected",
+        initialStateHash: createHash("sha256")
+          .update(`${sessionId}:start`)
+          .digest("hex"),
+        finalStateHash: createHash("sha256")
+          .update(
+            JSON.stringify({
+              observed: verdict.observed,
+              matched: verdict.matched,
+              rejected: verdict.rejected,
+              failures: verdict.unresolvedOperationalFailures,
+            }),
+          )
+          .digest("hex"),
+        verifierResults: [
+          {
+            id: "tool-execution-integrity",
+            version: "2",
+            passed:
+              verdict.passed &&
+              verdict.unresolvedOperationalFailures.length === 0,
+            score:
+              verdict.observed.length === 0
+                ? 0
+                : verdict.matched.length / verdict.observed.length,
+            critical: true,
+            evidence: { auditEventIds: verdict.auditEventIds },
+          },
+        ],
+        reward: {
+          taskCorrectness: verdict.passed ? 1 : 0,
+          policyCompliance: verdict.unmatched.length === 0 ? 1 : 0,
+          unsupportedClaims: verdict.unmatched.length,
+          unnecessaryToolCalls: 0,
+          humanInterventions: 0,
+          costUsd: 0,
+          latencyMs: 0,
+        },
+        terminatedBecause: verdict.passed
+          ? ("success" as const)
+          : ("failure" as const),
+      };
+      const episodeScore = scoreEpisode(episode);
 
       await database.transaction(async (tx) => {
         await tx
@@ -805,6 +2011,58 @@ export function createAnalyticsStore(database: Database) {
                   verdict.unresolvedOperationalFailures,
                 rejected: verdict.rejected,
                 auditEventIds: verdict.auditEventIds,
+              },
+              occurredAt,
+            },
+          });
+        await tx
+          .insert(analyticsEvents)
+          .values({
+            sessionId,
+            source: "openbot-verifier",
+            idempotencyKey: `${sessionId}:verifiable-episode:v1`,
+            eventType: "agent.verification.episode",
+            name: "Verifiable reward episode",
+            userId: actorUserId,
+            agentId: session.agentId,
+            success: episodeScore.eligibleForTraining,
+            properties: {
+              taskId: episode.taskId,
+              taskVersion: episode.taskVersion,
+              eligibleForTraining: episodeScore.eligibleForTraining,
+              scalarReward: episodeScore.scalarReward,
+              reasons: episodeScore.reasons,
+              verifiers: episode.verifierResults.map((result) => ({
+                id: result.id,
+                version: result.version,
+                passed: result.passed,
+                score: result.score,
+                critical: result.critical,
+              })),
+              initialStateHash: episode.initialStateHash,
+              finalStateHash: episode.finalStateHash,
+            },
+            occurredAt,
+          })
+          .onConflictDoUpdate({
+            target: [analyticsEvents.source, analyticsEvents.idempotencyKey],
+            set: {
+              success: episodeScore.eligibleForTraining,
+              properties: {
+                taskId: episode.taskId,
+                taskVersion: episode.taskVersion,
+                eligibleForTraining: episodeScore.eligibleForTraining,
+                scalarReward: episodeScore.scalarReward,
+                reasons: episodeScore.reasons,
+                verifiers: episode.verifierResults.map((result) => ({
+                  id: result.id,
+                  version: result.version,
+                  passed: result.passed,
+                  score: result.score,
+                  critical: result.critical,
+                })),
+                initialStateHash: episode.initialStateHash,
+                finalStateHash: episode.finalStateHash,
               },
               occurredAt,
             },

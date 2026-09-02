@@ -13,6 +13,7 @@ import {
   buildAgents,
   type RegisteredAgent,
   type RuntimeModel,
+  type SignRun,
 } from "../src/copilot";
 import type { Selection } from "../src/plugins/selection";
 import type { GrantedTool } from "../src/plugins/tools";
@@ -382,13 +383,17 @@ describe("a remote Bot", () => {
      * happened.
      */
     answerWith(["slack-digest"]);
+    const signRun: SignRun = () => ({
+      lineage: "signed-lineage",
+      toolCalls: ["signed-tool-call"],
+    });
     const agents = await buildAgents(
       [remoteAgent()],
       model,
       "test-key",
       undefined,
       async () => granted,
-      () => "signed-assertion",
+      signRun,
       undefined,
       undefined,
       selection(),
@@ -404,7 +409,8 @@ describe("a remote Bot", () => {
     // Narrowed away, so the Bot must not be told it holds it.
     expect(String(holdings?.content ?? "")).not.toContain("drive: tool_0");
     expect(run?.forwardedProps?.openbotBotId).toBe("risk");
-    expect(run?.forwardedProps?.openbotRun).toBe("signed-assertion");
+    expect(run?.forwardedProps?.openbotRun).toBe("signed-lineage");
+    expect(run?.forwardedProps?.openbotToolRuns).toEqual(["signed-tool-call"]);
     // The deployment-run list has to be the narrowed set too, or the Bot is told this side executes
     // a tool it was never offered.
     expect(run?.forwardedProps?.openbotDeploymentTools).toContain(

@@ -165,6 +165,10 @@ export function createPluginRoutes(
       servers: await store.listServers(),
       // Scoped: the deployment's skills plus this person's own. An administrator sees them all.
       skills: await store.listSkills(skillActor(context)),
+      toolRequests:
+        context.var.actor.role === "admin"
+          ? await store.listToolRequests()
+          : [],
       /*
        * What an administrator has to register with the vendor, character for character.
        *
@@ -178,6 +182,85 @@ export function createPluginRoutes(
         ? redirectUriFor(connect.publicUrl)
         : null,
     }),
+  );
+
+  /** A Bot/user may ask, but receives no capability until an administrator approves it. */
+  routes.post("/tool-requests", requireUser, async (context) => {
+    const body = (await context.req.json().catch(() => null)) as {
+      agentId?: unknown;
+      catalogueKey?: unknown;
+      reason?: unknown;
+    } | null;
+    if (
+      typeof body?.agentId !== "string" ||
+      typeof body.catalogueKey !== "string" ||
+      typeof body.reason !== "string" ||
+      !body.reason.trim()
+    ) {
+      return context.json(
+        { error: "A Bot, catalogue capability, and reason are required." },
+        400,
+      );
+    }
+    if (!(await canUseBot(context.var.actor, body.agentId))) {
+      return context.json(
+        { error: "That Bot is not available to this person." },
+        403,
+      );
+    }
+    try {
+      return context.json(
+        {
+          request: await store.requestCatalogueTool({
+            agentId: body.agentId,
+            requesterId: context.var.actor.id,
+            catalogueKey: body.catalogueKey,
+            reason: body.reason.trim().slice(0, 2_000),
+          }),
+        },
+        202,
+      );
+    } catch (error) {
+      return context.json(
+        { error: error instanceof Error ? error.message : "Request refused." },
+        400,
+      );
+    }
+  });
+
+  routes.post(
+    "/tool-requests/:requestId/decision",
+    requireUser,
+    async (context) => {
+      const forbidden = requireAdmin(context);
+      if (forbidden) return forbidden;
+      const body = (await context.req.json().catch(() => null)) as {
+        decision?: unknown;
+      } | null;
+      if (body?.decision !== "approved" && body?.decision !== "rejected") {
+        return context.json(
+          { error: "Decision must be approved or rejected." },
+          400,
+        );
+      }
+      try {
+        const request = await store.decideToolRequest(
+          context.req.param("requestId"),
+          body.decision,
+          context.var.actor.id,
+        );
+        return request
+          ? context.json({ request })
+          : context.json({ error: "Pending request not found." }, 404);
+      } catch (error) {
+        return context.json(
+          {
+            error: error instanceof Error ? error.message : "Decision failed.",
+          },
+          409,
+        );
+      }
+    },
   );
 
   /** Add a curated server. The URL comes from the catalogue, never from the request. */

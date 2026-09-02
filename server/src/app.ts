@@ -1,5 +1,5 @@
 import type { Hono as HonoApp, MiddlewareHandler } from "hono";
-import { Hono } from "hono";
+import { type Context, Hono } from "hono";
 import { serveStatic } from "hono/bun";
 import {
   authoriseAgentCall,
@@ -47,6 +47,8 @@ import type { PeopleStore } from "./people/store";
 import { createPluginRoutes } from "./plugins/routes";
 import type { PluginStore } from "./plugins/store";
 import { REFUSAL_MARKER } from "./plugins/tools";
+import { createProductionEngineerRoutes } from "./production-engineer/routes";
+import type { ProductionEngineerStore } from "./production-engineer/store";
 
 export type AgentCallbackToolResolver = (input: {
   name: string;
@@ -219,10 +221,42 @@ export function createApp(
   analyticsStore?: AnalyticsStore,
   /** Deployment-owned tools a remote Bot may call with its signed run. Appended for positional callers. */
   agentCallbackTool?: AgentCallbackToolResolver,
+  /** Cross-replica one-use gate for signed remote-agent tool tickets. */
+  consumeAgentToolAssertion?: (
+    assertionId: string,
+    expiresAt: number,
+  ) => Promise<boolean>,
+  /** Persistent, admin-only production engineering workflow. */
+  productionEngineerStore?: ProductionEngineerStore,
+  /**
+   * A cheap check of the dependencies required to serve real requests.
+   *
+   * Optional so small unit-test applications stay self-contained. The composition root supplies a
+   * database query in production; `/live` remains the process-only probe for orchestrators that
+   * need to distinguish a dead process from a temporarily unready one.
+   */
+  readinessProbe?: () => Promise<void>,
 ) {
   const app = new Hono<{ Variables: AppVariables }>();
 
-  app.get("/health", (context) => context.json({ status: "ok" }));
+  app.get("/live", (context) => context.json({ status: "ok" }));
+  const readiness = async (
+    context: Context<{ Variables: AppVariables }>,
+  ) => {
+    try {
+      await readinessProbe?.();
+      return context.json({ status: "ok" });
+    } catch {
+      // A public probe must be useful to an orchestrator without publishing connection details.
+      return context.json(
+        { status: "unavailable", dependencies: { database: "unavailable" } },
+        503,
+      );
+    }
+  };
+  app.get("/health", readiness);
+  // Same readiness fact on the web app's proxied origin, so an administrator can inspect it in UI.
+  app.get("/api/health", readiness);
   // Projected, never the raw runtime. config.runtime carries the Intelligence contract, including
   // INTELLIGENCE_API_KEY and the licence token, and this endpoint is reachable by anyone. Returning
   // the object wholesale would serve deployment secrets to the browser. Add fields here explicitly.
@@ -912,7 +946,13 @@ export function createApp(
   if (analyticsStore) {
     app.route(
       "/api/analytics",
-      createAnalyticsRoutes(analyticsStore, requireUser),
+      createAnalyticsRoutes(analyticsStore, requireUser, canUseBot, auditStore),
+    );
+  }
+  if (productionEngineerStore) {
+    app.route(
+      "/api/production-engineer",
+      createProductionEngineerRoutes(productionEngineerStore, requireUser),
     );
   }
 
@@ -995,6 +1035,7 @@ export function createApp(
         legacyToken,
         lookup: async (hash) =>
           (await agentProfileStore?.agentForCallbackToken(hash)) ?? null,
+        consume: consumeAgentToolAssertion ?? (async () => false),
       });
       if (!verdict.ok) {
         /*
@@ -1032,6 +1073,28 @@ export function createApp(
 
       if (!body?.name) {
         return context.json({ error: "A tool is required." }, 400);
+      }
+
+      /*
+       * Temporary migration signal for the compatibility credential.
+       *
+       * The shared token cannot be removed safely while a bundled or customer-run adapter still
+       * presents it. A proved caller is safe to name here, and a non-blocking audit write means the
+       * measurement can never become a dependency of the tool call it is measuring. Operators can
+       * now require a zero-event window before disabling AGENT_TOOL_TOKEN.
+       */
+      if (verdict.credential === "legacy" && auditStore) {
+        void recordAuditEvent(auditStore, {
+          actorUserId: verdict.actorId,
+          eventType: "mcp.legacy_callback_used",
+          targetType: "mcp_tool",
+          targetId: body.name.slice(0, 120),
+          payload: {
+            botId: verdict.botId,
+            runId: verdict.runId,
+            note: "This Bot used the deployment-wide compatibility token. Migrate it to a per-Bot callback token before removing AGENT_TOOL_TOKEN.",
+          },
+        }).catch(() => undefined);
       }
 
       try {

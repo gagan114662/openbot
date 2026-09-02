@@ -171,6 +171,7 @@ async function inspectOwned(names: ComputerNames): Promise<{
   status: string;
   port?: number;
   image?: string;
+  environment?: string[];
   startedAt?: string;
 } | null> {
   try {
@@ -184,6 +185,9 @@ async function inspectOwned(names: ComputerNames): Promise<{
       // The resolved image, not the tag it was started from. A tag moves when the image is
       // rebuilt; this is what the container is actually running.
       ...(info.Image ? { image: info.Image } : {}),
+      ...(Array.isArray(info.Config?.Env)
+        ? { environment: info.Config.Env }
+        : {}),
       /*
        * When this run of the container began, which is what tells two runs apart.
        *
@@ -233,6 +237,15 @@ async function runsCurrentImage(
   } catch {
     return true;
   }
+}
+
+/** Every deployment-controlled environment entry must still match exactly. */
+function runsCurrentEnvironment(
+  existing: string[] | undefined,
+  expected: string[],
+): boolean {
+  if (!existing) return expected.length === 0;
+  return expected.every((entry) => existing.includes(entry));
 }
 
 /** Long enough for a cold start with a large image, short enough that a caller is not left hanging. */
@@ -393,7 +406,11 @@ export async function ensure(
      * ended, and a Bot carrying an hour-old handover prompt into a new conversation is the symptom
      * that found this.
      */
-    if (existing && !(await runsCurrentImage(existing.image, options.image))) {
+    if (
+      existing &&
+      (!(await runsCurrentImage(existing.image, options.image)) ||
+        !runsCurrentEnvironment(existing.environment, options.environment))
+    ) {
       try {
         await docker
           .getContainer(names.container)

@@ -24,7 +24,7 @@ const database = createDatabase(
   TEST_POOL,
 );
 const queue = createWorkQueue(database);
-const kind = "bot.message";
+const kind = `bot.message.test.runner.${randomUUID()}`;
 
 const silent: AuditStore = { insert: async () => {} };
 
@@ -70,12 +70,13 @@ describe("a batch of hops and a lease that can run out", () => {
     const held = Promise.withResolvers<void>();
     const shared = {
       queue,
-      sign: () => "signed",
+      sign: () => ({ lineage: "signed", toolCalls: [] }),
       auditStore: silent,
       // Small enough to drive in milliseconds; the property is one duration outrunning another.
       leaseMs: 400,
       renewEveryMs: 100,
       limit: 3,
+      kind,
     };
 
     const slow = createHandoffRunner({
@@ -132,12 +133,13 @@ describe("a batch of hops and a lease that can run out", () => {
     const slow = createHandoffRunner({
       queue,
       owner: "replica-a",
-      sign: () => "signed",
+      sign: () => ({ lineage: "signed", toolCalls: [] }),
       auditStore: silent,
       leaseMs: 400,
       // Never refreshed, which is what a paused process looks like from the database's side.
       renewEveryMs: 60_000,
       limit: 2,
+      kind,
       delivery: {
         deliver: async ({ work }) => {
           ran.push(work.toBotId);

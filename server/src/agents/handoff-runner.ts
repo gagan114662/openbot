@@ -12,7 +12,9 @@
  */
 import { type AuditStore, recordAuditEvent } from "../audit";
 import { DEFAULT_MAX_ATTEMPTS, type WorkQueue } from "../work/queue";
+import type { EvolutionCheckpointGate } from "./evolution-checkpoints";
 import { HANDOFF_KIND } from "./handoff";
+import { ThreadBusyError } from "./handoff-delivery";
 
 /** What a hop carries, as `handoff.ts` wrote it. */
 export type HandoffWork = {
@@ -71,6 +73,7 @@ export type HandoffDelivery = {
     shown?: string;
     /** The signed statement of the run it is starting, carrying its depth. */
     assertion: string;
+    toolAssertions?: string[];
   }) => Promise<{ answer: string | null }>;
 };
 
@@ -103,7 +106,7 @@ export function createHandoffRunner(options: {
   /** Who this replica is, for the lease. */
   owner: string;
   /** How the deployment signs what the addressed Bot's run is. */
-  sign: (work: HandoffWork) => string;
+  sign: (work: HandoffWork) => { lineage: string; toolCalls: string[] };
   auditStore: AuditStore;
   /** How long a claim lasts before anything may take it back. */
   leaseMs?: number;
@@ -119,6 +122,10 @@ export function createHandoffRunner(options: {
    * which is a matter of one duration outrunning another and does not care about the scale.
    */
   renewEveryMs?: number;
+  /** Fail-closed checkpoint/promotion gate for compounding multi-agent work. */
+  evolution?: EvolutionCheckpointGate;
+  /** Queue namespace. Production defaults to bot.message; tests can isolate concurrent workers. */
+  kind?: string;
 }) {
   const {
     queue,
@@ -127,10 +134,14 @@ export function createHandoffRunner(options: {
     sign,
     auditStore,
     leaseMs = 60_000,
-    limit = 5,
+    // Claim one long-running turn at a time. A five-item claim processed serially lets its head hold
+    // four queued turns away from otherwise idle replicas for the length of an entire model run.
+    limit = 1,
     maxAttempts = DEFAULT_MAX_ATTEMPTS,
     renewEveryMs = RENEW_EVERY_MS,
+    evolution,
   } = options;
+  const kind = options.kind ?? HANDOFF_KIND;
 
   /**
    * Put the failure in front of the person, by running the Bot that asked in the conversation they
@@ -157,7 +168,7 @@ export function createHandoffRunner(options: {
    */
   const relay = (work: HandoffWork, key: string, answer: string) =>
     queue.offer({
-      kind: HANDOFF_KIND,
+      kind,
       // Outside the run's fan-out prefix and keyed on the hop, for the same two reasons as the
       // notice below: a relay is not a Bot this run asked for, and one run may legally ask the
       // same Bot two different things.
@@ -176,7 +187,7 @@ export function createHandoffRunner(options: {
 
   const tell = (work: HandoffWork, key: string, reason: string) =>
     queue.offer({
-      kind: HANDOFF_KIND,
+      kind,
       /*
        * OUTSIDE THE RUN'S OWN PREFIX, and carrying the failed hop's key.
        *
@@ -204,6 +215,22 @@ export function createHandoffRunner(options: {
       } as unknown as Record<string, unknown>,
     });
 
+  const tellRejected = (work: HandoffWork, key: string, reason: string) =>
+    queue.offer({
+      kind,
+      key: `notice:${key}`,
+      payload: {
+        fromBotId: work.toBotId,
+        toBotId: work.fromBotId,
+        actorId: work.actorId,
+        threadId: work.threadId,
+        runId: work.runId,
+        depth: work.depth,
+        answerIn: work.threadId,
+        task: `You asked ${work.toName ?? work.toBotId} to help with this: ${work.task}\n\nIt produced an answer, but OpenBot's verification gate rejected that answer: ${forThePerson(reason)}. Tell the person plainly that no verified result was returned and offer to retry or handle the task yourself.`,
+      } as unknown as Record<string, unknown>,
+    });
+
   return {
     /**
      * Drop hops that are over, long after they were.
@@ -220,7 +247,7 @@ export function createHandoffRunner(options: {
      */
     async reap(): Promise<number> {
       return queue.purge({
-        kind: HANDOFF_KIND,
+        kind,
         olderThanMs: REAP_OLDER_THAN_MS,
         maxAttempts,
       });
@@ -229,7 +256,7 @@ export function createHandoffRunner(options: {
     /** Deliver whatever this replica can claim. */
     async sweep(): Promise<HandoffRunReport> {
       const claimed = await queue.claim({
-        kind: HANDOFF_KIND,
+        kind,
         owner,
         leaseMs,
         limit,
@@ -263,7 +290,7 @@ export function createHandoffRunner(options: {
       const heartbeat = setInterval(() => {
         for (const key of ours) {
           void queue
-            .renew({ kind: HANDOFF_KIND, key, owner, leaseMs })
+            .renew({ kind, key, owner, leaseMs })
             .then((kept) => {
               // False means it went to somebody else. Dropped rather than renewed again, so the
               // loop below knows not to spend a model call on work it no longer holds.
@@ -281,7 +308,7 @@ export function createHandoffRunner(options: {
              * A hop nothing can be done with. Finished rather than released, because releasing it puts
              * the same unusable row back on the queue for ever.
              */
-            await queue.finish({ kind: HANDOFF_KIND, key: item.key, owner });
+            await queue.finish({ kind, key: item.key, owner });
             report.skipped.push({ key: item.key, reason: "not a hop" });
             continue;
           }
@@ -331,7 +358,7 @@ export function createHandoffRunner(options: {
            * turn, billed, ending in a second answer in somebody's conversation.
            */
           const stillOurs = await queue.renew({
-            kind: HANDOFF_KIND,
+            kind,
             key: item.key,
             owner,
             leaseMs,
@@ -346,15 +373,76 @@ export function createHandoffRunner(options: {
           }
 
           try {
+            const evolutionCheckpoint = evolution
+              ? await evolution.checkpoint(work.threadId)
+              : undefined;
             const shown = summarise(work);
+            const signed = sign(work);
             const { answer } = await delivery.deliver({
               work,
               message: attribute(work),
               ...(shown ? { shown } : {}),
-              assertion: sign(work),
+              assertion: signed.lineage,
+              toolAssertions: signed.toolCalls,
             });
+            if (evolution && evolutionCheckpoint) {
+              const promotion = await evolution.promote({
+                checkpoint: evolutionCheckpoint,
+                candidateId: `${work.runId}:${item.key}:${item.attempts}`,
+                answer: answer ?? "",
+              });
+              await recordAuditEvent(auditStore, {
+                eventType: promotion.promoted
+                  ? "agent.evolution_promoted"
+                  : "agent.evolution_rolled_back",
+                targetType: "agent",
+                targetId: work.toBotId,
+                ...(work.actorId ? { actorUserId: work.actorId } : {}),
+                payload: {
+                  bot: work.fromBotId,
+                  run: work.runId,
+                  candidate: promotion.candidateHash,
+                  previousState: promotion.previousStateHash,
+                  nextState: promotion.nextStateHash,
+                  reasons: promotion.reasons,
+                  evidence: promotion.evidenceHash,
+                },
+              });
+              if (!promotion.promoted) {
+                // Delivery already ran. Finish terminally so it cannot execute twice, but enqueue a
+                // visible rejection notice so the asking conversation never waits silently.
+                if (!work.answerIn) {
+                  await tellRejected(
+                    work,
+                    item.key,
+                    promotion.reasons.join("; "),
+                  ).catch((failure) => {
+                    console.warn(
+                      "Could not queue the verification-rejection notice.",
+                      failure,
+                    );
+                  });
+                }
+                await queue.finish({ kind, key: item.key, owner });
+                ours.delete(item.key);
+                report.skipped.push({
+                  key: item.key,
+                  reason: `candidate rolled back: ${promotion.reasons.join("; ")}`,
+                });
+                continue;
+              }
+            }
+            /*
+             * Make the answer durable before marking its producing hop finished. A crash after
+             * `finish` used to lose the only copy of the answer forever. The relay key is
+             * idempotent, so a crash after this offer may rerun the scratch turn but cannot place a
+             * duplicate answer in the asking conversation.
+             */
+            if (!work.answerIn && answer) {
+              await relay(work, item.key, answer);
+            }
             const kept = await queue.finish({
-              kind: HANDOFF_KIND,
+              kind,
               key: item.key,
               owner,
             });
@@ -389,22 +477,6 @@ export function createHandoffRunner(options: {
               continue;
             }
             report.delivered.push(work.toBotId);
-            /*
-             * The answer goes home through the queue, like the turn that produced it: durable, so a
-             * pod dying between the turn and the relay loses the relay to a retry rather than for
-             * ever. Only for a forward hop with words to carry — a relay of a relay is the loop the
-             * `answerIn` check exists to stop, and a wordless turn has nothing to say.
-             */
-            if (!work.answerIn && answer) {
-              await relay(work, item.key, answer).catch((failure) => {
-                // The turn happened and is on record; a relay that cannot be queued must not undo
-                // that by failing the hop into a retry and a second turn.
-                console.warn(
-                  "Could not queue the relay for a delivered hop.",
-                  failure,
-                );
-              });
-            }
             await recordAuditEvent(auditStore, {
               eventType: "agent.handoff_delivered",
               targetType: "agent",
@@ -425,6 +497,34 @@ export function createHandoffRunner(options: {
           } catch (error) {
             const reason =
               error instanceof Error ? error.message : "could not be delivered";
+            if (error instanceof ThreadBusyError) {
+              // Lock contention means delivery never began. Park it without consuming the finite
+              // failure budget, with jitter so many waiting relays do not stampede the lock.
+              await queue.defer({
+                kind,
+                key: item.key,
+                owner,
+                delayMs: 5_000 + Math.floor(Math.random() * 10_000),
+                reason,
+              });
+              ours.delete(item.key);
+              report.skipped.push({ key: item.key, reason });
+              await recordAuditEvent(auditStore, {
+                eventType: "agent.handoff_retried",
+                targetType: "agent",
+                targetId: work.toBotId,
+                ...(work.actorId ? { actorUserId: work.actorId } : {}),
+                payload: {
+                  bot: work.fromBotId,
+                  from: work.fromBotId,
+                  to: work.toBotId,
+                  run: work.runId,
+                  attempt: item.attempts,
+                  note: "The asking conversation was busy; delivery was parked without spending an attempt.",
+                },
+              });
+              continue;
+            }
             /*
              * The last try, so the person is told rather than left waiting.
              *
@@ -448,7 +548,7 @@ export function createHandoffRunner(options: {
              * refused it once will probably refuse it again in the next second.
              */
             await queue.release({
-              kind: HANDOFF_KIND,
+              kind,
               key: item.key,
               owner,
               delayMs: 60_000,

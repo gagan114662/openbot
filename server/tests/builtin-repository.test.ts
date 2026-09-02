@@ -67,7 +67,10 @@ describe("builtin repository evidence", () => {
       { path: "server/src/analytics/store.ts", startLine: 1, endLine: 3 },
     );
     expect(result).toMatchObject({ isError: false });
-    const body = JSON.parse(result.text) as { startLine: number; endLine: number };
+    const body = JSON.parse(result.text) as {
+      startLine: number;
+      endLine: number;
+    };
     expect(body).toMatchObject({ startLine: 1, endLine: 3 });
   });
 });

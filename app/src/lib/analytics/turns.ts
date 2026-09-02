@@ -1,5 +1,6 @@
 import type { Message } from "@ag-ui/core";
-import { client } from "@/lib/client";
+import { client, tryClient } from "@/lib/client";
+import { terminalAnalyticsQueue } from "./terminal-queue";
 
 export type TurnAnalytics = {
   id: string;
@@ -30,10 +31,13 @@ export type ObservedTool = {
   resultObserved: boolean;
 };
 
-const HUMAN_GATE_TOOLS = new Set(["askChoice", "askApproval", "ask_person"]);
-
 export function humanGateTools(tools: readonly ObservedTool[]): ObservedTool[] {
-  return tools.filter((tool) => HUMAN_GATE_TOOLS.has(tool.name));
+  return tools.filter(
+    (tool) =>
+      tool.name === "askChoice" ||
+      tool.name === "askApproval" ||
+      tool.name === "ask_person",
+  );
 }
 
 /** Extract tool identity and completion only; arguments and results never enter analytics. */
@@ -164,7 +168,11 @@ export function turnFinishPayload(
         eventType: "agent.tool.observed",
         name: tool.name,
         occurredAt: endedAt,
-        properties: { resultObserved: tool.resultObserved },
+        properties: {
+          toolCallId: tool.id,
+          resultObserved: tool.resultObserved,
+          executionSurface: "channel-client",
+        },
       })),
       ...humanGateTools(tools).map((tool) => ({
         idempotencyKey: `${turn.id}:human-gate:${tool.id}`,
@@ -215,6 +223,7 @@ export async function recordHumanGate(
  * make missing replies and regressions measurable without copying a conversation into analytics.
  */
 export async function beginTurnAnalytics(turn: TurnAnalytics): Promise<void> {
+  terminalAnalyticsQueue()?.remember(turn);
   await client("/api/analytics/ingest", {
     method: "POST",
     fallback: "Could not begin the analytics trace.",
@@ -226,25 +235,27 @@ export async function finishTurnAnalytics(
   turn: TurnAnalytics,
   outcome: TurnOutcome,
 ): Promise<void> {
-  await client("/api/analytics/ingest", {
-    method: "POST",
-    fallback: "Could not finish the analytics trace.",
-    body: turnFinishPayload(turn, outcome),
+  const queue = terminalAnalyticsQueue();
+  if (!queue) return;
+  const createdAt = new Date().toISOString();
+  queue.enqueue({
+    id: `${turn.id}:finish`,
+    path: "/api/analytics/ingest",
+    body: turnFinishPayload(turn, outcome, createdAt),
+    createdAt,
   });
-  await client(
-    `/api/analytics/sessions/${encodeURIComponent(turn.id)}/verify-tools`,
-    {
-      method: "POST",
-      fallback: "Could not verify the turn's tool evidence.",
-    },
-  );
-  await client(
-    `/api/analytics/sessions/${encodeURIComponent(turn.id)}/verify-escalation`,
-    {
-      method: "POST",
-      fallback: "Could not verify the turn's escalation evidence.",
-    },
-  );
+  queue.enqueue({
+    id: `${turn.id}:verify-tools`,
+    path: `/api/analytics/sessions/${encodeURIComponent(turn.id)}/verify-tools`,
+    createdAt,
+  });
+  queue.enqueue({
+    id: `${turn.id}:verify-escalation`,
+    path: `/api/analytics/sessions/${encodeURIComponent(turn.id)}/verify-escalation`,
+    createdAt,
+  });
+  queue.forget(turn.id);
+  await queue.flush();
 }
 
 /** Attach a human correctness verdict to the exact turn that produced the visible answer. */
@@ -272,11 +283,12 @@ export async function fetchTurnEvaluation(sessionId: string): Promise<{
   status: string;
   taskCompleted: boolean | null;
 } | null> {
-  const response = await client(
+  const response = await tryClient(
     `/api/analytics/sessions/${encodeURIComponent(sessionId)}/evaluation`,
     { fallback: "Could not restore the answer evaluation." },
   );
   if (response.status === 404) return null;
+  if (!response.ok) throw new Error("Could not restore the answer evaluation.");
   const body = (await response.json()) as {
     evaluation: { status: string; taskCompleted: boolean | null };
   };

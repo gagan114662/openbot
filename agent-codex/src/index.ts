@@ -9,10 +9,25 @@ import {
 } from "../../shared/content-guard";
 import { AdapterOperations, type RunPermit } from "./operations";
 import {
+  assessTechnicalDebt,
+  changedPaths,
+  debtBudgetFromEnvironment,
+} from "./debt";
+import {
   type CodexRunAnalytics,
   modelFromThreadStart,
   usageFromNotification,
 } from "./run-analytics";
+import {
+  asError,
+  childExitError,
+  parseAppServerLine,
+  positiveInteger,
+  RequestWaiters,
+  RunPermitLease,
+  spawnWithPermit,
+} from "./runtime-guards";
+import { toolCallResultEvent } from "./tool-events";
 import { codexToolNames } from "./tool-names";
 
 const PORT = Number.parseInt(process.env.CODEX_AGENT_PORT ?? "4202", 10);
@@ -23,22 +38,28 @@ const MANAGED_AGENT_TOKEN = process.env.MANAGED_AGENT_TOKEN?.trim();
 const TOOL_URL =
   process.env.OPENBOT_TOOL_URL ?? "http://localhost:3001/api/agent-tools/call";
 const TOOL_TOKEN = process.env.AGENT_TOOL_TOKEN ?? "";
-const MAX_TOOL_CALLS = Number.parseInt(
-  process.env.CODEX_MAX_TOOL_CALLS ?? "20",
-  10,
+const MAX_TOOL_CALLS = positiveInteger(process.env.CODEX_MAX_TOOL_CALLS, 20);
+const TURN_TIMEOUT_MS = positiveInteger(
+  process.env.CODEX_TURN_TIMEOUT_MS,
+  120_000,
 );
-const TURN_TIMEOUT_MS = Number.parseInt(
-  process.env.CODEX_TURN_TIMEOUT_MS ?? "120000",
-  10,
+const REQUEST_TIMEOUT_MS = positiveInteger(
+  process.env.CODEX_REQUEST_TIMEOUT_MS,
+  30_000,
 );
-const DAILY_RUN_BUDGET = Number.parseInt(
-  process.env.CODEX_DAILY_RUN_BUDGET ?? "500",
-  10,
+const CALLBACK_TIMEOUT_MS = positiveInteger(
+  process.env.CODEX_CALLBACK_TIMEOUT_MS,
+  30_000,
 );
-const MAX_CONCURRENT_RUNS = Number.parseInt(
-  process.env.CODEX_MAX_CONCURRENT_RUNS ?? "4",
-  10,
+const DAILY_RUN_BUDGET = positiveInteger(
+  process.env.CODEX_DAILY_RUN_BUDGET,
+  500,
 );
+const MAX_CONCURRENT_RUNS = positiveInteger(
+  process.env.CODEX_MAX_CONCURRENT_RUNS,
+  4,
+);
+const DEBT_BUDGET = debtBudgetFromEnvironment(process.env);
 const operations = new AdapterOperations(
   DAILY_RUN_BUDGET,
   MAX_CONCURRENT_RUNS,
@@ -78,6 +99,15 @@ function appServerCommand(): string[] {
   ];
 }
 
+function spawnAppServer() {
+  return spawn(appServerCommand(), {
+    cwd: CODEX_WORKSPACE,
+    stdin: "pipe",
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+}
+
 if (!MANAGED_AGENT_TOKEN) {
   console.error("MANAGED_AGENT_TOKEN is required.");
   process.exit(1);
@@ -85,9 +115,17 @@ if (!MANAGED_AGENT_TOKEN) {
 
 type Json = Record<string, unknown>;
 
-function runAssertionOf(input: RunAgentInput): string {
-  const props = input.forwardedProps as { openbotRun?: unknown } | undefined;
-  return typeof props?.openbotRun === "string" ? props.openbotRun : "";
+function toolRunAssertionsOf(input: RunAgentInput): () => string {
+  const props = input.forwardedProps as
+    | { openbotToolRuns?: unknown }
+    | undefined;
+  const assertions = Array.isArray(props?.openbotToolRuns)
+    ? props.openbotToolRuns.filter(
+        (value): value is string => typeof value === "string",
+      )
+    : [];
+  let index = 0;
+  return () => assertions[index++] ?? "";
 }
 
 function deploymentToolsOf(input: RunAgentInput): Set<string> {
@@ -118,6 +156,7 @@ async function callTool(
         "x-openbot-agent-token": TOOL_TOKEN,
       },
       body: JSON.stringify({ name, args, run }),
+      signal: AbortSignal.timeout(CALLBACK_TIMEOUT_MS),
     });
     const body = (await response.json()) as { text?: string };
     return body.text ?? "The tool returned nothing.";
@@ -162,28 +201,32 @@ async function runAgent(
       const utf8 = new TextEncoder();
       const send = (event: BaseEvent) =>
         controller.enqueue(utf8.encode(encoder.encodeSSE(event)));
-      const child = spawn(appServerCommand(), {
-        cwd: CODEX_WORKSPACE,
-        stdin: "pipe",
-        stdout: "pipe",
-        stderr: "pipe",
-      });
+      const lease = new RunPermitLease(operations, permit);
+      const debtBefore = await changedPaths(CODEX_WORKSPACE);
+      let child: ReturnType<typeof spawnAppServer>;
+      try {
+        child = spawnWithPermit(lease, spawnAppServer);
+      } catch (error) {
+        send({
+          type: "RUN_ERROR",
+          message: asError(error, "Codex app-server could not start").message,
+        } as BaseEvent);
+        lease.finish(false);
+        controller.close();
+        return;
+      }
       const write = async (value: Json) => {
         child.stdin.write(`${JSON.stringify(value)}\n`);
         await child.stdin.flush();
       };
       let nextId = 1;
-      const pending = new Map<
-        number,
-        { resolve: (value: Json) => void; reject: (error: Error) => void }
-      >();
+      const pending = new RequestWaiters<Json>(REQUEST_TIMEOUT_MS);
       const request = (method: string, params: Json) =>
-        new Promise<Json>((resolve, reject) => {
+        (() => {
           const id = nextId++;
-          pending.set(id, { resolve, reject });
-          void write({ id, method, params });
-        });
-      const run = runAssertionOf(input);
+          return pending.request(id, () => write({ id, method, params }));
+        })();
+      const nextToolRun = toolRunAssertionsOf(input);
       const deploymentTools = deploymentToolsOf(input);
       const toolNames = codexToolNames(
         (input.tools ?? []).map((tool) => tool.name),
@@ -204,123 +247,164 @@ async function runAgent(
         runId: input.runId,
       } as BaseEvent);
       const reader = child.stdout.getReader();
-      const pump = (async () => {
-        let buffer = "";
+      let stderrTail = "";
+      const stderrPump = (async () => {
+        const stderrReader = child.stderr.getReader();
         while (true) {
-          const { value, done } = await reader.read();
+          const { value, done } = await stderrReader.read();
           if (done) break;
-          buffer += new TextDecoder().decode(value, { stream: true });
-          let newline = buffer.indexOf("\n");
-          while (newline >= 0) {
-            const line = buffer.slice(0, newline).trim();
-            buffer = buffer.slice(newline + 1);
-            newline = buffer.indexOf("\n");
-            if (!line) continue;
-            const event = JSON.parse(line) as Json;
-            if (typeof event.id === "number" && (event.result || event.error)) {
-              const waiter = pending.get(event.id);
-              if (event.error) {
-                const detail = event.error as Json;
-                waiter?.reject(
-                  new Error(String(detail.message ?? "Codex request failed")),
-                );
-              } else {
-                waiter?.resolve(event);
+          stderrTail = (
+            stderrTail + new TextDecoder().decode(value, { stream: true })
+          ).slice(-4_096);
+        }
+      })();
+      const childDeath = child.exited.then((code) => {
+        if (completed) return;
+        const failure = childExitError(code);
+        if (stderrTail.trim()) {
+          console.warn(
+            "Codex app-server exited; stderr was drained and withheld from the user response.",
+            {
+              code,
+              stderrCharacters: stderrTail.length,
+            },
+          );
+        }
+        pending.rejectAll(failure);
+        runError = failure.message;
+        completed = true;
+      });
+      const pump = (async () => {
+        try {
+          let buffer = "";
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buffer += new TextDecoder().decode(value, { stream: true });
+            let newline = buffer.indexOf("\n");
+            while (newline >= 0) {
+              const line = buffer.slice(0, newline).trim();
+              buffer = buffer.slice(newline + 1);
+              newline = buffer.indexOf("\n");
+              if (!line) continue;
+              const event = parseAppServerLine(line) as Json;
+              if (
+                typeof event.id === "number" &&
+                (event.result || event.error)
+              ) {
+                if (event.error) {
+                  const detail = event.error as Json;
+                  pending.reject(
+                    event.id,
+                    new Error(String(detail.message ?? "Codex request failed")),
+                  );
+                } else {
+                  pending.resolve(event.id, event);
+                }
+                continue;
               }
-              pending.delete(event.id);
-              continue;
-            }
-            const usage = usageFromNotification(event);
-            if (usage) runAnalytics = { ...runAnalytics, ...usage };
-            if (event.method === "item/agentMessage/delta") {
-              const delta = (event.params as Json).delta;
-              if (typeof delta === "string") {
-                if (!textStarted) {
-                  textStarted = true;
+              const usage = usageFromNotification(event);
+              if (usage) runAnalytics = { ...runAnalytics, ...usage };
+              if (event.method === "item/agentMessage/delta") {
+                const delta = (event.params as Json).delta;
+                if (typeof delta === "string") {
+                  if (!textStarted) {
+                    textStarted = true;
+                    send({
+                      type: "TEXT_MESSAGE_START",
+                      messageId,
+                      role: "assistant",
+                    } as BaseEvent);
+                  }
                   send({
-                    type: "TEXT_MESSAGE_START",
+                    type: "TEXT_MESSAGE_CONTENT",
                     messageId,
-                    role: "assistant",
+                    delta,
                   } as BaseEvent);
                 }
+              } else if (
+                event.method === "item/tool/call" &&
+                typeof event.id === "number"
+              ) {
+                const params = event.params as Json;
+                toolCalls += 1;
+                const codexName = String(params.tool ?? "");
+                const name =
+                  toolNames.originalByAlias.get(codexName) ?? codexName;
+                const args = (params.arguments ?? {}) as Json;
+                const findings = inspectToolArguments(args);
+                const protectedContent = contentRefusal(findings);
+                const explicitlyAllowedSecret =
+                  ALLOW_SECRET_TOOL_ARGS &&
+                  findings.length > 0 &&
+                  findings.every((finding) => finding.category === "secret");
+                const blockingContent = explicitlyAllowedSecret
+                  ? null
+                  : protectedContent;
+                const toolCallId = String(params.callId ?? crypto.randomUUID());
                 send({
-                  type: "TEXT_MESSAGE_CONTENT",
-                  messageId,
-                  delta,
+                  type: "TOOL_CALL_START",
+                  toolCallId,
+                  toolCallName: name,
+                  parentMessageId: messageId,
                 } as BaseEvent);
-              }
-            } else if (
-              event.method === "item/tool/call" &&
-              typeof event.id === "number"
-            ) {
-              const params = event.params as Json;
-              toolCalls += 1;
-              const codexName = String(params.tool ?? "");
-              const name =
-                toolNames.originalByAlias.get(codexName) ?? codexName;
-              const args = (params.arguments ?? {}) as Json;
-              const findings = inspectToolArguments(args);
-              const protectedContent = contentRefusal(findings);
-              const explicitlyAllowedSecret =
-                ALLOW_SECRET_TOOL_ARGS &&
-                findings.length > 0 &&
-                findings.every((finding) => finding.category === "secret");
-              const blockingContent = explicitlyAllowedSecret
-                ? null
-                : protectedContent;
-              const toolCallId = String(params.callId ?? crypto.randomUUID());
-              send({
-                type: "TOOL_CALL_START",
-                toolCallId,
-                toolCallName: name,
-                parentMessageId: messageId,
-              } as BaseEvent);
-              send({
-                type: "TOOL_CALL_ARGS",
-                toolCallId,
-                delta: JSON.stringify(
-                  protectedContent
-                    ? {
-                        redacted: true,
-                        categories: [
-                          ...new Set(
-                            findings.map((finding) => finding.category),
-                          ),
-                        ],
-                      }
-                    : args,
-                ),
-              } as BaseEvent);
-              send({ type: "TOOL_CALL_END", toolCallId } as BaseEvent);
-              const overLimit = toolCalls > MAX_TOOL_CALLS;
-              operations.recordToolCall(Boolean(overLimit || blockingContent));
-              const output = overLimit
-                ? `Refused. This run exceeded its limit of ${MAX_TOOL_CALLS} tool calls.`
-                : deploymentTools.has(name)
-                  ? (blockingContent ?? (await callTool(run, name, args)))
-                  : "This tool is owned by the OpenBot surface and has been handed back to it.";
-              await write({
-                id: event.id,
-                result: {
-                  contentItems: [{ type: "inputText", text: output }],
-                  success: !overLimit && !blockingContent,
-                },
-              });
-              if (overLimit) {
-                runError = output;
+                send({
+                  type: "TOOL_CALL_ARGS",
+                  toolCallId,
+                  delta: JSON.stringify(
+                    protectedContent
+                      ? {
+                          redacted: true,
+                          categories: [
+                            ...new Set(
+                              findings.map((finding) => finding.category),
+                            ),
+                          ],
+                        }
+                      : args,
+                  ),
+                } as BaseEvent);
+                send({ type: "TOOL_CALL_END", toolCallId } as BaseEvent);
+                const overLimit = toolCalls > MAX_TOOL_CALLS;
+                operations.recordToolCall(
+                  Boolean(overLimit || blockingContent),
+                );
+                const output = overLimit
+                  ? `Refused. This run exceeded its limit of ${MAX_TOOL_CALLS} tool calls.`
+                  : deploymentTools.has(name)
+                    ? (blockingContent ??
+                      (await callTool(nextToolRun(), name, args)))
+                    : "This tool is owned by the OpenBot surface and has been handed back to it.";
+                send(toolCallResultEvent(toolCallId, output));
+                await write({
+                  id: event.id,
+                  result: {
+                    contentItems: [{ type: "inputText", text: output }],
+                    success: !overLimit && !blockingContent,
+                  },
+                });
+                if (overLimit) {
+                  runError = output;
+                  completed = true;
+                }
+              } else if (event.method === "turn/completed") {
+                completed = true;
+              } else if (event.method === "error") {
+                const params = event.params as Json;
+                send({
+                  type: "RUN_ERROR",
+                  message: String(params.message ?? "Codex app-server error"),
+                } as BaseEvent);
                 completed = true;
               }
-            } else if (event.method === "turn/completed") {
-              completed = true;
-            } else if (event.method === "error") {
-              const params = event.params as Json;
-              send({
-                type: "RUN_ERROR",
-                message: String(params.message ?? "Codex app-server error"),
-              } as BaseEvent);
-              completed = true;
             }
           }
+        } catch (error) {
+          const failure = asError(error, "Codex app-server stream failed");
+          pending.rejectAll(failure);
+          runError = failure.message;
+          completed = true;
+          child.kill();
         }
       })();
 
@@ -338,7 +422,7 @@ async function runAgent(
         }));
         const started = await request("thread/start", {
           ...(MODEL ? { model: MODEL } : {}),
-          cwd: process.cwd(),
+          cwd: CODEX_WORKSPACE,
           approvalPolicy: "never",
           sandbox: "read-only",
           ephemeral: true,
@@ -362,16 +446,28 @@ async function runAgent(
         if (!completed) {
           runError = `Codex turn exceeded its ${TURN_TIMEOUT_MS}ms timeout.`;
         }
+        const debt = await assessTechnicalDebt({
+          cwd: CODEX_WORKSPACE,
+          before: debtBefore,
+          budget: DEBT_BUDGET,
+        });
+        if (debt.violations.length > 0) {
+          runError = `Technical-debt review required: ${debt.violations.join("; ")}`;
+        }
         if (textStarted)
           send({ type: "TEXT_MESSAGE_END", messageId } as BaseEvent);
         if (runError) {
-          send({ type: "RUN_ERROR", message: runError } as BaseEvent);
+          send({
+            type: "RUN_ERROR",
+            message: runError,
+            openbotDebt: debt,
+          } as BaseEvent);
         } else {
           send({
             type: "RUN_FINISHED",
             threadId: input.threadId,
             runId: input.runId,
-            result: { openbotAnalytics: runAnalytics },
+            result: { openbotAnalytics: runAnalytics, openbotDebt: debt },
           } as BaseEvent);
           succeeded = true;
         }
@@ -382,9 +478,12 @@ async function runAgent(
             error instanceof Error ? error.message : "Codex adapter failed",
         } as BaseEvent);
       } finally {
-        operations.finish(permit, succeeded);
+        pending.rejectAll(
+          new Error("Codex run ended before the request completed."),
+        );
+        lease.finish(succeeded);
         child.kill();
-        await pump.catch(() => undefined);
+        await Promise.allSettled([pump, stderrPump, childDeath]);
         controller.close();
       }
     },

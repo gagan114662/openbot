@@ -137,7 +137,9 @@ function decodeChannelCursor(
  * in use-channel-events.ts and `pinnedFirst` in app-sidebar.tsx.
  */
 const PINNED_RANK = sql`case when ${channelMemberships.pinnedAt} is not null then 1 else 0 end`;
-const RECENCY = sql`coalesce(${channels.lastMessageAt}, ${channels.createdAt})`;
+// A browser and PostgreSQL do not share a clock. An activity report a few milliseconds behind the
+// database must not make a newly-created channel older than it was before the message arrived.
+const RECENCY = sql`greatest(${channels.createdAt}, coalesce(${channels.lastMessageAt}, ${channels.createdAt}))`;
 const ROSTER_ORDER = [
   sql`${PINNED_RANK} desc`,
   sql`${RECENCY} desc`,

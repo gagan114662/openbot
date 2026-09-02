@@ -1,0 +1,20 @@
+[Unit]
+Description=OpenBot database backup and off-host upload
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=openbot
+Group=openbot
+WorkingDirectory=/opt/openbot
+EnvironmentFile=/etc/openbot/backup.env
+ExecStart=/usr/local/bin/bun server/scripts/database-backup.ts create
+
+# Dumps and manifests contain production metadata. The process needs no writable system paths.
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/backups/openbot

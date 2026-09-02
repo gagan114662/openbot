@@ -106,28 +106,38 @@ them against a deployment you are using puts test Bots in its audit trail and it
 reports. Point `DATABASE_URL` at a database of their own to keep the two apart.
 
 CI uses `bun run test:ci` to verify the expected test count in addition to normal tests.
+The command takes a PostgreSQL advisory lock for the entire run. A second run against the same
+database fails immediately with one “another suite is already using this database” diagnostic,
+instead of exhausting the server and producing misleading failures across unrelated test files.
+Local Compose gives PostgreSQL 200 connections by default; override this with
+`POSTGRES_MAX_CONNECTIONS` for a constrained development host. The lock remains necessary because
+raising a finite connection limit does not make concurrent suites safe or deterministic.
 
 `bun run test:smoke` is separate and needs a deployment that is up:
 
 ```sh
 bash scripts/start.sh
+export OPENBOT_SMOKE_COOKIE='better-auth.session_token=<signed-in-session-token>'
 bun run test:smoke
 ```
 
 It drives one journey over HTTP against the running stack, so it covers the joins the rest of the
 suite cannot reach: server to supervisor to computer, the gateway deciding before the browser acts,
-and the audit row landing. Point it elsewhere with `OPENBOT_API_URL`. Without a deployment it is
-skipped by `bun run test` and says what to start when asked for by name.
+and the audit row landing. Point it elsewhere with `OPENBOT_API_URL`. Authenticated deployments also
+require `OPENBOT_SMOKE_COOKIE`, copied as the complete cookie name/value from a signed-in development
+session; the harness refuses to run a partial 401-only journey when it is absent. Without a
+deployment it is skipped by `bun run test` and says what to start when asked for by name.
 
-`bun run test:live-screen` is separate for a related reason and needs no deployment, only this
-directory's own dependencies:
+`bun run test:live-screen` is separate for a related reason and needs no deployment. The root
+development dependencies include the Playwright version pinned by `agent-computer`:
 
 ```sh
-cd agent-computer && bun install
-cd .. && bun run test:live-screen
+bunx playwright install chromium
+bun run test:live-screen
 ```
 
-It drives the live screen against the real computer process with a real Chromium: a socket closing
+It drives the live screen against the real computer process with a real Chromium, including popup
+following and return-to-opener behavior: a socket closing
 while the browser is still starting, a second connection taking the screen from the first, the wheel
 refusing input from the socket that owns it, and a browser closing by request or by the idle sweep.
 Those need `agent-computer/src/index.ts`, which imports Playwright at module scope, and `playwright`

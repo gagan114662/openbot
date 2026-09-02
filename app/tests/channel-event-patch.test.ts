@@ -3,6 +3,8 @@ import type { ChannelPage, ChannelSummary } from "../src/lib/channels/queries";
 import {
   applyChannelEvent,
   type ChannelActivityEvent,
+  publishChannelEvent,
+  subscribeChannelEvents,
 } from "../src/lib/channels/use-channel-events";
 
 /** A minimal but fully-typed channel summary, so tests build real objects rather than casts. */
@@ -45,6 +47,28 @@ function event(
   };
 }
 
+describe("the channel event subscription", () => {
+  test("delivers message activity without requiring a roster cache", () => {
+    const received: string[] = [];
+    const unsubscribe = subscribeChannelEvents((activity) => {
+      received.push(
+        activity === "connected"
+          ? activity
+          : "resync" in activity
+            ? "resync"
+            : activity.channelId,
+      );
+    });
+
+    publishChannelEvent(event({ channelId: "deep-link" }));
+    publishChannelEvent("connected");
+    unsubscribe();
+    publishChannelEvent(event({ channelId: "after-unsubscribe" }));
+
+    expect(received).toEqual(["deep-link", "connected"]);
+  });
+});
+
 describe("an ordinary activity event", () => {
   test("patches the row inside the page that holds it and re-sorts that page", () => {
     const data = cache([
@@ -71,6 +95,32 @@ describe("an ordinary activity event", () => {
     expect(
       applyChannelEvent(cache([channel("a")]), event({ channelId: "z" })),
     ).toBe("unknown");
+  });
+
+  test("a skewed message clock cannot make a newly-created channel older", () => {
+    const data = cache([
+      channel("new", {
+        createdAt: "2024-05-01T00:00:00.000Z",
+        lastMessageAt: "2024-01-01T00:00:00.000Z",
+      }),
+      channel("old", { createdAt: "2024-04-01T00:00:00.000Z" }),
+    ]);
+
+    const patched = applyChannelEvent(
+      data,
+      event({
+        channelId: "new",
+        lastMessage: "Arrived from a slower clock.",
+        lastMessageAt: "2024-01-02T00:00:00.000Z",
+      }),
+    );
+
+    expect(patched).not.toBe("unknown");
+    if (patched === "unknown") return;
+    expect(patched.pages[0]?.channels.map((row) => row.id)).toEqual([
+      "new",
+      "old",
+    ]);
   });
 });
 

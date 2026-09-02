@@ -296,6 +296,34 @@ export const pluginGrants = pgTable(
   ],
 );
 
+/** A Bot's default-deny request for a capability it was not granted mid-run. */
+export const pluginToolRequests = pgTable(
+  "plugin_tool_requests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: text("agent_id")
+      .notNull()
+      .references(() => agents.id, { onDelete: "cascade" }),
+    requesterId: text("requester_id")
+      .notNull()
+      .references(() => users.id, { onDelete: "cascade" }),
+    catalogueKey: text("catalogue_key").notNull(),
+    reason: text("reason").notNull(),
+    status: text("status").notNull().default("pending"),
+    reviewedBy: text("reviewed_by"),
+    reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    index("plugin_tool_requests_status_created_idx").on(
+      table.status,
+      table.createdAt,
+    ),
+    index("plugin_tool_requests_agent_idx").on(table.agentId),
+  ],
+);
+
 /**
  * A component authored in the browser rather than compiled into the build.
  *

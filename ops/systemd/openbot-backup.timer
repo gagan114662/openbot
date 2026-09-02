@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the OpenBot backup every six hours
+
+[Timer]
+OnCalendar=*-*-* 00/6:15:00
+RandomizedDelaySec=15m
+Persistent=true
+Unit=openbot-backup.service
+
+[Install]
+WantedBy=timers.target

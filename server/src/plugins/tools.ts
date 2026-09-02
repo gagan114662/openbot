@@ -1,4 +1,8 @@
 import { z } from "zod";
+import {
+  contentRefusal,
+  inspectToolArguments,
+} from "../../../shared/content-guard";
 import type { SelectableSkill } from "./selection";
 import { PluginRefusedError, type PluginStore } from "./store";
 
@@ -168,6 +172,18 @@ export async function grantedTools(options: {
     description: tool.description,
     parameters: parametersFor(tool.inputSchema),
     execute: async (args: unknown) => {
+      const findings = inspectToolArguments(args);
+      const refusal = contentRefusal(findings);
+      if (refusal) {
+        await store.recordContentGuard({
+          ref: tool.ref,
+          botId,
+          actorId,
+          categories: findings.map((finding) => finding.category),
+          paths: findings.map((finding) => finding.path),
+        });
+        return refusal;
+      }
       try {
         const result = await store.callTool({
           ref: tool.ref,

@@ -1,5 +1,8 @@
 import type { MiddlewareHandler } from "hono";
 import { Hono } from "hono";
+import type { BotAccessCheck } from "../agents/profile-policy";
+import type { AuditStore } from "../audit";
+import { recordAuditEvent } from "../audit";
 import type { AppVariables } from "../auth/guards";
 import { requireAdmin } from "../auth/guards";
 import type { AnalyticsIngest, AnalyticsStore } from "./store";
@@ -29,6 +32,10 @@ function queryOf(url: URL) {
     return Number.isNaN(parsed.valueOf()) ? undefined : parsed;
   };
   const status = boundedText(url.searchParams.get("status"), 50);
+  const integer = (key: string, fallback: number) => {
+    const parsed = Number.parseInt(url.searchParams.get(key) ?? "", 10);
+    return Number.isSafeInteger(parsed) ? parsed : fallback;
+  };
   return {
     search: boundedText(url.searchParams.get("search"), 500),
     agentId: boundedText(url.searchParams.get("agentId"), 200),
@@ -39,13 +46,16 @@ function queryOf(url: URL) {
     toolFailure: boolean("toolFailure"),
     from: date("from"),
     to: date("to"),
-    limit: Number.parseInt(url.searchParams.get("limit") ?? "50", 10),
+    limit: integer("limit", 50),
+    offset: integer("offset", 0),
   };
 }
 
 export function createAnalyticsRoutes(
   store: AnalyticsStore,
   requireUser: MiddlewareHandler<{ Variables: AppVariables }>,
+  canUseBot: BotAccessCheck,
+  auditStore?: AuditStore,
 ) {
   const routes = new Hono<{ Variables: AppVariables }>();
 
@@ -98,6 +108,25 @@ export function createAnalyticsRoutes(
       return context.json(
         { error: "The privacy mode, session status, or span kind is invalid." },
         400,
+      );
+    }
+    if (
+      body.session.agentId &&
+      !(await canUseBot(context.var.actor, body.session.agentId))
+    ) {
+      if (auditStore) {
+        await recordAuditEvent(auditStore, {
+          eventType: "analytics.ingest_refused",
+          targetType: "agent",
+          targetId: body.session.agentId,
+          actorUserId: context.var.actor.id,
+          payload: { reason: "actor cannot use the attributed Bot" },
+        });
+      }
+      // Same answer as a missing Bot: analytics ingestion must not become an agent-directory oracle.
+      return context.json(
+        { error: "That analytics agent is not available." },
+        404,
       );
     }
     try {
@@ -230,6 +259,168 @@ export function createAnalyticsRoutes(
   routes.get("/admin/overview", async (context) =>
     context.json(await store.overview()),
   );
+  routes.get("/admin/governance", async (context) =>
+    context.json(await store.governance()),
+  );
+  routes.post("/admin/evaluators/bootstrap", async (context) =>
+    context.json(
+      await store.ensureBuiltInEvaluators(context.var.actor.id),
+      201,
+    ),
+  );
+  routes.post("/admin/topics/cluster", async (context) =>
+    context.json(await store.clusterTopics(), 202),
+  );
+  routes.post("/admin/evaluators", async (context) => {
+    const body = (await context.req.json().catch(() => null)) as {
+      name?: unknown;
+      description?: unknown;
+      kind?: unknown;
+      scoreType?: unknown;
+      definition?: unknown;
+    } | null;
+    const name = boundedText(body?.name, 200);
+    if (
+      !name ||
+      (body?.kind !== "code" && body?.kind !== "llm_judge") ||
+      (body?.scoreType !== "binary" &&
+        body?.scoreType !== "categorical" &&
+        body?.scoreType !== "numeric") ||
+      !body.definition ||
+      typeof body.definition !== "object" ||
+      Array.isArray(body.definition)
+    ) {
+      return context.json(
+        { error: "A valid evaluator definition is required." },
+        400,
+      );
+    }
+    return context.json(
+      {
+        evaluator: await store.createEvaluator(context.var.actor.id, {
+          name,
+          description: boundedText(body.description, 2_000),
+          kind: body.kind,
+          scoreType: body.scoreType,
+          definition: body.definition as Record<string, unknown>,
+        }),
+      },
+      201,
+    );
+  });
+  routes.post("/admin/evaluators/:evaluatorId/run", async (context) => {
+    const body = (await context.req.json().catch(() => ({}))) as {
+      datasetId?: unknown;
+      calibration?: unknown;
+    };
+    return context.json(
+      await store.runEvaluator(
+        context.var.actor.id,
+        context.req.param("evaluatorId"),
+        boundedText(body.datasetId, 100),
+        body.calibration === true,
+      ),
+      202,
+    );
+  });
+  routes.post("/admin/datasets", async (context) => {
+    const body = (await context.req.json().catch(() => null)) as {
+      name?: unknown;
+      description?: unknown;
+      golden?: unknown;
+      sessionIds?: unknown;
+    } | null;
+    const name = boundedText(body?.name, 200);
+    if (!name) return context.json({ error: "Dataset name is required." }, 400);
+    const sessionIds = Array.isArray(body?.sessionIds)
+      ? body.sessionIds
+          .map((value) => boundedText(value, 500))
+          .filter((value): value is string => Boolean(value))
+          .slice(0, 500)
+      : [];
+    return context.json(
+      {
+        dataset: await store.createDataset(context.var.actor.id, {
+          name,
+          description: boundedText(body?.description, 2_000),
+          golden: body?.golden === true,
+          sessionIds,
+        }),
+      },
+      201,
+    );
+  });
+  routes.post("/admin/sessions/:sessionId/review", async (context) => {
+    const body = (await context.req.json().catch(() => null)) as {
+      status?: unknown;
+      label?: unknown;
+      errorCategory?: unknown;
+      note?: unknown;
+    } | null;
+    const status = boundedText(body?.status, 50) ?? "completed";
+    return context.json({
+      review: await store.reviewSession(
+        context.var.actor.id,
+        context.req.param("sessionId"),
+        {
+          status,
+          label: boundedText(body?.label, 200),
+          errorCategory: boundedText(body?.errorCategory, 200),
+          note: boundedText(body?.note, 10_000),
+        },
+      ),
+    });
+  });
+  routes.post("/admin/sessions/:sessionId/outcomes", async (context) => {
+    const body = (await context.req.json().catch(() => null)) as {
+      name?: unknown;
+      success?: unknown;
+      revenueMicros?: unknown;
+    } | null;
+    const name = boundedText(body?.name, 500);
+    if (
+      !name ||
+      typeof body?.revenueMicros !== "number" ||
+      !Number.isSafeInteger(body.revenueMicros) ||
+      body.revenueMicros < 0
+    ) {
+      return context.json(
+        { error: "Outcome name and non-negative revenue micros are required." },
+        400,
+      );
+    }
+    return context.json(
+      {
+        outcome: await store.recordBusinessOutcome(
+          context.var.actor.id,
+          context.req.param("sessionId"),
+          {
+            name,
+            success: body.success !== false,
+            revenueMicros: body.revenueMicros,
+          },
+        ),
+      },
+      201,
+    );
+  });
+  routes.post("/admin/sessions/:sessionId/topics", async (context) => {
+    const body = (await context.req.json().catch(() => null)) as {
+      name?: unknown;
+      description?: unknown;
+      confidence?: unknown;
+    } | null;
+    const name = boundedText(body?.name, 200);
+    if (!name) return context.json({ error: "Topic name is required." }, 400);
+    return context.json({
+      topic: await store.classifyTopic(context.req.param("sessionId"), {
+        name,
+        description: boundedText(body?.description, 2_000),
+        confidence:
+          typeof body?.confidence === "number" ? body.confidence : undefined,
+      }),
+    });
+  });
   routes.get("/admin/sessions", async (context) =>
     context.json(await store.list(queryOf(new URL(context.req.url)))),
   );
@@ -257,6 +448,19 @@ export function createAnalyticsRoutes(
           "content-type": "application/x-ndjson; charset=utf-8",
           "content-disposition":
             'attachment; filename="openbot-agent-analytics.jsonl"',
+        },
+      },
+    );
+  });
+  routes.get("/admin/episodes/export", async () => {
+    const records = await store.recordedEpisodes(500);
+    return new Response(
+      records.map((record) => JSON.stringify(record)).join("\n"),
+      {
+        headers: {
+          "content-type": "application/x-ndjson; charset=utf-8",
+          "content-disposition":
+            'attachment; filename="openbot-verifiable-episodes.jsonl"',
         },
       },
     );

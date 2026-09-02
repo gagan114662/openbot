@@ -314,6 +314,20 @@ export const CATALOGUE: readonly CatalogueEntry[] = Object.freeze([
     ]),
     docsUrl: "https://github.com/CopilotKit/OpenBot/blob/main/docs/routines.md",
   },
+  {
+    key: "data-utilities",
+    title: "Data Utilities",
+    vendor: "OpenBot",
+    summary:
+      "Deterministic arithmetic, time-zone lookup, and bounded CSV/JSON conversion without an external API.",
+    host: "builtin://data-utilities",
+    path: "/",
+    transport: "builtin-data",
+    auth: Object.freeze({ kind: "builtin" }),
+    writeTools: Object.freeze([]),
+    docsUrl:
+      "https://github.com/CopilotKit/OpenBot/blob/main/docs/tool-coverage.md",
+  },
 ]);
 
 const BY_KEY = new Map(CATALOGUE.map((entry) => [entry.key, entry]));

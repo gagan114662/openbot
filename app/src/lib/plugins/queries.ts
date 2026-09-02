@@ -97,6 +97,14 @@ export type PluginsPage = {
   catalogue: CatalogueItem[];
   servers: PluginServer[];
   skills: PluginSkill[];
+  toolRequests: Array<{
+    id: string;
+    agentId: string;
+    catalogueKey: string;
+    reason: string;
+    status: string;
+    createdAt: string;
+  }>;
   /**
    * Whether a Bot holding no credential of its own can still call a tool back.
    *

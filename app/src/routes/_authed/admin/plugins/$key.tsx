@@ -625,6 +625,15 @@ function RouteComponent() {
           description="A Bot is told about a tool only when it holds it. Every call is decided again when it happens, so removing a grant takes effect on the next one."
           title="Tools"
         >
+          {server.lastError && server.tools.length > 0 ? (
+            <p
+              className="mb-3 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-destructive text-sm"
+              role="alert"
+            >
+              Refresh refused; the previously reviewed tools remain active.{" "}
+              {server.lastError}
+            </p>
+          ) : null}
           {server.tools.length === 0 ? (
             <PageEmpty>
               {server.lastError ??

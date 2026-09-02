@@ -1,7 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { AbstractAgent, BaseEvent, Message } from "@ag-ui/client";
 import { Observable } from "rxjs";
-import { createHandoffDelivery } from "../src/agents/handoff-delivery";
+import {
+  createHandoffDelivery,
+  ThreadBusyError,
+} from "../src/agents/handoff-delivery";
 import type { HandoffWork } from "../src/agents/handoff-runner";
 
 /**
@@ -127,10 +130,12 @@ describe("turning a hop into a turn", () => {
       message: "m",
       shown: "s",
       assertion: "signed-assertion",
+      toolAssertions: ["tool-ticket-one", "tool-ticket-two"],
     });
 
     expect(requests[0]?.input.forwardedProps).toEqual({
       openbotRun: "signed-assertion",
+      openbotToolRuns: ["tool-ticket-one", "tool-ticket-two"],
     });
     // The addressed Bot's own conversation, because a thread has exactly one agent.
     expect(requests[0]?.threadId).toBe("scratch-thread");
@@ -206,9 +211,14 @@ describe("holding the conversation while a Bot answers", () => {
       false,
     );
 
-    await expect(
-      deliver.deliver({ work: WORK, message: "m", shown: "s", assertion: "s" }),
-    ).rejects.toThrow("busy");
+    const outcome = deliver.deliver({
+      work: WORK,
+      message: "m",
+      shown: "s",
+      assertion: "s",
+    });
+    await expect(outcome).rejects.toBeInstanceOf(ThreadBusyError);
+    await expect(outcome).rejects.toThrow("busy");
     expect(requests).toEqual([]);
   });
 

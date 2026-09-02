@@ -27,7 +27,9 @@ type SocialResult = { error?: { message?: string } | null };
  * a deployment can gain a provider without the app being rebuilt.
  *
  * `start` is injectable because Better Auth's client is a proxy, so a test cannot replace the method
- * on it. Named so it cannot shadow anything it defaults to.
+ * on it. `origin` is injectable for the same reason tests must not install a process-wide fake
+ * `window`: Bun runs test files in one process, and that fake browser contaminated unrelated module
+ * initialization in the full gate.
  */
 export async function signInWith(
   provider: AuthProviderId,
@@ -36,10 +38,11 @@ export async function signInWith(
     callbackURL: string;
   }) => Promise<SocialResult> = (input) =>
     authClient.signIn.social(input as never) as Promise<SocialResult>,
+  origin = window.location.origin,
 ) {
   const result = await start({
     provider,
-    callbackURL: window.location.origin,
+    callbackURL: origin,
   });
 
   if (result.error) {

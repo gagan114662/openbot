@@ -24,6 +24,7 @@ export default defineConfig({
     "./src/db/schema/coworker.ts",
     "./src/db/schema/components.ts",
     "./src/db/schema/plugins.ts",
+    "./src/db/schema/production.ts",
     "./src/db/schema/work.ts",
   ],
   out: "./drizzle",

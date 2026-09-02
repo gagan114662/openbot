@@ -1,5 +1,12 @@
 import { lstat, readFile, readdir, realpath } from "node:fs/promises";
-import { basename, extname, isAbsolute, relative, resolve, sep } from "node:path";
+import {
+  basename,
+  extname,
+  isAbsolute,
+  relative,
+  resolve,
+  sep,
+} from "node:path";
 import { MAX_RESULT_CHARS, type McpCallResult, type McpTool } from "./mcp";
 
 const MAX_FILES = 5_000;
@@ -41,7 +48,10 @@ const TOOLS: readonly McpTool[] = Object.freeze([
     inputSchema: {
       type: "object",
       properties: {
-        prefix: { type: "string", description: "Optional relative path prefix." },
+        prefix: {
+          type: "string",
+          description: "Optional relative path prefix.",
+        },
         limit: { type: "integer", minimum: 1, maximum: 1000, default: 200 },
       },
     },
@@ -54,7 +64,10 @@ const TOOLS: readonly McpTool[] = Object.freeze([
       type: "object",
       properties: {
         query: { type: "string", description: "Literal text to find." },
-        prefix: { type: "string", description: "Optional relative path prefix." },
+        prefix: {
+          type: "string",
+          description: "Optional relative path prefix.",
+        },
         limit: { type: "integer", minimum: 1, maximum: 200, default: 100 },
       },
       required: ["query"],
@@ -72,9 +85,13 @@ const TOOLS: readonly McpTool[] = Object.freeze([
           minItems: 1,
           maxItems: 10,
           items: { type: "string" },
-          description: "Related literal identifiers or phrases to trace together.",
+          description:
+            "Related literal identifiers or phrases to trace together.",
         },
-        prefix: { type: "string", description: "Optional relative path prefix." },
+        prefix: {
+          type: "string",
+          description: "Optional relative path prefix.",
+        },
         limit: { type: "integer", minimum: 1, maximum: 500, default: 500 },
       },
       required: ["terms"],
@@ -87,7 +104,10 @@ const TOOLS: readonly McpTool[] = Object.freeze([
     inputSchema: {
       type: "object",
       properties: {
-        path: { type: "string", description: "Exact repository-relative path." },
+        path: {
+          type: "string",
+          description: "Exact repository-relative path.",
+        },
         startLine: { type: "integer", minimum: 1, default: 1 },
         endLine: { type: "integer", minimum: 1 },
       },
@@ -142,28 +162,43 @@ function readablePath(path: string): boolean {
 
 function within(root: string, path: string): boolean {
   const child = relative(root, path);
-  return child === "" || (!child.startsWith(`..${sep}`) && child !== ".." && !isAbsolute(child));
+  return (
+    child === "" ||
+    (!child.startsWith(`..${sep}`) && child !== ".." && !isAbsolute(child))
+  );
 }
 
-async function safeFile(given: string): Promise<{ absolute: string; path: string }> {
-  if (!given.trim() || isAbsolute(given)) throw new Error("A repository-relative path is required.");
+async function safeFile(
+  given: string,
+): Promise<{ absolute: string; path: string }> {
+  if (!given.trim() || isAbsolute(given))
+    throw new Error("A repository-relative path is required.");
   const root = await realpath(repositoryRoot());
   const candidate = resolve(root, given);
-  if (!within(root, candidate)) throw new Error("That path leaves the repository.");
+  if (!within(root, candidate))
+    throw new Error("That path leaves the repository.");
   const absolute = await realpath(candidate);
-  if (!within(root, absolute)) throw new Error("That path leaves the repository through a link.");
+  if (!within(root, absolute))
+    throw new Error("That path leaves the repository through a link.");
   const stat = await lstat(absolute);
   const path = relative(root, absolute).split(sep).join("/");
-  if (!stat.isFile() || stat.isSymbolicLink()) throw new Error("That path is not a regular repository file.");
-  if (!readablePath(path)) throw new Error("That file type is excluded from repository evidence.");
-  if (stat.size > MAX_FILE_BYTES) throw new Error("That file is larger than the 1 MB read limit.");
+  if (!stat.isFile() || stat.isSymbolicLink())
+    throw new Error("That path is not a regular repository file.");
+  if (!readablePath(path))
+    throw new Error("That file type is excluded from repository evidence.");
+  if (stat.size > MAX_FILE_BYTES)
+    throw new Error("That file is larger than the 1 MB read limit.");
   return { absolute, path };
 }
 
 async function repositoryFiles(prefix = ""): Promise<string[]> {
   const root = await realpath(repositoryRoot());
-  if (isAbsolute(prefix)) throw new Error("The prefix must be repository-relative.");
-  const normalizedPrefix = prefix.trim().replaceAll("\\", "/").replace(/^\.\//, "");
+  if (isAbsolute(prefix))
+    throw new Error("The prefix must be repository-relative.");
+  const normalizedPrefix = prefix
+    .trim()
+    .replaceAll("\\", "/")
+    .replace(/^\.\//, "");
   if (normalizedPrefix === ".." || normalizedPrefix.startsWith("../")) {
     throw new Error("The prefix leaves the repository.");
   }
@@ -193,13 +228,24 @@ async function repositoryFiles(prefix = ""): Promise<string[]> {
   return files;
 }
 
-function integerArg(args: Record<string, unknown>, key: string, fallback: number) {
+function integerArg(
+  args: Record<string, unknown>,
+  key: string,
+  fallback: number,
+) {
   const value = args[key];
-  return typeof value === "number" && Number.isInteger(value) ? value : fallback;
+  return typeof value === "number" && Number.isInteger(value)
+    ? value
+    : fallback;
 }
 
 export async function callTool(
-  _connection: { url: string; token?: string; actorId?: string; botId?: string },
+  _connection: {
+    url: string;
+    token?: string;
+    actorId?: string;
+    botId?: string;
+  },
   toolName: string,
   args: Record<string, unknown>,
 ): Promise<McpCallResult> {
@@ -208,12 +254,16 @@ export async function callTool(
       const prefix = typeof args.prefix === "string" ? args.prefix : "";
       const limit = Math.min(Math.max(integerArg(args, "limit", 200), 1), 1000);
       const files = await repositoryFiles(prefix);
-      return success({ files: files.slice(0, limit), truncated: files.length > limit });
+      return success({
+        files: files.slice(0, limit),
+        truncated: files.length > limit,
+      });
     }
     if (toolName === "search_repository") {
       const query = typeof args.query === "string" ? args.query.trim() : "";
       if (!query) return failure("A literal search query is required.");
-      if (query.length > 200) return failure("The search query is longer than 200 characters.");
+      if (query.length > 200)
+        return failure("The search query is longer than 200 characters.");
       const prefix = typeof args.prefix === "string" ? args.prefix : "";
       const limit = Math.min(Math.max(integerArg(args, "limit", 100), 1), 200);
       const needle = query.toLowerCase();
@@ -234,20 +284,26 @@ export async function callTool(
     }
     if (toolName === "trace_repository_terms") {
       const terms = Array.isArray(args.terms)
-        ? [...new Set(
-            args.terms
-              .filter((value): value is string => typeof value === "string")
-              .map((value) => value.trim())
-              .filter(Boolean),
-          )].slice(0, 10)
+        ? [
+            ...new Set(
+              args.terms
+                .filter((value): value is string => typeof value === "string")
+                .map((value) => value.trim())
+                .filter(Boolean),
+            ),
+          ].slice(0, 10)
         : [];
-      if (terms.length === 0) return failure("At least one literal term is required.");
+      if (terms.length === 0)
+        return failure("At least one literal term is required.");
       if (terms.some((term) => term.length > 200)) {
         return failure("Every trace term must be at most 200 characters.");
       }
       const prefix = typeof args.prefix === "string" ? args.prefix : "";
       const limit = Math.min(Math.max(integerArg(args, "limit", 500), 1), 500);
-      const needles = terms.map((term) => ({ term, lower: term.toLowerCase() }));
+      const needles = terms.map((term) => ({
+        term,
+        lower: term.toLowerCase(),
+      }));
       const byFile = new Map<
         string,
         Array<{ term: string; line: number; text: string }>
@@ -267,7 +323,11 @@ export async function callTool(
               break;
             }
             const matches = byFile.get(path) ?? [];
-            matches.push({ term: needle.term, line: index + 1, text: text.slice(0, 300) });
+            matches.push({
+              term: needle.term,
+              line: index + 1,
+              text: text.slice(0, 300),
+            });
             byFile.set(path, matches);
             count += 1;
           }
@@ -286,9 +346,20 @@ export async function callTool(
       const path = typeof args.path === "string" ? args.path : "";
       const file = await safeFile(path);
       const lines = (await readFile(file.absolute, "utf8")).split(/\r?\n/);
-      const startLine = Math.min(Math.max(integerArg(args, "startLine", 1), 1), Math.max(lines.length, 1));
-      const requestedEnd = integerArg(args, "endLine", startLine + MAX_READ_LINES - 1);
-      const endLine = Math.min(Math.max(requestedEnd, startLine), startLine + MAX_READ_LINES - 1, lines.length);
+      const startLine = Math.min(
+        Math.max(integerArg(args, "startLine", 1), 1),
+        Math.max(lines.length, 1),
+      );
+      const requestedEnd = integerArg(
+        args,
+        "endLine",
+        startLine + MAX_READ_LINES - 1,
+      );
+      const endLine = Math.min(
+        Math.max(requestedEnd, startLine),
+        startLine + MAX_READ_LINES - 1,
+        lines.length,
+      );
       return success({
         path: file.path,
         startLine,
@@ -299,6 +370,10 @@ export async function callTool(
     }
     return failure(`There is no repository tool called ${toolName}.`);
   } catch (error) {
-    return failure(error instanceof Error ? error.message : "Repository evidence could not be read.");
+    return failure(
+      error instanceof Error
+        ? error.message
+        : "Repository evidence could not be read.",
+    );
   }
 }

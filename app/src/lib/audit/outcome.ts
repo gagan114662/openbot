@@ -27,6 +27,7 @@
  * refusal on purpose.
  */
 export const REFUSED_EVENT_TYPES = [
+  "analytics.ingest_refused",
   "computer.action_refused",
   "component.refused",
   "component.function_refused",

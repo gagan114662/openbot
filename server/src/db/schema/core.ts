@@ -91,6 +91,19 @@ export const sessions = pgTable("sessions", {
   updatedAt: updatedAt(),
 });
 
+/** One row per spent signed tool-call ticket; the primary key is the replay barrier across replicas. */
+export const agentToolAssertionUses = pgTable(
+  "agent_tool_assertion_uses",
+  {
+    assertionId: text("assertion_id").primaryKey(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    index("agent_tool_assertion_uses_expires_idx").on(table.expiresAt),
+  ],
+);
+
 export const accounts = pgTable(
   "accounts",
   {

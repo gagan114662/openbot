@@ -12,9 +12,37 @@ const app = createApp(
 describe("health endpoint", () => {
   test("reports the server as healthy", async () => {
     const response = await app.request("http://openbot.local/health");
+    const browserResponse = await app.request("http://openbot.local/api/health");
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ status: "ok" });
+    expect(browserResponse.status).toBe(200);
+    await expect(browserResponse.json()).resolves.toEqual({ status: "ok" });
+  });
+
+  test("distinguishes a live process from one whose database is unavailable", async () => {
+    const unavailable = createApp(
+      ...([
+        loadConfig({ ...testEnvironment() }),
+        ...Array(27).fill(undefined),
+        async () => {
+          throw new Error("postgres://secret@database:5432/openbot");
+        },
+      ] as Parameters<typeof createApp>),
+    );
+
+    const readiness = await unavailable.request("http://openbot.local/health");
+    const liveness = await unavailable.request("http://openbot.local/live");
+    const readinessBody = await readiness.text();
+
+    expect(readiness.status).toBe(503);
+    expect(JSON.parse(readinessBody)).toEqual({
+      status: "unavailable",
+      dependencies: { database: "unavailable" },
+    });
+    expect(readinessBody).not.toContain("postgres://");
+    expect(liveness.status).toBe(200);
+    await expect(liveness.json()).resolves.toEqual({ status: "ok" });
   });
 });
 

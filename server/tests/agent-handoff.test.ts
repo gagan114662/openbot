@@ -587,3 +587,42 @@ describe("the same ask a second time", () => {
       expect(outcome.refusal).toContain("could not be confirmed");
   });
 });
+
+describe("an unavailable audit store", () => {
+  function deskWithBrokenAudit(granted = true) {
+    return createHandoffDesk({
+      queue: { offer: async () => "queued" } as unknown as WorkQueue,
+      profiles: {
+        list: async () => [profile({ id: "researcher", name: "Researcher" })],
+      } as unknown as AgentProfileStore,
+      mayAddress: async () => granted,
+      actorFor: async (id) => ({ id, role: "user" }),
+      auditStore: {
+        insert: async () => {
+          throw new Error("audit offline");
+        },
+      },
+      caps: CAPS,
+    });
+  }
+
+  test("does not turn a durably queued hop into a failed tool call", async () => {
+    const outcome = await deskWithBrokenAudit().send({
+      from: FROM,
+      target: "researcher",
+      envelope: { task: "find the policy" },
+    });
+
+    expect(outcome).toMatchObject({ ok: true, to: "researcher" });
+  });
+
+  test("does not turn a policy refusal into a run-killing exception", async () => {
+    const outcome = await deskWithBrokenAudit(false).send({
+      from: FROM,
+      target: "researcher",
+      envelope: { task: "find the policy" },
+    });
+
+    expect(outcome.ok).toBe(false);
+  });
+});

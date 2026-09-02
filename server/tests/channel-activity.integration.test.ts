@@ -338,7 +338,9 @@ describe("channel activity", () => {
 
     await store.recordActivity(owner, busy.id, {
       agentId,
-      at: new Date(),
+      // Deliberately behind PostgreSQL's creation clock. Recording a message must not make the
+      // channel older than its own creation time.
+      at: new Date(Date.now() - 60_000),
       text: "Said something.",
     });
 

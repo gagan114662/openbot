@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { EvolutionCheckpointGate } from "../src/agents/evolution-checkpoints";
 import {
   createHandoffRunner,
   type HandoffWork,
@@ -33,6 +34,8 @@ function runner(options?: {
   }) => Promise<void>;
   /** What the delivery says the Bot answered. Null — nothing worth relaying — unless a test cares. */
   answer?: string | null;
+  evolution?: EvolutionCheckpointGate;
+  finish?: () => Promise<boolean>;
 }) {
   const calls: Array<{ verb: string; key: string; owner?: string }> = [];
   const events: string[] = [];
@@ -42,19 +45,28 @@ function runner(options?: {
   }> = [];
   const delivered: Array<{ message: string; assertion: string }> = [];
   const offered: HandoffWork[] = [];
+  const claimLimits: number[] = [];
 
   const queue = {
-    claim: async () =>
-      options?.claimed ?? [
-        { kind: "bot.message", key: "run-1:abc", payload: WORK, attempts: 1 },
-      ],
+    claim: async ({ limit }: { limit: number }) => {
+      claimLimits.push(limit);
+      return (
+        options?.claimed ?? [
+          { kind: "bot.message", key: "run-1:abc", payload: WORK, attempts: 1 },
+        ]
+      );
+    },
     renew: async () => true,
     finish: async ({ key, owner }: { key: string; owner: string }) => {
       calls.push({ verb: "finish", key, owner });
-      return true;
+      return options?.finish ? options.finish() : true;
     },
     release: async ({ key, owner }: { key: string; owner: string }) => {
       calls.push({ verb: "release", key, owner });
+      return true;
+    },
+    defer: async ({ key, owner }: { key: string; owner: string }) => {
+      calls.push({ verb: "defer", key, owner });
       return true;
     },
     offer: async ({
@@ -85,11 +97,16 @@ function runner(options?: {
     written,
     delivered,
     offered,
+    claimLimits,
     runner: createHandoffRunner({
       queue,
       owner: "replica-a",
-      sign: (work) => `signed:${work.toBotId}:${work.depth}`,
+      sign: (work) => ({
+        lineage: `signed:${work.toBotId}:${work.depth}`,
+        toolCalls: ["tool-ticket"],
+      }),
       auditStore,
+      evolution: options?.evolution,
       delivery: {
         deliver: async ({ work, message, shown, assertion }) => {
           delivered.push({ message, assertion });
@@ -102,6 +119,14 @@ function runner(options?: {
 }
 
 describe("delivering a hop", () => {
+  test("claims one long-running turn so idle replicas can take the rest", async () => {
+    const { runner: sweep, claimLimits } = runner();
+
+    await sweep.sweep();
+
+    expect(claimLimits).toEqual([1]);
+  });
+
   test("runs the addressed Bot and finishes the work as its owner", async () => {
     const { runner: sweep, calls, delivered } = runner();
 
@@ -112,6 +137,41 @@ describe("delivering a hop", () => {
       { verb: "finish", key: "run-1:abc", owner: "replica-a" },
     ]);
     expect(delivered).toHaveLength(1);
+  });
+
+  test("a post-delivery promotion rejection is finished once and visibly reported without retrying", async () => {
+    const evolution = {
+      checkpoint: async () => ({
+        chainId: "thread-1",
+        stateHash: "trusted",
+        contextChecksum: "capsule",
+        version: 1,
+      }),
+      promote: async () => ({
+        promoted: false,
+        candidateId: "candidate",
+        candidateHash: "candidate-hash",
+        previousStateHash: "trusted",
+        nextStateHash: "trusted",
+        reasons: ["stale parent"],
+        evidenceHash: "evidence",
+      }),
+      state: async () => "trusted",
+    } as unknown as EvolutionCheckpointGate;
+    const result = runner({ answer: "delivered once", evolution });
+
+    const report = await result.runner.sweep();
+
+    expect(result.delivered).toHaveLength(1);
+    expect(result.calls.filter((call) => call.verb === "finish")).toHaveLength(
+      1,
+    );
+    expect(result.calls.some((call) => call.verb === "release")).toBe(false);
+    expect(result.offered).toHaveLength(1);
+    expect(result.offered[0]?.answerIn).toBe("thread-1");
+    expect(result.offered[0]?.task).toContain("verification gate rejected");
+    expect(report.delivered).toEqual([]);
+    expect(report.skipped[0]?.reason).toContain("candidate rolled back");
   });
 
   /*
@@ -160,6 +220,37 @@ describe("delivering a hop", () => {
       { verb: "release", key: "run-1:abc", owner: "replica-a" },
     ]);
     expect(events).toContain("agent.handoff_failed");
+  });
+
+  test("busy-thread contention never spends the relay's retry budget", async () => {
+    const {
+      runner: sweep,
+      calls,
+      events,
+    } = runner({
+      claimed: [
+        {
+          kind: "bot.message",
+          key: "relay:run-1:abc",
+          payload: { ...WORK, answerIn: WORK.threadId },
+          attempts: 5,
+        },
+      ],
+      deliver: async () => {
+        throw new (
+          await import("../src/agents/handoff-delivery")
+        ).ThreadBusyError(WORK.threadId);
+      },
+    });
+
+    const report = await sweep.sweep();
+
+    expect(calls).toEqual([
+      { verb: "defer", key: "relay:run-1:abc", owner: "replica-a" },
+    ]);
+    expect(events).toContain("agent.handoff_retried");
+    expect(events).not.toContain("agent.handoff_failed");
+    expect(report.skipped[0]?.reason).toContain("busy with another run");
   });
 
   /*
@@ -407,6 +498,28 @@ describe("relaying the answer home", () => {
     expect(offered[0]?.task).toContain(
       "The outage was Tuesday, 02:10 to 02:45.",
     );
+  });
+
+  test("makes the relay durable before finishing its producing hop", async () => {
+    const {
+      runner: sweeper,
+      calls,
+      offered,
+    } = runner({
+      answer: "The durable answer.",
+      finish: async () => {
+        throw new Error("process stopped at finish");
+      },
+    });
+
+    await sweeper.sweep();
+
+    expect(offered).toHaveLength(1);
+    expect(calls.map((call) => call.verb)).toEqual([
+      "offer",
+      "finish",
+      "release",
+    ]);
   });
 
   test("its key is outside the run's own prefix, like the notice", async () => {

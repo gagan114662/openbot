@@ -9,8 +9,8 @@ import {
   type ModelBenchmark,
 } from "./model-router";
 import { type ManagedJobKind, managedJobKinds } from "./orchestrator";
-import type { SoftwareFactoryStore } from "./store";
 import type { ShadowEvaluator } from "./shadow-evaluator";
+import type { SoftwareFactoryStore } from "./store";
 import type { WorkflowRuntime } from "./workflow-runtime";
 
 const record = (value: unknown): Record<string, unknown> | null =>

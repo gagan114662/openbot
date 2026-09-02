@@ -4,11 +4,11 @@ import { z } from "zod";
 import type { Database } from "../db/client";
 import {
   contextCompactionArtifacts,
+  factoryManagedJobs,
   factoryWorkflowArtifacts,
   factoryWorkflowEvents,
   factoryWorkflowRuns,
   factoryWorkflowStages,
-  factoryManagedJobs,
 } from "../db/schema";
 
 export const stageCheckSchema = z.object({

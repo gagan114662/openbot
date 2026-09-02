@@ -1,5 +1,5 @@
-import { createHash } from "node:crypto";
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { executeManagedJob, type FactoryExecutor } from "./orchestrator";
 
 test("a judging orchestrator grounds and runs independent cheaper workers before dependent work", async () => {

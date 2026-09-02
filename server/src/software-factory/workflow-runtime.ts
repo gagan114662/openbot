@@ -124,14 +124,14 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
           const [stages, artifacts, events] = await Promise.all([
             database
               .select()
-              .from(factoryWorkflowArtifacts)
-              .where(eq(factoryWorkflowArtifacts.runId, run.id))
-              .orderBy(asc(factoryWorkflowArtifacts.createdAt)),
-            database
-              .select()
               .from(factoryWorkflowStages)
               .where(eq(factoryWorkflowStages.runId, run.id))
               .orderBy(asc(factoryWorkflowStages.stageId)),
+            database
+              .select()
+              .from(factoryWorkflowArtifacts)
+              .where(eq(factoryWorkflowArtifacts.runId, run.id))
+              .orderBy(asc(factoryWorkflowArtifacts.createdAt)),
             database
               .select()
               .from(factoryWorkflowEvents)
@@ -439,6 +439,25 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
           .returning();
         return claimed ?? null;
       });
+    },
+
+    async renewLease(runId: string, workerId: string, leaseMs = 30_000) {
+      const [run] = await database
+        .update(factoryWorkflowRuns)
+        .set({
+          leaseExpiresAt: new Date(Date.now() + leaseMs),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(factoryWorkflowRuns.id, runId),
+            eq(factoryWorkflowRuns.tenantId, tenantId),
+            eq(factoryWorkflowRuns.status, "running"),
+            eq(factoryWorkflowRuns.leaseOwner, workerId),
+          ),
+        )
+        .returning({ id: factoryWorkflowRuns.id });
+      return Boolean(run);
     },
 
     async readyStages(runId: string) {

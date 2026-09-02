@@ -48,14 +48,21 @@ export function createWorkflowWorker(options: {
   executor: WorkflowStageExecutor;
   workerId: string;
   sessionId?: () => string;
+  leaseMs?: number;
+  heartbeatMs?: number;
+  stageTimeoutMs?: number;
   onTerminalFailure?: (input: {
     runId: string;
     error: string;
   }) => Promise<void>;
 }) {
   const sessionId = options.sessionId ?? randomUUID;
+  const leaseMs = options.leaseMs ?? 30_000;
+  const heartbeatMs = options.heartbeatMs ?? Math.max(250, leaseMs / 3);
+  const stageTimeoutMs = options.stageTimeoutMs ?? 10 * 60_000;
   let draining = false;
   const active = new Set<Promise<void>>();
+  const controllers = new Map<string, Set<AbortController>>();
 
   const executeStage = async (runId: string, stage: Stage) => {
     const workerSessionId = sessionId();
@@ -66,6 +73,17 @@ export function createWorkflowWorker(options: {
     );
     if (!started) return;
     const controller = new AbortController();
+    const runControllers = controllers.get(runId) ?? new Set<AbortController>();
+    runControllers.add(controller);
+    controllers.set(runId, runControllers);
+    const deadline = setTimeout(
+      () =>
+        controller.abort(
+          `Managed stage exceeded its ${stageTimeoutMs} ms execution deadline.`,
+        ),
+      stageTimeoutMs,
+    );
+    deadline.unref?.();
     const initialSnapshot = await options.runtime.snapshot(runId);
     const initialSteering =
       (initialSnapshot?.run.steering as { events?: unknown[] } | undefined)
@@ -148,14 +166,37 @@ export function createWorkflowWorker(options: {
       }
     } finally {
       clearInterval(controlWatcher);
+      clearTimeout(deadline);
+      runControllers.delete(controller);
+      if (runControllers.size === 0) controllers.delete(runId);
     }
   };
 
   return {
     async runOnce() {
       if (draining) return { claimed: false, stages: 0 };
-      const run = await options.runtime.claim(options.workerId);
+      const run = await options.runtime.claim(options.workerId, leaseMs);
       if (!run) return { claimed: false, stages: 0 };
+      let renewing = false;
+      const heartbeat = setInterval(() => {
+        if (renewing) return;
+        renewing = true;
+        void options.runtime
+          .renewLease(run.id, options.workerId, leaseMs)
+          .then((renewed) => {
+            if (!renewed)
+              for (const controller of controllers.get(run.id) ?? [])
+                controller.abort("Workflow lease ownership was lost.");
+          })
+          .catch(() => {
+            for (const controller of controllers.get(run.id) ?? [])
+              controller.abort("Workflow lease renewal failed.");
+          })
+          .finally(() => {
+            renewing = false;
+          });
+      }, heartbeatMs);
+      heartbeat.unref?.();
       const ready = await options.runtime.readyStages(run.id);
       const tasks = ready.map((stage) => {
         const task = executeStage(run.id, stage).finally(() =>
@@ -164,7 +205,7 @@ export function createWorkflowWorker(options: {
         active.add(task);
         return task;
       });
-      await Promise.all(tasks);
+      await Promise.all(tasks).finally(() => clearInterval(heartbeat));
       return { claimed: true, stages: tasks.length, runId: run.id };
     },
     async drain() {

@@ -330,6 +330,20 @@ function ProductionEngineerPage() {
                         <p className="text-muted-foreground">
                           {stage.objective}
                         </p>
+                        {stage.sessionId ? (
+                          <dl className="mt-2 grid gap-x-2 text-xs md:grid-cols-[80px_1fr]">
+                            <dt>Worker</dt>
+                            <dd className="break-all font-mono">
+                              {stage.sessionId}
+                            </dd>
+                            <dt>Reviewer</dt>
+                            <dd className="break-all font-mono">
+                              {stage.reviewerSessionId ?? "pending"}
+                            </dd>
+                            <dt>Verdict</dt>
+                            <dd>{stage.verification?.summary ?? "pending"}</dd>
+                          </dl>
+                        ) : null}
                       </div>
                     ))}
                   </div>

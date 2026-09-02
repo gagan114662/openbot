@@ -151,6 +151,12 @@ export type SoftwareFactoryDashboard = {
       status: string;
       attempts: number;
       sessionId: string | null;
+      reviewerSessionId: string | null;
+      verification: null | {
+        accepted?: boolean;
+        summary?: string;
+        checks?: string[];
+      };
       lastError: string | null;
     }>;
     artifacts: Array<{

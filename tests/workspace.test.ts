@@ -32,4 +32,17 @@ describe("OpenBot workspace", () => {
       );
     }
   });
+
+  test("gives the production dependency install every workspace manifest", () => {
+    const rootManifest = JSON.parse(
+      readFileSync(join(repositoryRoot, "package.json"), "utf8"),
+    ) as { workspaces: string[] };
+    const dockerfile = readFileSync(join(repositoryRoot, "Dockerfile"), "utf8");
+
+    for (const packageName of rootManifest.workspaces) {
+      expect(dockerfile).toContain(
+        `cp /src/${packageName}/package.json ${packageName}/package.json`,
+      );
+    }
+  });
 });

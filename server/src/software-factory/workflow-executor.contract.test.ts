@@ -104,6 +104,9 @@ describe.each(["codex", "claude"] as const)(
         kind: "runtime-check",
         exitCode: 0,
       });
+      expect(
+        String(candidate.artifacts[1]?.metadata?.reviewMaterialPath),
+      ).not.toStartWith(`${root}/`);
       const review = await executor.review({
         runId,
         stage,

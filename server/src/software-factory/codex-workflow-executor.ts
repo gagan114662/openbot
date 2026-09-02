@@ -6,7 +6,7 @@ import {
   symlink,
   writeFile,
 } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { spawn } from "bun";
 import {
   assessTechnicalDebt,
@@ -96,14 +96,21 @@ export function createCodexWorkflowExecutor(
     >;
     harness?: "codex" | "claude";
     binary?: string;
+    workspaceRoot?: string;
   } = {},
 ): WorkflowHarnessExecutor {
   const root = resolve(repository);
   const harness = options.harness ?? "codex";
+  // A worktree nested below an ignored repository path is itself ignored by tools such as Biome.
+  // Keep execution beside the repository so deterministic checks inspect the candidate checkout.
+  const workspaces = resolve(
+    options.workspaceRoot ??
+      join(dirname(root), ".openbot-workflows", basename(root)),
+  );
 
   async function workspace(runId: string) {
-    const directory = join(root, ".openbot", "workflows", runId);
-    await mkdir(join(root, ".openbot", "workflows"), { recursive: true });
+    const directory = join(workspaces, runId);
+    await mkdir(workspaces, { recursive: true });
     try {
       await readFile(join(directory, ".git"));
     } catch {

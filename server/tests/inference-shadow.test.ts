@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { RunAgentInput } from "@ag-ui/client";
+import { from, lastValueFrom, toArray } from "rxjs";
+import {
+  runWithInferenceShadow,
+  setInferenceShadowRecorder,
+} from "../src/copilot";
 import { createInferenceShadowRecorder } from "../src/software-factory/inference-shadow";
 
 describe("real inference shadow path", () => {
@@ -69,5 +74,77 @@ describe("real inference shadow path", () => {
         shadowOutput: "shadow answer from the model path",
       }),
     ]);
+  });
+
+  test("can use the Codex subscription invoker without an API credential", async () => {
+    const records: unknown[] = [];
+    const recorder = createInferenceShadowRecorder({
+      evaluator: {
+        shouldEvaluate: () => true,
+        async record(input) {
+          records.push(input);
+          return null;
+        },
+      },
+      primaryModel: "primary-live",
+      shadowModel: "gpt-5.6-luna",
+      rateBasisPoints: 10_000,
+      async invokeShadow(messages, signal) {
+        expect(signal.aborted).toBe(false);
+        expect(messages).toEqual([
+          { role: "user", content: "real user traffic" },
+        ]);
+        return "subscription-backed shadow answer";
+      },
+    });
+    await recorder({
+      run: {
+        runId: "subscription-shadow-run",
+        threadId: "thread-1",
+        messages: [
+          { id: "question", role: "user", content: "real user traffic" },
+        ],
+        state: {},
+        tools: [],
+        context: [],
+        forwardedProps: {},
+      } as RunAgentInput,
+      primaryOutput: "primary answer",
+    });
+    expect(records).toEqual([
+      expect.objectContaining({
+        requestKey: "subscription-shadow-run",
+        shadowOutput: "subscription-backed shadow answer",
+      }),
+    ]);
+  });
+
+  test("a killed shadow cannot alter the completed primary stream", async () => {
+    setInferenceShadowRecorder(async () => {
+      throw new Error("shadow process was killed");
+    });
+    const run = {
+      runId: "isolated-shadow-failure",
+      threadId: "thread-1",
+      messages: [],
+      state: {},
+      tools: [],
+      context: [],
+      forwardedProps: {},
+    } as RunAgentInput;
+    const emitted = await lastValueFrom(
+      runWithInferenceShadow(run, () =>
+        from([
+          { type: "TEXT_MESSAGE_CONTENT", delta: "unchanged primary" },
+          { type: "RUN_FINISHED" },
+        ] as never[]),
+      ).pipe(toArray()),
+    );
+    expect(emitted).toEqual([
+      { type: "TEXT_MESSAGE_CONTENT", delta: "unchanged primary" },
+      { type: "RUN_FINISHED" },
+    ]);
+    await Bun.sleep(0);
+    setInferenceShadowRecorder(undefined);
   });
 });

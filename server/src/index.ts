@@ -101,7 +101,10 @@ import { createContextGraph } from "./software-factory/context-graph";
 import { createCodexWorkflowExecutor } from "./software-factory/codex-workflow-executor";
 import { createSoftwareFactoryStore } from "./software-factory/store";
 import { createShadowEvaluator } from "./software-factory/shadow-evaluator";
-import { createInferenceShadowRecorder } from "./software-factory/inference-shadow";
+import {
+  createInferenceShadowRecorder,
+  invokeCodexSubscriptionShadow,
+} from "./software-factory/inference-shadow";
 import { createWorkflowRuntime } from "./software-factory/workflow-runtime";
 import { createWorkflowWorker } from "./software-factory/workflow-worker";
 import { createVerifiedValueStore } from "./software-factory/verified-value";
@@ -348,21 +351,34 @@ const verifiedValueStore = createVerifiedValueStore(
 );
 const shadowModel = process.env.SHADOW_MODEL?.trim();
 if (shadowModel) {
+  const codexSubscription =
+    process.env.SHADOW_PROVIDER === "codex-subscription";
   setInferenceShadowRecorder(
     createInferenceShadowRecorder({
       evaluator: shadowEvaluator,
       primaryModel: tenantPackage.model.defaultModel,
       shadowModel,
       rateBasisPoints: Number(process.env.SHADOW_RATE_BASIS_POINTS ?? 500),
-      endpoint: chatCompletionsUrl(process.env),
-      resolveApiKey: () =>
-        resolveModelApiKey({
-          encryptionKey: config.keyEncryptionKey,
-          reader: credentialStore,
-          provider: tenantPackage.model.provider,
-          keyId: tenantPackage.model.credentialSecretRef,
-          environment: process.env,
-        }),
+      ...(codexSubscription
+        ? {
+            invokeShadow: (messages, signal) =>
+              invokeCodexSubscriptionShadow(messages, {
+                model: shadowModel,
+                cwd: process.env.SOFTWARE_FACTORY_REPOSITORY ?? process.cwd(),
+                signal,
+              }),
+          }
+        : {
+            endpoint: chatCompletionsUrl(process.env),
+            resolveApiKey: () =>
+              resolveModelApiKey({
+                encryptionKey: config.keyEncryptionKey,
+                reader: credentialStore,
+                provider: tenantPackage.model.provider,
+                keyId: tenantPackage.model.credentialSecretRef,
+                environment: process.env,
+              }),
+          }),
     }),
   );
 }

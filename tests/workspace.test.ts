@@ -45,4 +45,13 @@ describe("OpenBot workspace", () => {
       );
     }
   });
+
+  test("ships cross-workspace runtime imports in the production image", () => {
+    const dockerfile = readFileSync(join(repositoryRoot, "Dockerfile"), "utf8");
+
+    expect(dockerfile).toContain("COPY agent-codex/src agent-codex/src");
+    expect(dockerfile).toContain(
+      "COPY agent-codex/package.json agent-codex/package.json",
+    );
+  });
 });

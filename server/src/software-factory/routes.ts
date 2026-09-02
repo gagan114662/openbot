@@ -1,6 +1,7 @@
 import type { MiddlewareHandler } from "hono";
 import { Hono } from "hono";
 import { type AppVariables, requireAdmin } from "../auth/guards";
+import type { WebhookReconciler } from "../webhooks/reconciler";
 import type { ContextGraph, ContextNodeInput } from "./context-graph";
 import {
   type ExecutionTier,
@@ -22,6 +23,7 @@ export function createSoftwareFactoryRoutes(
   graph: ContextGraph,
   tenantId: string,
   requireUser: MiddlewareHandler<{ Variables: AppVariables }>,
+  webhooks?: WebhookReconciler,
 ) {
   const routes = new Hono<{ Variables: AppVariables }>();
   routes.use("*", requireUser, async (context, next) => {
@@ -35,6 +37,7 @@ export function createSoftwareFactoryRoutes(
       contextGraph: await graph.stats(tenantId),
       executionTiers,
       managedJobKinds,
+      webhooks: webhooks ? await webhooks.dashboard() : null,
     }),
   );
   routes.post("/benchmarks", async (context) => {
@@ -149,6 +152,12 @@ export function createSoftwareFactoryRoutes(
       ? body.keys.filter((key): key is string => typeof key === "string")
       : [];
     return context.json({ nodes: await graph.ground(tenantId, keys) });
+  });
+  routes.post("/webhooks/dead/:eventId/replay", async (context) => {
+    if (!webhooks) return context.notFound();
+    return context.json(
+      await webhooks.replayDead(context.req.param("eventId")),
+    );
   });
   return routes;
 }

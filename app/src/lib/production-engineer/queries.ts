@@ -99,6 +99,19 @@ export type SoftwareFactoryDashboard = {
     selectedModel: string | null;
     costMicros: number;
   }>;
+  webhooks: null | {
+    pending: number;
+    processed: number;
+    dead: number;
+    events: Array<{
+      id: string;
+      provider: string;
+      eventId: string;
+      status: string;
+      attempts: number;
+      lastError: string | null;
+    }>;
+  };
 };
 
 export async function fetchSoftwareFactory() {

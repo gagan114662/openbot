@@ -6,6 +6,7 @@ import {
   primaryKey,
   text,
   timestamp,
+  uniqueIndex,
   uuid,
 } from "drizzle-orm/pg-core";
 import { jsonb } from "./json";
@@ -157,6 +158,48 @@ export const factoryManagedJobs = pgTable(
     index("factory_managed_jobs_tenant_created_idx").on(
       table.tenantId,
       table.createdAt,
+    ),
+  ],
+);
+
+export const reconciledWebhookEvents = pgTable(
+  "reconciled_webhook_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: text("tenant_id").notNull(),
+    provider: text("provider").notNull(),
+    eventId: text("event_id").notNull(),
+    aggregateKey: text("aggregate_key").notNull(),
+    sequence: integer("sequence").notNull(),
+    payload: jsonb("payload").notNull(),
+    status: text("status").notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    availableAt: timestamp("available_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    lastError: text("last_error"),
+    processedAt: timestamp("processed_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    uniqueIndex("reconciled_webhooks_event_uidx").on(
+      table.tenantId,
+      table.provider,
+      table.eventId,
+    ),
+    index("reconciled_webhooks_ready_idx").on(
+      table.tenantId,
+      table.status,
+      table.availableAt,
+    ),
+    index("reconciled_webhooks_aggregate_idx").on(
+      table.tenantId,
+      table.provider,
+      table.aggregateKey,
+      table.sequence,
     ),
   ],
 );

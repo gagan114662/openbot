@@ -123,6 +123,14 @@ function ProductionEngineerPage() {
             label="Managed executions"
             value={`${factory.data?.jobs.length ?? 0} durable jobs`}
           />
+          <FactoryCard
+            label="Webhook reconciler"
+            value={
+              factory.data?.webhooks
+                ? `${factory.data.webhooks.pending} pending · ${factory.data.webhooks.processed} processed · ${factory.data.webhooks.dead} dead-letter`
+                : "Unavailable"
+            }
+          />
         </div>
       </PageSection>
       <PageSection title="Monitors">

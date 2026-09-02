@@ -52,6 +52,7 @@ import type { ProductionEngineerStore } from "./production-engineer/store";
 import type { ContextGraph } from "./software-factory/context-graph";
 import { createSoftwareFactoryRoutes } from "./software-factory/routes";
 import type { SoftwareFactoryStore } from "./software-factory/store";
+import type { WebhookReconciler } from "./webhooks/reconciler";
 
 export type AgentCallbackToolResolver = (input: {
   name: string;
@@ -244,6 +245,7 @@ export function createApp(
     store: SoftwareFactoryStore;
     contextGraph: ContextGraph;
     tenantId: string;
+    webhooks?: WebhookReconciler;
   },
 ) {
   const app = new Hono<{ Variables: AppVariables }>();
@@ -970,6 +972,7 @@ export function createApp(
         softwareFactory.contextGraph,
         softwareFactory.tenantId,
         requireUser,
+        softwareFactory.webhooks,
       ),
     );
   }

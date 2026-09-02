@@ -100,6 +100,7 @@ import {
   loadTenantPackage,
   synchronizeTenantPackage,
 } from "./tenant-package";
+import { createWebhookReconciler } from "./webhooks/reconciler";
 import { type Repeating, repeatAfterEach } from "./work/loop";
 import {
   createWorkQueue,
@@ -300,6 +301,9 @@ const softwareFactoryStore = createSoftwareFactoryStore(
   database,
   tenantPackage.tenantId,
 );
+const webhookReconciler = createWebhookReconciler(database, {
+  tenantId: tenantPackage.tenantId,
+});
 const productionEngineerStore = createProductionEngineerStore(
   database,
   process.env.PRODUCTION_ENGINEER_FIX_AUTOMATION === "true"
@@ -1298,6 +1302,7 @@ const app = createApp(
     store: softwareFactoryStore,
     contextGraph: factoryContextGraph,
     tenantId: tenantPackage.tenantId,
+    webhooks: webhookReconciler,
   },
 );
 

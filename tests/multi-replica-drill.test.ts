@@ -43,6 +43,9 @@ replicaTest(
           COPILOTKIT_LICENSE_TOKEN:
             process.env.COPILOTKIT_LICENSE_TOKEN ?? "ci-not-a-real-licence",
           OPENBOT_SINGLE_USER: "true",
+          // The drill probes the concrete loopback address below. Linux may resolve `localhost`
+          // to IPv6 only, so bind the disposable replicas to the exact address being tested.
+          SERVER_HOST: "127.0.0.1",
           // The full CI suite shares one PostgreSQL capped at 100 connections. The drill proves
           // replica behavior, not pool size, so each real child gets one connection and cannot be
           // starved by hundreds of concurrently registered test files.

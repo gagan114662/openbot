@@ -12,7 +12,9 @@ const app = createApp(
 describe("health endpoint", () => {
   test("reports the server as healthy", async () => {
     const response = await app.request("http://openbot.local/health");
-    const browserResponse = await app.request("http://openbot.local/api/health");
+    const browserResponse = await app.request(
+      "http://openbot.local/api/health",
+    );
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ status: "ok" });

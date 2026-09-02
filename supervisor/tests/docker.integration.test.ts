@@ -1,4 +1,11 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  describe,
+  expect,
+  test,
+} from "bun:test";
 import { existsSync } from "node:fs";
 import { namesFor } from "../src/names";
 
@@ -86,6 +93,31 @@ function withDocker(): DockerRuntime {
 
 /** Any small image that stays up when told to sleep. Nothing here tests what is inside it. */
 const IMAGE = process.env.SUPERVISOR_TEST_IMAGE ?? "debian:bookworm-slim";
+let pulledForThisSuite = false;
+
+beforeAll(async () => {
+  if (!runtime) return;
+  try {
+    await runtime.docker.getImage(IMAGE).inspect();
+  } catch {
+    const stream = await runtime.docker.pull(IMAGE);
+    await new Promise<void>((resolve, reject) => {
+      runtime.docker.modem.followProgress(stream, (error) =>
+        error ? reject(error) : resolve(),
+      );
+    });
+    pulledForThisSuite = true;
+  }
+});
+
+afterAll(async () => {
+  if (runtime && pulledForThisSuite) {
+    await runtime.docker
+      .getImage(IMAGE)
+      .remove()
+      .catch(() => undefined);
+  }
+});
 
 const BOT = "supervisortestbot";
 const result = namesFor(BOT);

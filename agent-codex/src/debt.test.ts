@@ -44,7 +44,10 @@ describe("artifact technical-debt gate", () => {
       expect(git(["config", "user.name", "OpenBot Test"])).toBe(0);
       await Bun.write(
         join(directory, "legacy.ts"),
-        Array.from({ length: 900 }, (_, index) => `export const value${index} = ${index};`).join("\n"),
+        Array.from(
+          { length: 900 },
+          (_, index) => `export const value${index} = ${index};`,
+        ).join("\n"),
       );
       expect(git(["add", "legacy.ts"])).toBe(0);
       expect(git(["commit", "-qm", "baseline"])).toBe(0);

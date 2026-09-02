@@ -3,7 +3,8 @@ import http from "node:http";
 
 const secret = process.env.PRODUCTION_ENGINEER_ALERTMANAGER_WEBHOOK_SECRET;
 const destination = process.env.OPENBOT_ALERT_WEBHOOK_URL;
-if (!secret || !destination) throw new Error("Alert relay secret and destination are required.");
+if (!secret || !destination)
+  throw new Error("Alert relay secret and destination are required.");
 
 http
   .createServer((request, response) => {
@@ -24,7 +25,9 @@ http
           },
           body,
         });
-        response.writeHead(upstream.status, { "content-type": "application/json" });
+        response.writeHead(upstream.status, {
+          "content-type": "application/json",
+        });
         response.end(await upstream.text());
       } catch (error) {
         response.writeHead(502, { "content-type": "application/json" });

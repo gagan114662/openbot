@@ -87,7 +87,9 @@ function RosterStep() {
                 <h3 className="line-clamp-1 text-base font-medium tracking-tight">
                   {a.name}
                 </h3>
-                <span className="text-xs text-muted-foreground">Available now</span>
+                <span className="text-xs text-muted-foreground">
+                  Available now
+                </span>
               </div>
             </div>
           );

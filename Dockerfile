@@ -111,6 +111,8 @@ COPY --from=deps /src/agent-computer/node_modules agent-computer/node_modules
 COPY server server
 COPY shared shared
 COPY examples examples
+COPY agent-codex/src agent-codex/src
+COPY agent-codex/package.json agent-codex/package.json
 COPY agent-computer/src agent-computer/src
 COPY agent-computer/package.json agent-computer/package.json
 

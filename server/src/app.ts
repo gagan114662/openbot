@@ -49,6 +49,9 @@ import type { PluginStore } from "./plugins/store";
 import { REFUSAL_MARKER } from "./plugins/tools";
 import { createProductionEngineerRoutes } from "./production-engineer/routes";
 import type { ProductionEngineerStore } from "./production-engineer/store";
+import type { ContextGraph } from "./software-factory/context-graph";
+import { createSoftwareFactoryRoutes } from "./software-factory/routes";
+import type { SoftwareFactoryStore } from "./software-factory/store";
 
 export type AgentCallbackToolResolver = (input: {
   name: string;
@@ -236,6 +239,12 @@ export function createApp(
    * need to distinguish a dead process from a temporarily unready one.
    */
   readinessProbe?: () => Promise<void>,
+  /** Benchmark routing, managed jobs, and the tenant-isolated organizational graph. */
+  softwareFactory?: {
+    store: SoftwareFactoryStore;
+    contextGraph: ContextGraph;
+    tenantId: string;
+  },
 ) {
   const app = new Hono<{ Variables: AppVariables }>();
 
@@ -951,6 +960,17 @@ export function createApp(
     app.route(
       "/api/production-engineer",
       createProductionEngineerRoutes(productionEngineerStore, requireUser),
+    );
+  }
+  if (softwareFactory) {
+    app.route(
+      "/api/software-factory",
+      createSoftwareFactoryRoutes(
+        softwareFactory.store,
+        softwareFactory.contextGraph,
+        softwareFactory.tenantId,
+        requireUser,
+      ),
     );
   }
 

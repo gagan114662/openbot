@@ -3,6 +3,7 @@ import {
   index,
   integer,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   uuid,
@@ -72,3 +73,90 @@ export const productionInvestigations = pgTable("production_investigations", {
   createdBy: text("created_by").notNull(),
   createdAt: createdAt(),
 });
+
+export const factoryContextNodes = pgTable(
+  "factory_context_nodes",
+  {
+    tenantId: text("tenant_id").notNull(),
+    key: text("key").notNull(),
+    kind: text("kind").notNull(),
+    title: text("title").notNull(),
+    value: text("value").notNull(),
+    sourceSystem: text("source_system").notNull(),
+    sourceUrl: text("source_url"),
+    checksum: text("checksum").notNull(),
+    refreshedAt: timestamp("refreshed_at", { withTimezone: true }).notNull(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.tenantId, table.key] }),
+    index("factory_context_nodes_tenant_kind_idx").on(
+      table.tenantId,
+      table.kind,
+    ),
+  ],
+);
+
+export const factoryContextEdges = pgTable(
+  "factory_context_edges",
+  {
+    tenantId: text("tenant_id").notNull(),
+    fromKey: text("from_key").notNull(),
+    toKey: text("to_key").notNull(),
+    relation: text("relation").notNull(),
+    evidence: jsonb("evidence").notNull().default({}),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.tenantId, table.fromKey, table.toKey, table.relation],
+    }),
+    index("factory_context_edges_from_idx").on(table.tenantId, table.fromKey),
+    index("factory_context_edges_to_idx").on(table.tenantId, table.toKey),
+  ],
+);
+
+export const factoryModelBenchmarks = pgTable(
+  "factory_model_benchmarks",
+  {
+    tenantId: text("tenant_id").notNull(),
+    model: text("model").notNull(),
+    task: text("task").notNull(),
+    qualityBasisPoints: integer("quality_basis_points").notNull(),
+    successfulOutcomes: integer("successful_outcomes").notNull().default(0),
+    attemptedOutcomes: integer("attempted_outcomes").notNull().default(0),
+    totalCostMicros: integer("total_cost_micros").notNull().default(0),
+    enabled: boolean("enabled").notNull().default(true),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.tenantId, table.model, table.task] }),
+  ],
+);
+
+export const factoryManagedJobs = pgTable(
+  "factory_managed_jobs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: text("tenant_id").notNull(),
+    kind: text("kind").notNull(),
+    tier: text("tier").notNull(),
+    objective: text("objective").notNull(),
+    trigger: text("trigger").notNull(),
+    status: text("status").notNull().default("queued"),
+    selectedModel: text("selected_model"),
+    outcome: jsonb("outcome").notNull().default({}),
+    costMicros: integer("cost_micros").notNull().default(0),
+    createdBy: text("created_by").notNull(),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    index("factory_managed_jobs_tenant_created_idx").on(
+      table.tenantId,
+      table.createdAt,
+    ),
+  ],
+);

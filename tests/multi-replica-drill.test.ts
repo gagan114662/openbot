@@ -20,6 +20,10 @@ test("the replica drill boots two real API processes and measures concurrent tra
     {
       env: {
         ...process.env,
+        // The drill boots the real composition root. CI intentionally has no deployment secrets,
+        // so give only these disposable child processes a syntactically valid, process-local key.
+        KEY_ENCRYPTION_KEY:
+          process.env.KEY_ENCRYPTION_KEY ?? Buffer.alloc(32).toString("base64"),
         OPENBOT_REPLICA_DRILL_PORTS: ports.join(","),
         OPENBOT_REPLICA_DRILL_REQUESTS: "24",
         OPENBOT_REPLICA_DRILL_CONCURRENCY: "6",

@@ -93,6 +93,8 @@ import { createRoutineStore } from "./routines/store";
 import { createIntentRouter } from "./routing/classify";
 import { createModelCompleter } from "./routing/model";
 import { installGracefulShutdown } from "./shutdown";
+import { createContextGraph } from "./software-factory/context-graph";
+import { createSoftwareFactoryStore } from "./software-factory/store";
 import {
   createPackageStatusReader,
   loadTenantPackage,
@@ -293,6 +295,11 @@ const retentionSweeps = startRetentionSweeps(
   pageFrameStore,
 );
 const analyticsStore = createAnalyticsStore(database);
+const factoryContextGraph = createContextGraph(database);
+const softwareFactoryStore = createSoftwareFactoryStore(
+  database,
+  tenantPackage.tenantId,
+);
 const productionEngineerStore = createProductionEngineerStore(
   database,
   process.env.PRODUCTION_ENGINEER_FIX_AUTOMATION === "true"
@@ -341,6 +348,7 @@ const productionEngineerStore = createProductionEngineerStore(
       scored: scoreEpisode(episode),
     });
   },
+  { contextGraph: factoryContextGraph, tenantId: tenantPackage.tenantId },
 );
 setRuntimeEpisodeRecorder(
   async ({ run, episode, scored, toolCalls, usage }) => {
@@ -1285,6 +1293,11 @@ const app = createApp(
   productionEngineerStore,
   async () => {
     await database.execute(sql`select 1`);
+  },
+  {
+    store: softwareFactoryStore,
+    contextGraph: factoryContextGraph,
+    tenantId: tenantPackage.tenantId,
   },
 );
 

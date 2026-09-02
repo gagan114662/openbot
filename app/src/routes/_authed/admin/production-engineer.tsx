@@ -12,6 +12,7 @@ import {
   applyProductionMonitorTuning,
   draftProductionFix,
   fetchProductionEngineer,
+  fetchSoftwareFactory,
   fixAutomationMessage,
   type ProductionEngineerDashboard,
   recordProductionInvestigation,
@@ -37,6 +38,11 @@ function ProductionEngineerPage() {
     // Draft fixes are accepted background jobs. Polling this small admin projection makes the
     // durable issue row—not an HTTP socket—the source of truth for running and terminal state.
     refetchInterval: 2_000,
+  });
+  const factory = useQuery({
+    queryKey: ["software-factory"],
+    queryFn: fetchSoftwareFactory,
+    refetchInterval: 5_000,
   });
   const refresh = () =>
     queryClient.invalidateQueries({ queryKey: ["production-engineer"] });
@@ -86,6 +92,39 @@ function ProductionEngineerPage() {
       title="Production Engineer"
       width="wide"
     >
+      <PageSection title="Software factory">
+        <p className="mb-3 text-muted-foreground text-sm">
+          Benchmark-routed managed agents use a judging orchestrator, bounded
+          workers, and tenant-isolated graph context. Outcome cost feeds the
+          next routing decision.
+        </p>
+        <div className="grid gap-3 md:grid-cols-3">
+          <FactoryCard
+            label="Execution tiers"
+            value={factory.data?.executionTiers.join(" → ") ?? "Loading…"}
+          />
+          <FactoryCard
+            label="Managed jobs"
+            value={factory.data?.managedJobKinds.join(", ") ?? "Loading…"}
+          />
+          <FactoryCard
+            label="Context graph"
+            value={
+              factory.data
+                ? `${factory.data.contextGraph.nodes} nodes · ${factory.data.contextGraph.edges} edges · ${factory.data.contextGraph.sourceSystems} systems`
+                : "Loading…"
+            }
+          />
+          <FactoryCard
+            label="Benchmarked routes"
+            value={`${factory.data?.benchmarks.length ?? 0} model/job configurations`}
+          />
+          <FactoryCard
+            label="Managed executions"
+            value={`${factory.data?.jobs.length ?? 0} durable jobs`}
+          />
+        </div>
+      </PageSection>
       <PageSection title="Monitors">
         {(dashboard.data?.monitors.length ?? 0) === 0 ? (
           <PageEmpty>No merged-change monitors exist yet.</PageEmpty>
@@ -332,6 +371,15 @@ function ProductionEngineerPage() {
         </div>
       </PageSection>
     </PageShell>
+  );
+}
+
+function FactoryCard({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-lg border border-border bg-card p-4">
+      <p className="font-medium text-sm">{label}</p>
+      <p className="mt-1 text-muted-foreground text-sm">{value}</p>
+    </div>
   );
 }
 

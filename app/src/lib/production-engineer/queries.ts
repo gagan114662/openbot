@@ -34,6 +34,15 @@ export function fixAutomationMessage(enabled: boolean): string {
 
 export type ProductionEngineerDashboard = {
   fixAutomationEnabled: boolean;
+  factory: {
+    executionTiers: Array<"chat" | "assisted" | "managed" | "autonomous">;
+    managedJobKinds: Array<
+      "pull-request-review" | "ci-repair" | "bug-triage" | "visual-delivery"
+    >;
+    modelRouting: string;
+    workerPattern: string;
+    contextGraph: { nodes: number; edges: number; sourceSystems: number };
+  };
   monitors: Array<{
     id: string;
     key: string;
@@ -66,6 +75,35 @@ export type ProductionEngineerDashboard = {
 export async function fetchProductionEngineer() {
   const response = await client("/api/production-engineer");
   return response.json() as Promise<ProductionEngineerDashboard>;
+}
+
+export type SoftwareFactoryDashboard = {
+  executionTiers: string[];
+  managedJobKinds: string[];
+  contextGraph: { nodes: number; edges: number; sourceSystems: number };
+  benchmarks: Array<{
+    model: string;
+    task: string;
+    quality: number;
+    successfulOutcomes: number;
+    attemptedOutcomes: number;
+    totalCostMicros: number;
+    enabled: boolean;
+  }>;
+  jobs: Array<{
+    id: string;
+    kind: string;
+    tier: string;
+    objective: string;
+    status: string;
+    selectedModel: string | null;
+    costMicros: number;
+  }>;
+};
+
+export async function fetchSoftwareFactory() {
+  const response = await client("/api/software-factory");
+  return response.json() as Promise<SoftwareFactoryDashboard>;
 }
 
 export async function tuneProductionMonitor(monitorId: string) {

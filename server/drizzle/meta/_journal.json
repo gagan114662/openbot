@@ -225,6 +225,20 @@
       "when": 1788312728404,
       "tag": "0031_conscious_darkstar",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1788363884271,
+      "tag": "0032_square_carnage",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1788364152987,
+      "tag": "0033_wakeful_tinkerer",
+      "breakpoints": true
     }
   ]
 }

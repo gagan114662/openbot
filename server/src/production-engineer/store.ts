@@ -9,6 +9,9 @@ import {
   productionIssues,
   productionMonitors,
 } from "../db/schema";
+import type { ContextGraph } from "../software-factory/context-graph";
+import { executionTiers } from "../software-factory/model-router";
+import { managedJobKinds } from "../software-factory/orchestrator";
 
 const fingerprint = (value: unknown) =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -106,6 +109,7 @@ export function createProductionEngineerStore(
     actorId: string;
     debt: ProductionDebtAssessment;
   }) => Promise<void>,
+  factory?: { contextGraph: ContextGraph; tenantId: string },
 ) {
   return {
     async prometheusMetrics() {
@@ -138,28 +142,40 @@ export function createProductionEngineerStore(
       ].join("\n");
     },
     async dashboard() {
-      const [monitors, issues, investigations] = await Promise.all([
-        database
-          .select()
-          .from(productionMonitors)
-          .where(inArray(productionMonitors.expression, emittedMonitorMetrics))
-          .orderBy(productionMonitors.title),
-        database
-          .select()
-          .from(productionIssues)
-          .orderBy(desc(productionIssues.updatedAt))
-          .limit(200),
-        database
-          .select()
-          .from(productionInvestigations)
-          .orderBy(desc(productionInvestigations.createdAt))
-          .limit(200),
-      ]);
+      const [monitors, issues, investigations, contextGraph] =
+        await Promise.all([
+          database
+            .select()
+            .from(productionMonitors)
+            .where(
+              inArray(productionMonitors.expression, emittedMonitorMetrics),
+            )
+            .orderBy(productionMonitors.title),
+          database
+            .select()
+            .from(productionIssues)
+            .orderBy(desc(productionIssues.updatedAt))
+            .limit(200),
+          database
+            .select()
+            .from(productionInvestigations)
+            .orderBy(desc(productionInvestigations.createdAt))
+            .limit(200),
+          factory?.contextGraph.stats(factory.tenantId) ??
+            Promise.resolve({ nodes: 0, edges: 0, sourceSystems: 0 }),
+        ]);
       return {
         monitors,
         issues,
         investigations,
         fixAutomationEnabled: Boolean(fixDrafter),
+        factory: {
+          executionTiers,
+          managedJobKinds,
+          modelRouting: "benchmark-pareto-cost-per-outcome",
+          workerPattern: "judging-orchestrator-bounded-workers",
+          contextGraph,
+        },
       };
     },
 

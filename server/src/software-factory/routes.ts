@@ -83,7 +83,12 @@ export function managedWorkflowStages(
       ];
     case "ci-repair":
       return [
-        stage("diagnose", "Reproduce and diagnose the failing CI checks"),
+        stage(
+          "diagnose",
+          "Reproduce and diagnose the failing CI checks",
+          [],
+          focusedFactoryChecks,
+        ),
         stage("repair", "Implement the smallest evidence-backed repair", [
           "diagnose",
         ]),

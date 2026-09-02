@@ -34,5 +34,13 @@ describe("managed workflow plans", () => {
       ]);
       expect(terminal.checks.every((check) => check.required)).toBe(true);
     }
+    if (kind === "ci-repair") {
+      expect(stages[0]?.checks.map((check) => check.id)).toEqual([
+        "diff-integrity",
+        "factory-focused-tests",
+        "server-typecheck",
+        "repository-lint",
+      ]);
+    }
   });
 });

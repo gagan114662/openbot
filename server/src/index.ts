@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import {
   CopilotKitIntelligence,
   IntelligenceAgentRunner,
@@ -402,24 +403,21 @@ if (shadowModel) {
 }
 const workflowRuntime = createWorkflowRuntime(database, tenantPackage.tenantId);
 const workflowWorkerId = processOwner("software-factory");
+const softwareFactoryRepository =
+  process.env.SOFTWARE_FACTORY_REPOSITORY ??
+  fileURLToPath(new URL("../..", import.meta.url));
 const workflowWorker = createWorkflowWorker({
   runtime: workflowRuntime,
   workerId: workflowWorkerId,
   executor: createRoutedWorkflowExecutor([
-    createCodexWorkflowExecutor(
-      process.env.SOFTWARE_FACTORY_REPOSITORY ?? process.cwd(),
-      {
-        groundContext: (keys) =>
-          factoryContextGraph.ground(tenantPackage.tenantId, keys),
-      },
-    ),
-    createClaudeWorkflowExecutor(
-      process.env.SOFTWARE_FACTORY_REPOSITORY ?? process.cwd(),
-      {
-        groundContext: (keys) =>
-          factoryContextGraph.ground(tenantPackage.tenantId, keys),
-      },
-    ),
+    createCodexWorkflowExecutor(softwareFactoryRepository, {
+      groundContext: (keys) =>
+        factoryContextGraph.ground(tenantPackage.tenantId, keys),
+    }),
+    createClaudeWorkflowExecutor(softwareFactoryRepository, {
+      groundContext: (keys) =>
+        factoryContextGraph.ground(tenantPackage.tenantId, keys),
+    }),
   ]),
   onTerminalFailure: async ({ runId, error }) => {
     const run = (await workflowRuntime.snapshot(runId))?.run;

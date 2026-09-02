@@ -316,20 +316,25 @@ export function createCodexWorkflowExecutor(
       );
       const [revision, diff] = await Promise.all([
         command(["git", "rev-parse", "HEAD"], cwd),
-        command(
-          [
-            "git",
-            "add",
-            "--intent-to-add",
-            "--all",
-            "--",
-            ".",
-            ":(exclude).openbot-evidence/**",
-          ],
-          cwd,
-        ).then(() =>
-          command(["git", "diff", "--binary", "--no-ext-diff"], cwd),
-        ),
+        command(["git", "reset", "--mixed", "HEAD", "--", "node_modules"], cwd)
+          .then(() =>
+            command(
+              [
+                "git",
+                "add",
+                "--intent-to-add",
+                "--all",
+                "--",
+                ".",
+                ":(exclude).openbot-evidence/**",
+                ":(exclude)node_modules",
+              ],
+              cwd,
+            ),
+          )
+          .then(() =>
+            command(["git", "diff", "--binary", "--no-ext-diff"], cwd),
+          ),
       ]);
       const checks = stageCheckSchema
         .array()
@@ -431,7 +436,8 @@ export function createCodexWorkflowExecutor(
               }),
             ),
           )}`,
-          "Before accepting, hash each reviewMaterialPath and require it to equal the supplied checksum. The durable workflow URI is committed only after your verdict.",
+          "Before accepting, run `shasum -a 256` on each exact reviewMaterialPath and require it to equal the supplied checksum. The durable workflow URI is committed only after your verdict.",
+          "Ignore the runtime-only node_modules symlink and .openbot-evidence directory when assessing the candidate diff.",
           "Inspect the actual uncommitted diff and run focused checks yourself. Reject on missing evidence, weakened tests, unverifiable behavior, or unmet objective.",
           "Return JSON with accepted, summary, and exact checks you independently ran.",
         ].join("\n"),

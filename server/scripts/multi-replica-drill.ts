@@ -44,7 +44,14 @@ const processes = ports.map((port) =>
 );
 
 async function waitFor(port: number): Promise<void> {
-  for (let attempt = 0; attempt < 60; attempt += 1) {
+  const process = processes[ports.indexOf(port)];
+  for (let attempt = 0; attempt < 120; attempt += 1) {
+    if (process.exitCode !== null) {
+      const stderr = await new Response(process.stderr).text();
+      throw new Error(
+        `Replica on port ${port} exited with ${process.exitCode}: ${stderr}`,
+      );
+    }
     try {
       const response = await fetch(`http://127.0.0.1:${port}/health`);
       if (response.ok) return;
@@ -53,7 +60,9 @@ async function waitFor(port: number): Promise<void> {
     }
     await Bun.sleep(250);
   }
-  throw new Error(`Replica on port ${port} did not become healthy`);
+  throw new Error(
+    `Replica on port ${port} did not become healthy within 30 seconds`,
+  );
 }
 
 try {

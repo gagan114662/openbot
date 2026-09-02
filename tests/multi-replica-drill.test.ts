@@ -33,4 +33,4 @@ test("the replica drill boots two real API processes and measures concurrent tra
   expect(result.stdout.toString()).toMatch(
     /Multi-replica drill passed: replicas=2 requests=24 failures=0 p95_ms=\d+(?:\.\d+)?/,
   );
-}, 30_000);
+}, 60_000);

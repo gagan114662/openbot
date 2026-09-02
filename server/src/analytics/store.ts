@@ -377,7 +377,13 @@ export function createAnalyticsStore(database: Database) {
     async recordBusinessOutcome(
       actorUserId: string,
       sessionId: string,
-      input: { name: string; success: boolean; revenueMicros: number },
+      input: {
+        name: string;
+        success: boolean;
+        revenueMicros: number;
+        humanMinutesSaved: number;
+        laborValueMicros: number;
+      },
     ) {
       const [session] = await database
         .select({ agentId: analyticsSessions.agentId })
@@ -396,7 +402,11 @@ export function createAnalyticsStore(database: Database) {
           userId: actorUserId,
           agentId: session.agentId,
           success: input.success,
-          properties: { revenueMicros: input.revenueMicros },
+          properties: {
+            revenueMicros: input.revenueMicros,
+            humanMinutesSaved: input.humanMinutesSaved,
+            laborValueMicros: input.laborValueMicros,
+          },
         })
         .returning();
       if (!event) throw new Error("Business outcome was not recorded.");
@@ -1064,7 +1074,33 @@ export function createAnalyticsStore(database: Database) {
         )
         .groupBy(analyticsSessions.model)
         .orderBy(desc(sql`count(*)`));
-      return { totals, models };
+      const [weeklyValue] = await database
+        .select({
+          humanMinutesSaved: sql<number>`coalesce(sum(case when ${analyticsEvents.properties}->>'humanMinutesSaved' ~ '^[0-9]+$' then (${analyticsEvents.properties}->>'humanMinutesSaved')::bigint else 0 end), 0)::float8`,
+          laborValueMicros: sql<number>`coalesce(sum(case when ${analyticsEvents.properties}->>'laborValueMicros' ~ '^[0-9]+$' then (${analyticsEvents.properties}->>'laborValueMicros')::bigint else 0 end), 0)::float8`,
+          revenueMicros: sql<number>`coalesce(sum(case when ${analyticsEvents.properties}->>'revenueMicros' ~ '^[0-9]+$' then (${analyticsEvents.properties}->>'revenueMicros')::bigint else 0 end), 0)::float8`,
+        })
+        .from(analyticsEvents)
+        .where(
+          and(
+            eq(analyticsEvents.eventType, "agent.business.outcome"),
+            gte(analyticsEvents.occurredAt, sql`date_trunc('week', now())`),
+          ),
+        );
+      const generatedValueMicros =
+        (weeklyValue?.laborValueMicros ?? 0) +
+        (weeklyValue?.revenueMicros ?? 0);
+      return {
+        totals,
+        models,
+        weeklyRoi: {
+          humanMinutesSaved: weeklyValue?.humanMinutesSaved ?? 0,
+          laborValueMicros: weeklyValue?.laborValueMicros ?? 0,
+          revenueMicros: weeklyValue?.revenueMicros ?? 0,
+          generatedValueMicros,
+          netValueMicros: generatedValueMicros - (totals?.costMicros ?? 0),
+        },
+      };
     },
 
     /** Operational surface for the evaluation assets that used to be schema-only. */

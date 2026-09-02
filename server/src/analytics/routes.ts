@@ -376,16 +376,27 @@ export function createAnalyticsRoutes(
       name?: unknown;
       success?: unknown;
       revenueMicros?: unknown;
+      humanMinutesSaved?: unknown;
+      laborValueMicros?: unknown;
     } | null;
     const name = boundedText(body?.name, 500);
     if (
       !name ||
       typeof body?.revenueMicros !== "number" ||
       !Number.isSafeInteger(body.revenueMicros) ||
-      body.revenueMicros < 0
+      body.revenueMicros < 0 ||
+      typeof body.humanMinutesSaved !== "number" ||
+      !Number.isSafeInteger(body.humanMinutesSaved) ||
+      body.humanMinutesSaved < 0 ||
+      typeof body.laborValueMicros !== "number" ||
+      !Number.isSafeInteger(body.laborValueMicros) ||
+      body.laborValueMicros < 0
     ) {
       return context.json(
-        { error: "Outcome name and non-negative revenue micros are required." },
+        {
+          error:
+            "Outcome name, revenue, saved minutes, and labor value must be non-negative integers.",
+        },
         400,
       );
     }
@@ -398,6 +409,8 @@ export function createAnalyticsRoutes(
             name,
             success: body.success !== false,
             revenueMicros: body.revenueMicros,
+            humanMinutesSaved: body.humanMinutesSaved,
+            laborValueMicros: body.laborValueMicros,
           },
         ),
       },

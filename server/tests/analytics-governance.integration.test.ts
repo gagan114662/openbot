@@ -98,6 +98,8 @@ describe("analytics governance operations", () => {
       name: `Qualified conversion ${marker}`,
       success: true,
       revenueMicros: 12_500_000,
+      humanMinutesSaved: 90,
+      laborValueMicros: 150_000_000,
     });
     const detail = await store.detail(sessionId);
     expect(detail?.reviews[0]).toMatchObject({

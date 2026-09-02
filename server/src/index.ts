@@ -92,6 +92,7 @@ import { createRoutineRunner } from "./routines/runner";
 import { createRoutineStore } from "./routines/store";
 import { createIntentRouter } from "./routing/classify";
 import { createModelCompleter } from "./routing/model";
+import { serverBinding } from "./server-binding";
 import { installGracefulShutdown } from "./shutdown";
 import {
   createPackageStatusReader,
@@ -1334,9 +1335,11 @@ const isProxiedStream = (data: SocketData): data is StreamData =>
 const asChannelSocket = (ws: { data: SocketData }) =>
   ws as unknown as ChannelSocket;
 
+const binding = serverBinding(process.env.SERVER_HOST, port);
+
 const server = serve<SocketData>({
   port,
-  hostname: process.env.SERVER_HOST ?? "localhost",
+  hostname: binding.hostname,
   async fetch(request, server) {
     const url = new URL(request.url);
     const streamBotId = streamPathBotId(url.pathname);
@@ -1466,4 +1469,4 @@ installGracefulShutdown({
   },
 });
 
-console.info(`OpenBot server listening on http://localhost:${port}`);
+console.info(`OpenBot server listening on ${binding.url}`);

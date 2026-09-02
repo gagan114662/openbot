@@ -323,6 +323,24 @@ const softwareFactoryStore = createSoftwareFactoryStore(
   database,
   tenantPackage.tenantId,
 );
+const gitText = (args: string[]) => {
+  const result = Bun.spawnSync(["git", ...args], {
+    cwd: process.env.SOFTWARE_FACTORY_REPOSITORY ?? process.cwd(),
+    stderr: "ignore",
+  });
+  return result.exitCode === 0 ? result.stdout.toString().trim() : "unknown";
+};
+const runtimeProvenance = {
+  revision:
+    process.env.OPENBOT_BUILD_SHA?.trim() || gitText(["rev-parse", "HEAD"]),
+  branch:
+    process.env.OPENBOT_BUILD_BRANCH?.trim() ||
+    gitText(["rev-parse", "--abbrev-ref", "HEAD"]),
+  dirty:
+    process.env.OPENBOT_BUILD_DIRTY === "true" ||
+    (process.env.OPENBOT_BUILD_DIRTY !== "false" &&
+      gitText(["status", "--porcelain"]) !== ""),
+};
 const shadowEvaluator = createShadowEvaluator(database, tenantPackage.tenantId);
 const verifiedValueStore = createVerifiedValueStore(
   database,
@@ -455,7 +473,8 @@ const webhookLoop = repeatAfterEach(async () => {
 setRuntimeEpisodeRecorder(
   async ({ run, episode, scored, toolCalls, usage }) => {
     const forwarded = run.forwardedProps as
-      { openbotRun?: unknown; openbotBotId?: unknown } | undefined;
+      | { openbotRun?: unknown; openbotBotId?: unknown }
+      | undefined;
     const signed = readRunAssertion(
       forwarded?.openbotRun,
       config.keyEncryptionKey,
@@ -1404,6 +1423,7 @@ const app = createApp(
     webhooks: webhookReconciler,
     shadows: shadowEvaluator,
     workflows: workflowRuntime,
+    provenance: runtimeProvenance,
   },
 );
 

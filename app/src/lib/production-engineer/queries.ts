@@ -78,6 +78,11 @@ export async function fetchProductionEngineer() {
 }
 
 export type SoftwareFactoryDashboard = {
+  provenance: null | {
+    revision: string;
+    branch: string;
+    dirty: boolean;
+  };
   executionTiers: string[];
   managedJobKinds: string[];
   contextGraph: { nodes: number; edges: number; sourceSystems: number };
@@ -170,6 +175,24 @@ export type SoftwareFactoryDashboard = {
 export async function fetchSoftwareFactory() {
   const response = await client("/api/software-factory");
   return response.json() as Promise<SoftwareFactoryDashboard>;
+}
+
+export async function createManagedJob(input: {
+  kind: "pull-request-review" | "ci-repair" | "bug-triage" | "visual-delivery";
+  objective: string;
+  maximumAttempts: number;
+  concurrencyLimit: number;
+}) {
+  const response = await client("/api/software-factory/jobs", {
+    method: "POST",
+    body: {
+      ...input,
+      tier: "managed",
+      trigger: "operator-ui",
+      minimumQuality: 0.8,
+    },
+  });
+  return response.json();
 }
 
 export async function controlWorkflow(input: {

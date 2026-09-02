@@ -78,7 +78,9 @@ async function recordPersonEvent(
   auditStore: AuditStore | undefined,
   context: { var: AppVariables },
   eventType:
-    "person.role_changed" | "person.access_revoked" | "person.access_restored",
+    | "person.role_changed"
+    | "person.access_revoked"
+    | "person.access_restored",
   person: { id: string; email: string },
   payload: Record<string, unknown>,
 ) {
@@ -248,6 +250,11 @@ export function createApp(
     webhooks?: WebhookReconciler;
     shadows?: ShadowEvaluator;
     workflows?: WorkflowRuntime;
+    provenance?: {
+      revision: string;
+      branch: string;
+      dirty: boolean;
+    };
   },
 ) {
   const app = new Hono<{ Variables: AppVariables }>();
@@ -381,7 +388,8 @@ export function createApp(
     }
 
     const body = (await context.req.json().catch(() => undefined)) as
-      { step?: unknown; completed?: unknown } | undefined;
+      | { step?: unknown; completed?: unknown }
+      | undefined;
 
     if (body?.completed === true) {
       await onboardingStore.complete(context.var.actor.id);
@@ -985,6 +993,7 @@ export function createApp(
         softwareFactory.webhooks,
         softwareFactory.shadows,
         softwareFactory.workflows,
+        softwareFactory.provenance,
       ),
     );
   }

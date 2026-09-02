@@ -28,6 +28,7 @@ export function createSoftwareFactoryRoutes(
   webhooks?: WebhookReconciler,
   shadows?: ShadowEvaluator,
   workflows?: WorkflowRuntime,
+  provenance?: { revision: string; branch: string; dirty: boolean },
 ) {
   const routes = new Hono<{ Variables: AppVariables }>();
   routes.use("*", requireUser, async (context, next) => {
@@ -45,6 +46,7 @@ export function createSoftwareFactoryRoutes(
       shadowTraffic: shadows ? await shadows.dashboard() : null,
       workflows: workflows ? await workflows.list() : [],
       contextCapsules: workflows ? await workflows.listContextCapsules() : [],
+      provenance: provenance ?? null,
     }),
   );
   routes.post("/benchmarks", async (context) => {

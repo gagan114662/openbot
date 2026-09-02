@@ -11,6 +11,7 @@ import { Input } from "@/components/ui/input";
 import {
   applyProductionMonitorTuning,
   controlWorkflow,
+  createManagedJob,
   draftProductionFix,
   fetchProductionEngineer,
   fetchSoftwareFactory,
@@ -33,6 +34,10 @@ function ProductionEngineerPage() {
   const [investigationOutcome, setInvestigationOutcome] = useState("");
   const [investigationApproved, setInvestigationApproved] = useState(false);
   const [workflowSteering, setWorkflowSteering] = useState("");
+  const [jobObjective, setJobObjective] = useState("");
+  const [jobKind, setJobKind] = useState<
+    "pull-request-review" | "ci-repair" | "bug-triage" | "visual-delivery"
+  >("pull-request-review");
   const queryClient = useQueryClient();
   const dashboard = useQuery({
     queryKey: ["production-engineer"],
@@ -50,6 +55,13 @@ function ProductionEngineerPage() {
     mutationFn: controlWorkflow,
     onSuccess: () => {
       setWorkflowSteering("");
+      return queryClient.invalidateQueries({ queryKey: ["software-factory"] });
+    },
+  });
+  const createJob = useMutation({
+    mutationFn: createManagedJob,
+    onSuccess: () => {
+      setJobObjective("");
       return queryClient.invalidateQueries({ queryKey: ["software-factory"] });
     },
   });
@@ -102,6 +114,17 @@ function ProductionEngineerPage() {
       width="wide"
     >
       <PageSection title="Software factory">
+        <div
+          className="mb-4 rounded-md border p-3 text-sm"
+          data-testid="build-provenance"
+        >
+          <p className="font-medium">Running build provenance</p>
+          <p className="font-mono text-xs text-muted-foreground">
+            {factory.data?.provenance
+              ? `${factory.data.provenance.branch} @ ${factory.data.provenance.revision} · ${factory.data.provenance.dirty ? "DIRTY" : "CLEAN"}`
+              : "Unavailable"}
+          </p>
+        </div>
         <p className="mb-3 text-muted-foreground text-sm">
           Benchmark-routed managed agents use a judging orchestrator, bounded
           workers, and tenant-isolated graph context. Outcome cost feeds the
@@ -149,6 +172,52 @@ function ProductionEngineerPage() {
             }
           />
         </div>
+      </PageSection>
+      <PageSection title="Launch a managed workflow">
+        <p className="mb-3 text-muted-foreground text-sm">
+          This creates a durable production run. A separate Codex worker
+          executes it, a fresh reviewer validates revision-bound artifacts, and
+          completion waits for human approval.
+        </p>
+        <div className="grid gap-2 md:grid-cols-[220px_1fr_auto]">
+          <select
+            aria-label="Managed job kind"
+            className="h-9 rounded-md border bg-background px-3 text-sm"
+            value={jobKind}
+            onChange={(event) =>
+              setJobKind(event.target.value as typeof jobKind)
+            }
+          >
+            <option value="pull-request-review">Pull request review</option>
+            <option value="ci-repair">CI repair</option>
+            <option value="bug-triage">Bug triage</option>
+            <option value="visual-delivery">Visual delivery</option>
+          </select>
+          <Input
+            aria-label="Managed workflow objective"
+            placeholder="Describe one bounded, verifiable objective"
+            value={jobObjective}
+            onChange={(event) => setJobObjective(event.target.value)}
+          />
+          <Button
+            disabled={!jobObjective.trim() || createJob.isPending}
+            onClick={() =>
+              createJob.mutate({
+                kind: jobKind,
+                objective: jobObjective,
+                maximumAttempts: 3,
+                concurrencyLimit: 1,
+              })
+            }
+          >
+            Launch managed run
+          </Button>
+        </div>
+        {createJob.isError ? (
+          <p className="mt-2 text-destructive text-sm" role="alert">
+            {createJob.error.message}
+          </p>
+        ) : null}
       </PageSection>
       <PageSection title="Inspectable workflow runs">
         {(factory.data?.workflows.length ?? 0) === 0 ? (

@@ -32,6 +32,7 @@ import {
   analyticsSpans,
   analyticsTopics,
   auditEvents,
+  verifiedValueOutcomes,
 } from "../db/schema";
 import {
   type AnalyticsPrivacyMode,
@@ -233,7 +234,7 @@ function behavioralClusters(rows: Array<{ id: string; tokens: string[] }>) {
   }));
 }
 
-export function createAnalyticsStore(database: Database) {
+export function createAnalyticsStore(database: Database, tenantId?: string) {
   let llmJudge: ((prompt: string) => Promise<string>) | undefined;
   return {
     setLlmJudge(judge: (prompt: string) => Promise<string>) {
@@ -1074,19 +1075,43 @@ export function createAnalyticsStore(database: Database) {
         )
         .groupBy(analyticsSessions.model)
         .orderBy(desc(sql`count(*)`));
+      // CFO-facing value comes only from signed source evidence joined to a human-approved
+      // workflow. Administrator annotations remain available elsewhere but cannot inflate ROI.
       const [weeklyValue] = await database
         .select({
-          humanMinutesSaved: sql<number>`coalesce(sum(case when ${analyticsEvents.properties}->>'humanMinutesSaved' ~ '^[0-9]+$' then (${analyticsEvents.properties}->>'humanMinutesSaved')::bigint else 0 end), 0)::float8`,
-          laborValueMicros: sql<number>`coalesce(sum(case when ${analyticsEvents.properties}->>'laborValueMicros' ~ '^[0-9]+$' then (${analyticsEvents.properties}->>'laborValueMicros')::bigint else 0 end), 0)::float8`,
-          revenueMicros: sql<number>`coalesce(sum(case when ${analyticsEvents.properties}->>'revenueMicros' ~ '^[0-9]+$' then (${analyticsEvents.properties}->>'revenueMicros')::bigint else 0 end), 0)::float8`,
+          outcomes: sql<number>`count(*)::int`,
+          humanMinutesSaved: sql<number>`coalesce(sum(${verifiedValueOutcomes.humanMinutesSaved}), 0)::float8`,
+          laborValueMicros: sql<number>`coalesce(sum(${verifiedValueOutcomes.laborValueMicros}), 0)::float8`,
+          revenueMicros: sql<number>`coalesce(sum(${verifiedValueOutcomes.revenueMicros}), 0)::float8`,
         })
-        .from(analyticsEvents)
+        .from(verifiedValueOutcomes)
         .where(
           and(
-            eq(analyticsEvents.eventType, "agent.business.outcome"),
-            gte(analyticsEvents.occurredAt, sql`date_trunc('week', now())`),
+            gte(
+              verifiedValueOutcomes.createdAt,
+              sql`date_trunc('week', now())`,
+            ),
+            tenantId ? eq(verifiedValueOutcomes.tenantId, tenantId) : undefined,
           ),
         );
+      const recentValueEvidence = await database
+        .select({
+          id: verifiedValueOutcomes.id,
+          workflowRunId: verifiedValueOutcomes.workflowRunId,
+          source: verifiedValueOutcomes.source,
+          evidenceRef: verifiedValueOutcomes.evidenceRef,
+          evidenceChecksum: verifiedValueOutcomes.evidenceChecksum,
+          humanMinutesSaved: verifiedValueOutcomes.humanMinutesSaved,
+          laborValueMicros: verifiedValueOutcomes.laborValueMicros,
+          revenueMicros: verifiedValueOutcomes.revenueMicros,
+          createdAt: verifiedValueOutcomes.createdAt,
+        })
+        .from(verifiedValueOutcomes)
+        .where(
+          tenantId ? eq(verifiedValueOutcomes.tenantId, tenantId) : undefined,
+        )
+        .orderBy(desc(verifiedValueOutcomes.createdAt))
+        .limit(20);
       const generatedValueMicros =
         (weeklyValue?.laborValueMicros ?? 0) +
         (weeklyValue?.revenueMicros ?? 0);
@@ -1094,11 +1119,13 @@ export function createAnalyticsStore(database: Database) {
         totals,
         models,
         weeklyRoi: {
+          outcomes: weeklyValue?.outcomes ?? 0,
           humanMinutesSaved: weeklyValue?.humanMinutesSaved ?? 0,
           laborValueMicros: weeklyValue?.laborValueMicros ?? 0,
           revenueMicros: weeklyValue?.revenueMicros ?? 0,
           generatedValueMicros,
           netValueMicros: generatedValueMicros - (totals?.costMicros ?? 0),
+          evidence: recentValueEvidence,
         },
       };
     },

@@ -104,6 +104,7 @@ import { createShadowEvaluator } from "./software-factory/shadow-evaluator";
 import { createInferenceShadowRecorder } from "./software-factory/inference-shadow";
 import { createWorkflowRuntime } from "./software-factory/workflow-runtime";
 import { createWorkflowWorker } from "./software-factory/workflow-worker";
+import { createVerifiedValueStore } from "./software-factory/verified-value";
 import {
   createPackageStatusReader,
   loadTenantPackage,
@@ -304,7 +305,7 @@ const retentionSweeps = startRetentionSweeps(
   config.auditRetentionDays,
   pageFrameStore,
 );
-const analyticsStore = createAnalyticsStore(database);
+const analyticsStore = createAnalyticsStore(database, tenantPackage.tenantId);
 setContextCapsuleRecorder(async ({ runId, threadId, checksum, messages }) => {
   await database
     .insert(contextCompactionArtifacts)
@@ -323,6 +324,10 @@ const softwareFactoryStore = createSoftwareFactoryStore(
   tenantPackage.tenantId,
 );
 const shadowEvaluator = createShadowEvaluator(database, tenantPackage.tenantId);
+const verifiedValueStore = createVerifiedValueStore(
+  database,
+  tenantPackage.tenantId,
+);
 const shadowModel = process.env.SHADOW_MODEL?.trim();
 if (shadowModel) {
   setInferenceShadowRecorder(
@@ -419,7 +424,11 @@ const webhookLoop = repeatAfterEach(async () => {
   const event = await webhookReconciler.claim(webhookWorkerId);
   if (!event) return;
   try {
-    await processProductionWebhook(productionEngineerStore, event);
+    await processProductionWebhook(
+      productionEngineerStore,
+      event,
+      verifiedValueStore,
+    );
     await webhookReconciler.complete(event.id, webhookWorkerId);
   } catch (error) {
     await webhookReconciler.fail(

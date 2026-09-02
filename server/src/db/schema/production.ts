@@ -1,4 +1,5 @@
 import {
+  bigint,
   boolean,
   index,
   integer,
@@ -351,5 +352,53 @@ export const contextCompactionArtifacts = pgTable(
       table.threadId,
       table.createdAt,
     ),
+  ],
+);
+
+export const verifiedValueOutcomes = pgTable(
+  "verified_value_outcomes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: text("tenant_id").notNull(),
+    workflowRunId: uuid("workflow_run_id")
+      .notNull()
+      .references(() => factoryWorkflowRuns.id, { onDelete: "cascade" }),
+    source: text("source").notNull(),
+    sourceEventId: text("source_event_id").notNull(),
+    evidenceRef: text("evidence_ref").notNull(),
+    evidenceChecksum: text("evidence_checksum").notNull(),
+    baselineStartedAt: timestamp("baseline_started_at", {
+      withTimezone: true,
+    }).notNull(),
+    baselineCompletedAt: timestamp("baseline_completed_at", {
+      withTimezone: true,
+    }).notNull(),
+    actualStartedAt: timestamp("actual_started_at", {
+      withTimezone: true,
+    }).notNull(),
+    actualCompletedAt: timestamp("actual_completed_at", {
+      withTimezone: true,
+    }).notNull(),
+    humanMinutesSaved: integer("human_minutes_saved").notNull(),
+    hourlyLaborMicros: bigint("hourly_labor_micros", {
+      mode: "number",
+    }).notNull(),
+    laborValueMicros: bigint("labor_value_micros", {
+      mode: "number",
+    }).notNull(),
+    revenueMicros: bigint("revenue_micros", { mode: "number" }).notNull(),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("verified_value_source_event_uidx").on(
+      table.tenantId,
+      table.source,
+      table.sourceEventId,
+    ),
+    uniqueIndex("verified_value_workflow_uidx").on(
+      table.tenantId,
+      table.workflowRunId,
+    ),
+    index("verified_value_created_idx").on(table.tenantId, table.createdAt),
   ],
 );

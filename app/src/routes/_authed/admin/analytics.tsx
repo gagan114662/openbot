@@ -295,7 +295,13 @@ export function AgentAnalyticsPage() {
         )}
       </PageSection>
 
-      <PageSection title="Customer ROI this week">
+      <PageSection title="Verified customer ROI this week">
+        <p className="mb-3 text-sm text-muted-foreground">
+          Includes only signed source events tied to completed, human-approved
+          workflows. Saved time is computed from source baseline timestamps
+          versus the workflow runtime; administrator-entered outcome annotations
+          are excluded.
+        </p>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <Metric
             label="Hours saved"
@@ -318,6 +324,24 @@ export function AgentAnalyticsPage() {
             value={`$${((weeklyRoi?.netValueMicros ?? 0) / 1_000_000).toFixed(2)}`}
           />
         </div>
+        <AnalyticsTable
+          empty="No signed value evidence has been received for an approved workflow."
+          headers={[
+            "Source",
+            "Workflow",
+            "Saved",
+            "Value",
+            "Evidence checksum",
+          ]}
+          loading={overview.isPending}
+          rows={(weeklyRoi?.evidence ?? []).map((item) => [
+            item.source,
+            item.workflowRunId,
+            `${item.humanMinutesSaved} min`,
+            `$${((item.laborValueMicros + item.revenueMicros) / 1_000_000).toFixed(2)}`,
+            item.evidenceChecksum.slice(0, 16),
+          ])}
+        />
       </PageSection>
 
       <PageSection title="Model comparison">

@@ -25,11 +25,23 @@ export type AnalyticsOverview = {
     costMicros: number;
   }>;
   weeklyRoi: {
+    outcomes: number;
     humanMinutesSaved: number;
     laborValueMicros: number;
     revenueMicros: number;
     generatedValueMicros: number;
     netValueMicros: number;
+    evidence: Array<{
+      id: string;
+      workflowRunId: string;
+      source: string;
+      evidenceRef: string;
+      evidenceChecksum: string;
+      humanMinutesSaved: number;
+      laborValueMicros: number;
+      revenueMicros: number;
+      createdAt: string;
+    }>;
   };
 };
 

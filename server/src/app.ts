@@ -968,6 +968,8 @@ export function createApp(
         alertmanagerWebhookSecret:
           process.env.PRODUCTION_ENGINEER_ALERTMANAGER_WEBHOOK_SECRET,
         githubToken: process.env.GITHUB_TOKEN,
+        valueWebhookSecret:
+          process.env.PRODUCTION_ENGINEER_VALUE_WEBHOOK_SECRET,
         reconciler: softwareFactory?.webhooks,
       }),
     );

@@ -4,6 +4,7 @@ import { Hono } from "hono";
 import type { AppVariables } from "../auth/guards";
 import { requireAdmin } from "../auth/guards";
 import type { WebhookReconciler } from "../webhooks/reconciler";
+import type { VerifiedValueStore } from "../software-factory/verified-value";
 import type { ProductionEngineerStore } from "./store";
 
 const text = (value: unknown, maximum = 2_000) =>
@@ -20,6 +21,7 @@ export function createProductionEngineerRoutes(
     githubToken?: string;
     fetch?: typeof fetch;
     reconciler?: WebhookReconciler;
+    valueWebhookSecret?: string;
   } = {
     githubWebhookSecret: process.env.PRODUCTION_ENGINEER_GITHUB_WEBHOOK_SECRET,
     alertmanagerWebhookSecret:
@@ -28,6 +30,41 @@ export function createProductionEngineerRoutes(
   },
 ) {
   const routes = new Hono<{ Variables: AppVariables }>();
+  routes.post("/value-webhook", async (context) => {
+    if (!options.valueWebhookSecret || !options.reconciler)
+      return context.notFound();
+    const raw = await context.req.text();
+    const offered = context.req.header("x-openbot-signature-256") ?? "";
+    const expected = `sha256=${createHmac("sha256", options.valueWebhookSecret).update(raw).digest("hex")}`;
+    const offeredBytes = Buffer.from(offered);
+    const expectedBytes = Buffer.from(expected);
+    if (
+      offeredBytes.length !== expectedBytes.length ||
+      !timingSafeEqual(offeredBytes, expectedBytes)
+    )
+      return context.json({ error: "Webhook signature is invalid." }, 401);
+    const body = JSON.parse(raw) as Record<string, unknown>;
+    const eventId = text(body.eventId, 500);
+    const workflowRunId = text(body.workflowRunId, 500);
+    const source = text(body.source, 200);
+    if (!eventId || !workflowRunId || !source)
+      return context.json(
+        { error: "Event, workflow, and source are required." },
+        400,
+      );
+    const event = await options.reconciler.ingest({
+      provider: `verified-value:${source}`,
+      eventId,
+      aggregateKey: workflowRunId,
+      sequence: 1,
+      payload: {
+        kind: "verified-value",
+        actorId: `value-source:${source}`,
+        input: { ...body, sourceEventId: eventId },
+      },
+    });
+    return context.json({ accepted: true, event }, 202);
+  });
   routes.get("/metrics", async (context) =>
     context.text(await store.prometheusMetrics(), 200, {
       "content-type": "text/plain; version=0.0.4; charset=utf-8",
@@ -365,6 +402,7 @@ export function createProductionEngineerRoutes(
 export async function processProductionWebhook(
   store: ProductionEngineerStore,
   event: { payload: unknown },
+  verifiedValues?: VerifiedValueStore,
 ) {
   const payload = event.payload as {
     kind?: unknown;
@@ -389,5 +427,12 @@ export async function processProductionWebhook(
         ProductionEngineerStore["monitorsFromMerge"]
       >[1],
     );
+  if (payload.kind === "verified-value") {
+    if (!verifiedValues)
+      throw new Error("Verified value processor is not configured.");
+    return verifiedValues.record(
+      payload.input as Parameters<VerifiedValueStore["record"]>[0],
+    );
+  }
   throw new Error("Reconciled production webhook kind is unsupported.");
 }

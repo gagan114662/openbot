@@ -281,6 +281,13 @@
       "when": 1788367880217,
       "tag": "0039_sour_kate_bishop",
       "breakpoints": true
+    },
+    {
+      "idx": 40,
+      "version": "7",
+      "when": 1788368963435,
+      "tag": "0040_simple_steve_rogers",
+      "breakpoints": true
     }
   ]
 }

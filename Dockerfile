@@ -58,10 +58,11 @@ RUN cd agent-computer && bun install --frozen-lockfile
 # biome and the test tooling are a gigabyte that nothing in a running container imports.
 RUN mkdir -p /prod && cp package.json bun.lock /prod/ \
   && cp -r app/package.json /prod/app-package.json \
-  && cd /prod && mkdir -p app server worker \
+  && cd /prod && mkdir -p app server worker agent-codex \
   && cp /src/app/package.json app/package.json \
   && cp /src/server/package.json server/package.json \
   && cp /src/worker/package.json worker/package.json \
+  && cp /src/agent-codex/package.json agent-codex/package.json \
   && bun install --frozen-lockfile --production
 
 

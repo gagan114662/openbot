@@ -4,13 +4,18 @@ import { spawn } from "bun";
 import { artifactChecksum } from "./workflow-runtime";
 import type { WorkflowStageExecutor } from "./workflow-worker";
 
-async function command(args: string[], cwd: string) {
+async function command(args: string[], cwd: string, signal?: AbortSignal) {
   const child = spawn(args, { cwd, stdout: "pipe", stderr: "pipe" });
+  const abort = () => child.kill("SIGTERM");
+  signal?.addEventListener("abort", abort, { once: true });
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),
     child.exited,
   ]);
+  signal?.removeEventListener("abort", abort);
+  if (signal?.aborted)
+    throw new Error(String(signal.reason ?? "Codex stage was interrupted."));
   if (exitCode !== 0)
     throw new Error(
       `${args[0]} failed (${exitCode}): ${(stderr || stdout).slice(-4_000)}`,
@@ -65,6 +70,7 @@ export function createCodexWorkflowExecutor(
     schema: Record<string, unknown>,
     prompt: string,
     sandbox: "read-only" | "workspace-write",
+    signal: AbortSignal,
   ) {
     const evidence = join(cwd, ".openbot-evidence");
     await mkdir(evidence, { recursive: true });
@@ -86,6 +92,7 @@ export function createCodexWorkflowExecutor(
         prompt,
       ],
       cwd,
+      signal,
     );
     return JSON.parse(await readFile(outputPath, "utf8")) as Record<
       string,
@@ -94,7 +101,7 @@ export function createCodexWorkflowExecutor(
   }
 
   return {
-    async execute({ runId, stage, snapshot, sessionId }) {
+    async execute({ runId, stage, snapshot, sessionId, signal }) {
       const cwd = await workspace(runId);
       const prior = snapshot.artifacts.map((artifact) => ({
         stageId: artifact.stageId,
@@ -115,6 +122,7 @@ export function createCodexWorkflowExecutor(
           "Return a concise JSON summary and the exact checks run. Human approval is required later.",
         ].join("\n"),
         "workspace-write",
+        signal,
       );
       const [revision, diff] = await Promise.all([
         command(["git", "rev-parse", "HEAD"], cwd),
@@ -144,7 +152,7 @@ export function createCodexWorkflowExecutor(
       };
     },
 
-    async review({ runId, stage, candidate, sessionId }) {
+    async review({ runId, stage, candidate, sessionId, signal }) {
       const cwd = await workspace(runId);
       const result = await codexJson(
         cwd,
@@ -159,6 +167,7 @@ export function createCodexWorkflowExecutor(
           "Return JSON with accepted, summary, and exact checks you independently ran.",
         ].join("\n"),
         "read-only",
+        signal,
       );
       return {
         accepted: result.accepted === true,

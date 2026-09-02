@@ -263,4 +263,154 @@ describe("durable workflow runtime", () => {
     expect(finished?.artifacts[0]?.content).toBe("candidate two");
     await worker.drain();
   });
+
+  test("a SIGKILLed worker is recovered from its durable lease with the attempt preserved", async () => {
+    const queued = await store.queueJob("admin", {
+      kind: "ci-repair",
+      tier: "managed",
+      objective: "survive a dead worker",
+      trigger: "crash-proof",
+      minimumQuality: 0.8,
+    });
+    const run = await runtime.create({
+      jobId: queued.job.id,
+      maximumAttempts: 2,
+      concurrencyLimit: 1,
+      stages: [
+        {
+          id: "crash-stage",
+          objective: "resume after process death",
+          requiredContext: [],
+          dependsOn: [],
+        },
+      ],
+    });
+    const child = Bun.spawn(
+      ["bun", "server/tests/fixtures/workflow-crash-worker.ts"],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          WORKFLOW_TEST_TENANT: tenantId,
+          WORKFLOW_TEST_RUN: run.id,
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const reader = child.stdout.getReader();
+    const first = await reader.read();
+    expect(new TextDecoder().decode(first.value)).toContain("STAGE_STARTED");
+    child.kill(9);
+    expect(await child.exited).not.toBe(0);
+    await Bun.sleep(150);
+
+    expect((await runtime.claim("replacement-worker", 1_000))?.id).toBe(run.id);
+    const recovered = await runtime.snapshot(run.id);
+    expect(recovered?.stages[0]).toMatchObject({
+      status: "pending",
+      attempts: 1,
+      lastError: "Worker lease expired before a result was committed.",
+    });
+    expect(
+      recovered?.events.map((event) => [
+        event.entity,
+        event.fromStatus,
+        event.toStatus,
+      ]),
+    ).toContainEqual(["stage", "running", "pending"]);
+  });
+
+  test("pause and steering interrupt active work, then resume from the durable stage", async () => {
+    const queued = await store.queueJob("admin", {
+      kind: "ci-repair",
+      tier: "managed",
+      objective: "honor live operator control",
+      trigger: "operator-proof",
+      minimumQuality: 0.8,
+    });
+    const run = await runtime.create({
+      jobId: queued.job.id,
+      maximumAttempts: 3,
+      concurrencyLimit: 1,
+      stages: [
+        {
+          id: "controlled",
+          objective: "obey control",
+          requiredContext: [],
+          dependsOn: [],
+        },
+      ],
+    });
+    let executions = 0;
+    const worker = createWorkflowWorker({
+      runtime,
+      workerId: "controlled-worker",
+      executor: {
+        async execute({ sessionId, signal }) {
+          executions += 1;
+          if (executions < 3)
+            await new Promise<never>((_resolve, reject) =>
+              signal.addEventListener(
+                "abort",
+                () => reject(new Error(String(signal.reason))),
+                {
+                  once: true,
+                },
+              ),
+            );
+          const content = "control-aware result";
+          return {
+            sessionId,
+            summary: content,
+            artifacts: [
+              {
+                kind: "control-proof",
+                uri: `workflow://${run.id}/control`,
+                content,
+                checksum: artifactChecksum(content),
+                revision: "deadbeef",
+                producerSessionId: sessionId,
+              },
+            ],
+          };
+        },
+        async review() {
+          return {
+            accepted: true,
+            summary: "fresh review",
+            checks: ["control history"],
+          };
+        },
+      },
+    });
+
+    const first = worker.runOnce();
+    while ((await runtime.snapshot(run.id))?.stages[0]?.status !== "running")
+      await Bun.sleep(10);
+    await runtime.requestPause(run.id);
+    await first;
+    await runtime.claim("controlled-worker");
+    expect((await runtime.snapshot(run.id))?.run.status).toBe("paused");
+    expect((await runtime.snapshot(run.id))?.stages[0]?.attempts).toBe(1);
+
+    await runtime.resume(run.id);
+    const second = worker.runOnce();
+    while ((await runtime.snapshot(run.id))?.stages[0]?.attempts !== 2)
+      await Bun.sleep(10);
+    await runtime.steer(run.id, "human-admin", "also run the regression test");
+    await second;
+    expect((await runtime.snapshot(run.id))?.stages[0]).toMatchObject({
+      status: "pending",
+      attempts: 2,
+      lastError: "Restarted to apply new operator steering.",
+    });
+
+    await worker.runOnce();
+    expect((await runtime.snapshot(run.id))?.run.status).toBe(
+      "awaiting_approval",
+    );
+    expect((await runtime.snapshot(run.id))?.stages[0]?.attempts).toBe(3);
+    await worker.drain();
+  });
 });

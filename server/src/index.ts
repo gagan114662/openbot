@@ -355,6 +355,20 @@ const workflowWorker = createWorkflowWorker({
   executor: createCodexWorkflowExecutor(
     process.env.SOFTWARE_FACTORY_REPOSITORY ?? process.cwd(),
   ),
+  onTerminalFailure: async ({ runId, error }) => {
+    const run = (await workflowRuntime.snapshot(runId))?.run;
+    if (!run) return;
+    await softwareFactoryStore.completeJob(run.jobId, {
+      success: false,
+      costMicros: 0,
+      outcome: {
+        workflowRunId: run.id,
+        verified: true,
+        error: error.slice(0, 2_000),
+        costBasis: "codex-subscription",
+      },
+    });
+  },
 });
 const workflowLoop =
   process.env.SOFTWARE_FACTORY_WORKER === "false"

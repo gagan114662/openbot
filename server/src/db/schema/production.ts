@@ -330,6 +330,28 @@ export const factoryWorkflowArtifacts = pgTable(
   ],
 );
 
+export const factoryWorkflowEvents = pgTable(
+  "factory_workflow_events",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => factoryWorkflowRuns.id, { onDelete: "cascade" }),
+    stageId: text("stage_id"),
+    entity: text("entity").notNull(),
+    fromStatus: text("from_status"),
+    toStatus: text("to_status").notNull(),
+    detail: jsonb("detail").notNull().default({}),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    index("factory_workflow_events_run_created_idx").on(
+      table.runId,
+      table.createdAt,
+    ),
+  ],
+);
+
 export const contextCompactionArtifacts = pgTable(
   "context_compaction_artifacts",
   {

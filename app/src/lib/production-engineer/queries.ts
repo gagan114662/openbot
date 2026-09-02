@@ -148,6 +148,15 @@ export type SoftwareFactoryDashboard = {
       sessionId: string | null;
       lastError: string | null;
     }>;
+    events: Array<{
+      id: string;
+      stageId: string | null;
+      entity: string;
+      fromStatus: string | null;
+      toStatus: string;
+      detail: Record<string, unknown>;
+      createdAt: string;
+    }>;
   }>;
   contextCapsules: Array<{
     id: string;

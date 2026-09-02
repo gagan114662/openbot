@@ -26,6 +26,7 @@ export type WorkflowStageExecutor = {
     stage: Stage;
     snapshot: Snapshot;
     sessionId: string;
+    signal: AbortSignal;
   }): Promise<StageCandidate>;
   review(input: {
     runId: string;
@@ -33,6 +34,7 @@ export type WorkflowStageExecutor = {
     snapshot: Snapshot;
     candidate: StageCandidate;
     sessionId: string;
+    signal: AbortSignal;
   }): Promise<{ accepted: boolean; summary: string; checks: string[] }>;
 };
 
@@ -46,6 +48,10 @@ export function createWorkflowWorker(options: {
   executor: WorkflowStageExecutor;
   workerId: string;
   sessionId?: () => string;
+  onTerminalFailure?: (input: {
+    runId: string;
+    error: string;
+  }) => Promise<void>;
 }) {
   const sessionId = options.sessionId ?? randomUUID;
   let draining = false;
@@ -59,6 +65,28 @@ export function createWorkflowWorker(options: {
       workerSessionId,
     );
     if (!started) return;
+    const controller = new AbortController();
+    const initialSnapshot = await options.runtime.snapshot(runId);
+    const initialSteering =
+      (initialSnapshot?.run.steering as { events?: unknown[] } | undefined)
+        ?.events?.length ?? 0;
+    const controlWatcher = setInterval(() => {
+      void options.runtime.snapshot(runId).then((current) => {
+        const steering =
+          (current?.run.steering as { events?: unknown[] } | undefined)?.events
+            ?.length ?? 0;
+        if (
+          !current ||
+          current.run.abortRequested ||
+          current.run.pauseRequested ||
+          steering > initialSteering
+        )
+          controller.abort(
+            "Workflow control changed while the stage was running.",
+          );
+      });
+    }, 250);
+    controlWatcher.unref?.();
     try {
       const snapshot = await options.runtime.snapshot(runId);
       if (!snapshot)
@@ -68,6 +96,7 @@ export function createWorkflowWorker(options: {
         stage: started,
         snapshot,
         sessionId: workerSessionId,
+        signal: controller.signal,
       });
       if (candidate.sessionId !== workerSessionId)
         throw new Error(
@@ -82,6 +111,7 @@ export function createWorkflowWorker(options: {
         snapshot,
         candidate,
         sessionId: reviewerSessionId,
+        signal: controller.signal,
       });
       if (!verification.accepted)
         throw new Error(
@@ -93,11 +123,31 @@ export function createWorkflowWorker(options: {
         verification: { ...verification, accepted: true as const },
       });
     } catch (error) {
-      await options.runtime.failStage(
-        runId,
-        stage.stageId,
-        error instanceof Error ? error.message : String(error),
-      );
+      const current = await options.runtime.snapshot(runId);
+      const steering =
+        (current?.run.steering as { events?: unknown[] } | undefined)?.events
+          ?.length ?? 0;
+      if (current?.run.status === "aborted") return;
+      if (current?.run.pauseRequested || steering > initialSteering) {
+        await options.runtime.interruptStage(
+          runId,
+          stage.stageId,
+          current?.run.pauseRequested
+            ? "Paused by an operator while running."
+            : "Restarted to apply new operator steering.",
+        );
+      } else {
+        const message = error instanceof Error ? error.message : String(error);
+        const failure = await options.runtime.failStage(
+          runId,
+          stage.stageId,
+          message,
+        );
+        if (failure?.terminal)
+          await options.onTerminalFailure?.({ runId, error: message });
+      }
+    } finally {
+      clearInterval(controlWatcher);
     }
   };
 

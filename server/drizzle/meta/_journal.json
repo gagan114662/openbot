@@ -288,6 +288,13 @@
       "when": 1788368963435,
       "tag": "0040_simple_steve_rogers",
       "breakpoints": true
+    },
+    {
+      "idx": 41,
+      "version": "7",
+      "when": 1788369270626,
+      "tag": "0041_ordinary_dazzler",
+      "breakpoints": true
     }
   ]
 }

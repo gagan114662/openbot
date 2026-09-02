@@ -155,7 +155,7 @@ function ProductionEngineerPage() {
           <PageEmpty>No durable workflow runs exist yet.</PageEmpty>
         ) : (
           <div className="space-y-3">
-            {factory.data?.workflows.map(({ run, stages }) => (
+            {factory.data?.workflows.map(({ run, stages, events }) => (
               <div className="rounded-md border p-3" key={run.id}>
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <div>
@@ -230,6 +230,23 @@ function ProductionEngineerPage() {
                     ) : null}
                   </div>
                 </div>
+                <details className="mt-3 text-sm">
+                  <summary className="cursor-pointer font-medium">
+                    Durable transition timeline ({events.length})
+                  </summary>
+                  <ol className="mt-2 space-y-1 border-l pl-4 text-muted-foreground">
+                    {events.map((event) => (
+                      <li key={event.id}>
+                        {event.entity}
+                        {event.stageId ? ` ${event.stageId}` : ""}:{" "}
+                        {event.fromStatus ?? "created"}
+                        {" → "}
+                        {event.toStatus} ·{" "}
+                        {new Date(event.createdAt).toLocaleString()}
+                      </li>
+                    ))}
+                  </ol>
+                </details>
                 <div className="mt-3 grid gap-2 md:grid-cols-2">
                   {stages.map((stage) => (
                     <div

@@ -209,6 +209,27 @@ export function createSoftwareFactoryRoutes(
     const runId = context.req.param("runId");
     const action = context.req.param("action");
     const body = record(await context.req.json().catch(() => null));
+    const approve = async () => {
+      const actorId = context.var.actor.id;
+      const approved = await workflows.approve(runId, actorId);
+      const run =
+        approved ??
+        ((await workflows.snapshot(runId))?.run.status === "succeeded"
+          ? (await workflows.snapshot(runId))?.run
+          : null);
+      if (!run) return null;
+      await store.completeJob(run.jobId, {
+        success: true,
+        costMicros: 0,
+        outcome: {
+          workflowRunId: run.id,
+          verified: true,
+          approvedBy: run.approvedBy ?? actorId,
+          costBasis: "codex-subscription",
+        },
+      });
+      return run;
+    };
     const result =
       action === "pause"
         ? await workflows.requestPause(runId)
@@ -217,7 +238,7 @@ export function createSoftwareFactoryRoutes(
           : action === "abort"
             ? await workflows.requestAbort(runId)
             : action === "approve"
-              ? await workflows.approve(runId, context.var.actor.id)
+              ? await approve()
               : action === "steer" && nonempty(body?.instruction)
                 ? await workflows.steer(
                     runId,

@@ -5,6 +5,7 @@ import type { Database } from "../db/client";
 import {
   contextCompactionArtifacts,
   factoryWorkflowArtifacts,
+  factoryWorkflowEvents,
   factoryWorkflowRuns,
   factoryWorkflowStages,
 } from "../db/schema";
@@ -120,12 +121,19 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
         .limit(Math.max(1, Math.min(100, limit)));
       return Promise.all(
         runs.map(async (run) => {
-          const stages = await database
-            .select()
-            .from(factoryWorkflowStages)
-            .where(eq(factoryWorkflowStages.runId, run.id))
-            .orderBy(asc(factoryWorkflowStages.stageId));
-          return { run, stages };
+          const [stages, events] = await Promise.all([
+            database
+              .select()
+              .from(factoryWorkflowStages)
+              .where(eq(factoryWorkflowStages.runId, run.id))
+              .orderBy(asc(factoryWorkflowStages.stageId)),
+            database
+              .select()
+              .from(factoryWorkflowEvents)
+              .where(eq(factoryWorkflowEvents.runId, run.id))
+              .orderBy(asc(factoryWorkflowEvents.createdAt)),
+          ]);
+          return { run, stages, events };
         }),
       );
     },
@@ -201,7 +209,7 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
           ),
         );
       if (!run) return null;
-      const [stages, artifacts] = await Promise.all([
+      const [stages, artifacts, events] = await Promise.all([
         database
           .select()
           .from(factoryWorkflowStages)
@@ -212,8 +220,13 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
           .from(factoryWorkflowArtifacts)
           .where(eq(factoryWorkflowArtifacts.runId, runId))
           .orderBy(asc(factoryWorkflowArtifacts.createdAt)),
+        database
+          .select()
+          .from(factoryWorkflowEvents)
+          .where(eq(factoryWorkflowEvents.runId, runId))
+          .orderBy(asc(factoryWorkflowEvents.createdAt)),
       ]);
-      return { run, stages, artifacts };
+      return { run, stages, artifacts, events };
     },
 
     async requestPause(runId: string) {
@@ -605,6 +618,26 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
             .where(eq(factoryWorkflowRuns.id, runId));
         return { terminal, attempts: stage.attempts };
       });
+    },
+
+    async interruptStage(runId: string, stageId: string, reason: string) {
+      const [stage] = await database
+        .update(factoryWorkflowStages)
+        .set({
+          status: "pending",
+          sessionId: null,
+          lastError: reason.slice(0, 4_000),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(factoryWorkflowStages.runId, runId),
+            eq(factoryWorkflowStages.stageId, stageId),
+            eq(factoryWorkflowStages.status, "running"),
+          ),
+        )
+        .returning();
+      return stage ?? null;
     },
   };
 }

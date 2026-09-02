@@ -94,6 +94,9 @@ describe("persistent production engineer", () => {
     const metrics = await store.prometheusMetrics();
     expect(metrics).toContain("openbot_agent_failures_total");
     expect(metrics).toContain("openbot_tool_failures_total");
+    expect(metrics).toContain("openbot_evaluator_inflight");
+    expect(metrics).toContain("openbot_shadow_inflight");
+    expect(metrics).toContain("openbot_shadow_dropped_total");
     expect(metrics).not.toContain("openbot_http_errors_total");
   });
   test("refuses a debt-heavy generated fix and sends it to human review", async () => {

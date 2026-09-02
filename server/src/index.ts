@@ -362,6 +362,8 @@ if (shadowModel) {
       primaryModel: tenantPackage.model.defaultModel,
       shadowModel,
       rateBasisPoints: Number(process.env.SHADOW_RATE_BASIS_POINTS ?? 500),
+      concurrency: Number(process.env.SHADOW_CONCURRENCY ?? 2),
+      queueCapacity: Number(process.env.SHADOW_QUEUE_CAPACITY ?? 32),
       ...(codexSubscription
         ? {
             invokeShadow: (messages, signal) =>

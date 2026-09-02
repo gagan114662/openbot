@@ -7,6 +7,12 @@ import type { ShadowEvaluator } from "./shadow-evaluator";
 
 type ShadowMessage = { role: string; content: string };
 
+const shadowMetrics = { inflight: 0, dropped: 0 };
+
+export function inferenceShadowMetrics() {
+  return { ...shadowMetrics };
+}
+
 export async function invokeCodexSubscriptionShadow(
   messages: ShadowMessage[],
   options: {
@@ -75,7 +81,39 @@ export function createInferenceShadowRecorder(options: {
     signal: AbortSignal,
   ) => Promise<string>;
   timeoutMs?: number;
+  concurrency?: number;
+  queueCapacity?: number;
 }) {
+  const concurrency = Math.max(1, Math.floor(options.concurrency ?? 2));
+  const queueCapacity = Math.max(0, Math.floor(options.queueCapacity ?? 32));
+  const waiting: Array<() => void> = [];
+  let active = 0;
+
+  const acquire = () =>
+    new Promise<boolean>((resolve) => {
+      if (active < concurrency) {
+        active += 1;
+        shadowMetrics.inflight += 1;
+        resolve(true);
+        return;
+      }
+      if (waiting.length >= queueCapacity) {
+        shadowMetrics.dropped += 1;
+        resolve(false);
+        return;
+      }
+      waiting.push(() => {
+        active += 1;
+        shadowMetrics.inflight += 1;
+        resolve(true);
+      });
+    });
+  const release = () => {
+    active -= 1;
+    shadowMetrics.inflight -= 1;
+    waiting.shift()?.();
+  };
+
   return async (input: { run: RunAgentInput; primaryOutput: string }) => {
     if (
       !options.evaluator.shouldEvaluate(
@@ -84,59 +122,65 @@ export function createInferenceShadowRecorder(options: {
       )
     )
       return;
-    const messages = input.run.messages.flatMap((message) =>
-      typeof message.content === "string"
-        ? [{ role: message.role, content: message.content }]
-        : [],
-    );
-    const signal = AbortSignal.timeout(options.timeoutMs ?? 60_000);
-    const started = performance.now();
-    let shadowOutput: string;
+    if (!(await acquire())) return;
     try {
-      if (options.invokeShadow) {
-        shadowOutput = await options.invokeShadow(messages, signal);
-      } else {
-        const key = await options.resolveApiKey?.();
-        if (!key) throw new Error("Shadow inference has no model credential.");
-        if (!options.endpoint)
-          throw new Error("Shadow inference has no model endpoint.");
-        const response = await (options.fetch ?? fetch)(options.endpoint, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            authorization: `Bearer ${key}`,
-          },
-          body: JSON.stringify({ model: options.shadowModel, messages }),
-          signal,
+      const messages = input.run.messages.flatMap((message) =>
+        typeof message.content === "string"
+          ? [{ role: message.role, content: message.content }]
+          : [],
+      );
+      const signal = AbortSignal.timeout(options.timeoutMs ?? 60_000);
+      const started = performance.now();
+      let shadowOutput: string;
+      try {
+        if (options.invokeShadow) {
+          shadowOutput = await options.invokeShadow(messages, signal);
+        } else {
+          const key = await options.resolveApiKey?.();
+          if (!key)
+            throw new Error("Shadow inference has no model credential.");
+          if (!options.endpoint)
+            throw new Error("Shadow inference has no model endpoint.");
+          const response = await (options.fetch ?? fetch)(options.endpoint, {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              authorization: `Bearer ${key}`,
+            },
+            body: JSON.stringify({ model: options.shadowModel, messages }),
+            signal,
+          });
+          if (!response.ok)
+            throw new Error(`Shadow model answered ${response.status}.`);
+          const body = (await response.json()) as {
+            choices?: Array<{ message?: { content?: unknown } }>;
+          };
+          const content = body.choices?.[0]?.message?.content;
+          if (typeof content !== "string")
+            throw new Error("Shadow model returned no text.");
+          shadowOutput = content;
+        }
+      } catch (error) {
+        await options.evaluator.recordFailure({
+          requestKey: input.run.runId,
+          primaryModel: options.primaryModel,
+          shadowModel: options.shadowModel,
+          primaryOutput: input.primaryOutput,
+          shadowLatencyMs: performance.now() - started,
+          error: error instanceof Error ? error.message : String(error),
         });
-        if (!response.ok)
-          throw new Error(`Shadow model answered ${response.status}.`);
-        const body = (await response.json()) as {
-          choices?: Array<{ message?: { content?: unknown } }>;
-        };
-        const content = body.choices?.[0]?.message?.content;
-        if (typeof content !== "string")
-          throw new Error("Shadow model returned no text.");
-        shadowOutput = content;
+        throw error;
       }
-    } catch (error) {
-      await options.evaluator.recordFailure({
+      await options.evaluator.record({
         requestKey: input.run.runId,
         primaryModel: options.primaryModel,
         shadowModel: options.shadowModel,
         primaryOutput: input.primaryOutput,
+        shadowOutput,
         shadowLatencyMs: performance.now() - started,
-        error: error instanceof Error ? error.message : String(error),
       });
-      throw error;
+    } finally {
+      release();
     }
-    await options.evaluator.record({
-      requestKey: input.run.runId,
-      primaryModel: options.primaryModel,
-      shadowModel: options.shadowModel,
-      primaryOutput: input.primaryOutput,
-      shadowOutput,
-      shadowLatencyMs: performance.now() - started,
-    });
   };
 }

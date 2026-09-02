@@ -5,9 +5,64 @@ import {
   runWithInferenceShadow,
   setInferenceShadowRecorder,
 } from "../src/copilot";
-import { createInferenceShadowRecorder } from "../src/software-factory/inference-shadow";
+import {
+  createInferenceShadowRecorder,
+  inferenceShadowMetrics,
+} from "../src/software-factory/inference-shadow";
 
 describe("real inference shadow path", () => {
+  test("bounds concurrent shadows and drops overflow before spawning", async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let invocations = 0;
+    const recorder = createInferenceShadowRecorder({
+      evaluator: {
+        shouldEvaluate: () => true,
+        async record() {
+          return null;
+        },
+        async recordFailure() {
+          return null;
+        },
+      },
+      primaryModel: "primary",
+      shadowModel: "shadow",
+      rateBasisPoints: 10_000,
+      concurrency: 1,
+      queueCapacity: 1,
+      async invokeShadow() {
+        invocations += 1;
+        await held;
+        return "shadow";
+      },
+    });
+    const input = (id: string) => ({
+      run: {
+        runId: id,
+        threadId: "thread",
+        messages: [],
+        state: {},
+        tools: [],
+        context: [],
+        forwardedProps: {},
+      } as RunAgentInput,
+      primaryOutput: "primary",
+    });
+    const before = inferenceShadowMetrics().dropped;
+    const first = recorder(input("first"));
+    const second = recorder(input("second"));
+    await recorder(input("overflow"));
+    expect(invocations).toBe(1);
+    expect(inferenceShadowMetrics()).toMatchObject({
+      inflight: 1,
+      dropped: before + 1,
+    });
+    release();
+    await Promise.all([first, second]);
+    expect(invocations).toBe(2);
+  });
   test("sends the original model request to a shadow model and derives comparison inputs", async () => {
     const requests: Array<{
       url: string;

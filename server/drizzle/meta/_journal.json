@@ -309,6 +309,13 @@
       "when": 1788375139178,
       "tag": "0043_parallel_kat_farrell",
       "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1788375844138,
+      "tag": "0044_cool_wild_pack",
+      "breakpoints": true
     }
   ]
 }

@@ -373,8 +373,11 @@ export function createHandoffRunner(options: {
           }
 
           try {
+            // A thread may carry several independent hops concurrently. The queue key is the
+            // durable identity of this hop, so its lineage cannot be invalidated by a sibling hop.
+            const evolutionChainId = `${work.threadId}:${item.key}`;
             const evolutionCheckpoint = evolution
-              ? await evolution.checkpoint(work.threadId)
+              ? await evolution.checkpoint(evolutionChainId)
               : undefined;
             const shown = summarise(work);
             const signed = sign(work);
@@ -390,6 +393,11 @@ export function createHandoffRunner(options: {
                 checkpoint: evolutionCheckpoint,
                 candidateId: `${work.runId}:${item.key}:${item.attempts}`,
                 answer: answer ?? "",
+                verification: {
+                  toolCallCount: signed.toolCalls.length,
+                  maximumToolCalls: 32,
+                  relayRequired: !work.answerIn,
+                },
               });
               await recordAuditEvent(auditStore, {
                 eventType: promotion.promoted

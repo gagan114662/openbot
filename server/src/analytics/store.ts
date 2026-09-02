@@ -35,6 +35,30 @@ import {
   auditEvents,
   verifiedValueOutcomes,
 } from "../db/schema";
+
+let evaluatorInflight = 0;
+
+export function evaluatorRuntimeMetrics() {
+  return { inflight: evaluatorInflight };
+}
+
+async function boundedMap<T, R>(
+  values: readonly T[],
+  limit: number,
+  map: (value: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(values.length);
+  let cursor = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(limit, values.length) }, async () => {
+      while (cursor < values.length) {
+        const index = cursor++;
+        results[index] = await map(values[index] as T, index);
+      }
+    }),
+  );
+  return results;
+}
 import {
   type AnalyticsPrivacyMode,
   contentForPrivacyMode,
@@ -1722,117 +1746,156 @@ export function createAnalyticsStore(database: Database, tenantId?: string) {
             })
             .returning();
       if (!run) throw new Error("Evaluation run was not created.");
-      const scores = await Promise.all(
-        sessionRows.map(async ({ session }) => {
-          const properties = session.properties as Record<string, unknown>;
-          const humanWait = Number(properties.humanWaitMs ?? 0);
-          const toolCalls = Number(properties.toolCalls ?? 0);
-          let explanation = `${definition.signal ?? "code"} score`;
-          let score =
-            definition.signal === "task_completion"
-              ? session.taskCompleted === true
-                ? 100
-                : 0
-              : definition.signal === "helpfulness"
-                ? session.negativeFeedback
-                  ? 0
-                  : session.taskCompleted === true
-                    ? 100
-                    : 50
-                : Math.max(
-                    0,
-                    100 -
-                      (session.technicalFailure ? 50 : 0) -
-                      (session.toolFailure ? 30 : 0) -
-                      Math.min(
-                        20,
-                        humanWait / 1_000 + Math.max(0, toolCalls - 5),
-                      ),
-                  );
-          if (evaluator.kind === "llm_judge") {
-            if (!llmJudge) throw new Error("The LLM judge is not configured.");
-            const judged = JSON.parse(
-              await llmJudge(
-                `Return one JSON object with numeric score from 0 to 100 and a short explanation.\nRubric: ${JSON.stringify(definition)}\nPrivacy-safe session: ${JSON.stringify({ intent: session.intent, summary: session.summary, status: session.status, taskCompleted: session.taskCompleted, technicalFailure: session.technicalFailure, toolFailure: session.toolFailure })}`,
-              ),
-            ) as { score?: unknown; explanation?: unknown };
-            if (
-              typeof judged.score !== "number" ||
-              !Number.isFinite(judged.score)
-            ) {
-              throw new Error("The LLM judge returned no finite score.");
+      try {
+        const evaluatorConcurrency = Math.max(
+          1,
+          Math.floor(Number(process.env.EVALUATOR_CONCURRENCY ?? 4)),
+        );
+        const scores = await boundedMap(
+          sessionRows,
+          evaluatorConcurrency,
+          async ({ session }) => {
+            const properties = session.properties as Record<string, unknown>;
+            const humanWait = Number(properties.humanWaitMs ?? 0);
+            const toolCalls = Number(properties.toolCalls ?? 0);
+            let explanation = `${definition.signal ?? "code"} score`;
+            let score =
+              definition.signal === "task_completion"
+                ? session.taskCompleted === true
+                  ? 100
+                  : 0
+                : definition.signal === "helpfulness"
+                  ? session.negativeFeedback
+                    ? 0
+                    : session.taskCompleted === true
+                      ? 100
+                      : 50
+                  : Math.max(
+                      0,
+                      100 -
+                        (session.technicalFailure ? 50 : 0) -
+                        (session.toolFailure ? 30 : 0) -
+                        Math.min(
+                          20,
+                          humanWait / 1_000 + Math.max(0, toolCalls - 5),
+                        ),
+                    );
+            if (evaluator.kind === "llm_judge") {
+              if (!llmJudge)
+                throw new Error("The LLM judge is not configured.");
+              evaluatorInflight += 1;
+              try {
+                const judged = JSON.parse(
+                  await llmJudge(
+                    `Return one JSON object with numeric score from 0 to 100 and a short explanation.\nRubric: ${JSON.stringify(definition)}\nPrivacy-safe session: ${JSON.stringify({ intent: session.intent, summary: session.summary, status: session.status, taskCompleted: session.taskCompleted, technicalFailure: session.technicalFailure, toolFailure: session.toolFailure })}`,
+                  ),
+                ) as { score?: unknown; explanation?: unknown };
+                if (
+                  typeof judged.score !== "number" ||
+                  !Number.isFinite(judged.score)
+                ) {
+                  throw new Error("The LLM judge returned no finite score.");
+                }
+                score = Math.max(0, Math.min(100, judged.score));
+                explanation =
+                  typeof judged.explanation === "string"
+                    ? judged.explanation.slice(0, 2_000)
+                    : "LLM judge score";
+              } catch (error) {
+                return {
+                  sessionId: session.id,
+                  score: 0,
+                  category: "judge_error",
+                  explanation:
+                    `judge_error: ${error instanceof Error ? error.message : String(error)}`.slice(
+                      0,
+                      2_000,
+                    ),
+                };
+              } finally {
+                evaluatorInflight -= 1;
+              }
             }
-            score = Math.max(0, Math.min(100, judged.score));
-            explanation =
-              typeof judged.explanation === "string"
-                ? judged.explanation.slice(0, 2_000)
-                : "LLM judge score";
+            return {
+              sessionId: session.id,
+              score: Math.round(score),
+              explanation,
+            };
+          },
+        );
+        const threshold = definition.threshold ?? 70;
+        await database.transaction(async (tx) => {
+          if (scores.length > 0) {
+            await tx.insert(analyticsEvalResults).values(
+              scores.map((result) => ({
+                runId: run.id,
+                sessionId: result.sessionId,
+                numericScore: result.score,
+                category: "category" in result ? result.category : null,
+                passed: result.score >= threshold,
+                explanation: result.explanation,
+                evidence: { evaluatorVersion: evaluator.activeVersion },
+              })),
+            );
           }
-          return {
-            sessionId: session.id,
-            score: Math.round(score),
-            explanation,
-          };
-        }),
-      );
-      const threshold = definition.threshold ?? 70;
-      await database.transaction(async (tx) => {
-        if (scores.length > 0) {
-          await tx.insert(analyticsEvalResults).values(
-            scores.map((result) => ({
-              runId: run.id,
-              sessionId: result.sessionId,
-              numericScore: result.score,
-              passed: result.score >= threshold,
-              explanation: result.explanation,
-              evidence: { evaluatorVersion: evaluator.activeVersion },
-            })),
-          );
-        }
-        const aggregate =
-          scores.length === 0
-            ? 0
-            : Math.round(
-                scores.reduce((sum, item) => sum + item.score, 0) /
-                  scores.length,
-              );
-        const previous = await tx
-          .select({ aggregateScore: analyticsEvalRuns.aggregateScore })
-          .from(analyticsEvalRuns)
-          .where(
-            and(
-              eq(analyticsEvalRuns.evaluatorId, evaluatorId),
-              eq(analyticsEvalRuns.status, "completed"),
-            ),
-          )
-          .orderBy(desc(analyticsEvalRuns.finishedAt))
-          .limit(1);
-        const baseline = previous[0]?.aggregateScore ?? null;
-        const regression = baseline !== null && aggregate < baseline - 10;
-        await tx
+          const aggregate =
+            scores.length === 0
+              ? 0
+              : Math.round(
+                  scores.reduce((sum, item) => sum + item.score, 0) /
+                    scores.length,
+                );
+          const previous = await tx
+            .select({ aggregateScore: analyticsEvalRuns.aggregateScore })
+            .from(analyticsEvalRuns)
+            .where(
+              and(
+                eq(analyticsEvalRuns.evaluatorId, evaluatorId),
+                eq(analyticsEvalRuns.status, "completed"),
+              ),
+            )
+            .orderBy(desc(analyticsEvalRuns.finishedAt))
+            .limit(1);
+          const baseline = previous[0]?.aggregateScore ?? null;
+          const regression = baseline !== null && aggregate < baseline - 10;
+          await tx
+            .update(analyticsEvalRuns)
+            .set({
+              status: "completed",
+              aggregateScore: aggregate,
+              baselineScore: baseline,
+              regression,
+              finishedAt: new Date(),
+            })
+            .where(eq(analyticsEvalRuns.id, run.id));
+          if (regression && scores[0]) {
+            await tx.insert(analyticsEvents).values({
+              sessionId: scores[0].sessionId,
+              source: "openbot-evaluator",
+              idempotencyKey: `regression:${run.id}`,
+              eventType: "analytics.evaluator.regression",
+              name: `${evaluator.name} regressed`,
+              userId: actorUserId,
+              success: false,
+              properties: { evaluatorId, runId: run.id, baseline, aggregate },
+            });
+          }
+        });
+        return { runId: run.id, sessions: scores.length };
+      } catch (error) {
+        const reason = (
+          error instanceof Error ? error.message : String(error)
+        ).slice(0, 2_000);
+        await database
           .update(analyticsEvalRuns)
           .set({
-            status: "completed",
-            aggregateScore: aggregate,
-            baselineScore: baseline,
-            regression,
+            status: "failed",
+            failureReason: reason,
             finishedAt: new Date(),
           })
           .where(eq(analyticsEvalRuns.id, run.id));
-        if (regression && scores[0]) {
-          await tx.insert(analyticsEvents).values({
-            sessionId: scores[0].sessionId,
-            source: "openbot-evaluator",
-            idempotencyKey: `regression:${run.id}`,
-            eventType: "analytics.evaluator.regression",
-            name: `${evaluator.name} regressed`,
-            userId: actorUserId,
-            success: false,
-            properties: { evaluatorId, runId: run.id, baseline, aggregate },
-          });
-        }
-      });
-      return { runId: run.id, sessions: scores.length };
+        throw error;
+      }
     },
 
     async runScheduledEvaluators(actorUserId = "analytics-scheduler") {

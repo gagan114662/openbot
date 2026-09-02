@@ -93,4 +93,21 @@ describe("persistent runtime evolution checkpoints", () => {
       "technical-debt budget exceeded: addedDependencies",
     );
   });
+
+  test("names a violated live hop invariant instead of promoting ceremony", async () => {
+    const gate = createEvolutionCheckpointGate(database);
+    const id = chain("tool-budget");
+    const decision = await gate.promote({
+      checkpoint: await gate.checkpoint(id),
+      candidateId: "run-over-budget",
+      answer: "otherwise valid answer",
+      verification: {
+        toolCallCount: 33,
+        maximumToolCalls: 32,
+        relayRequired: true,
+      },
+    });
+    expect(decision.promoted).toBe(false);
+    expect(decision.reasons.join(" ")).toContain("tool-call-budget");
+  });
 });

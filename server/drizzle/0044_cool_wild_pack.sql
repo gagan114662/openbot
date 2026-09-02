@@ -1,0 +1,1 @@
+ALTER TABLE "analytics_eval_runs" ADD COLUMN "failure_reason" text;

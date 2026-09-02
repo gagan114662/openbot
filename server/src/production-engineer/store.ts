@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { and, desc, eq, gte, inArray, or, sql } from "drizzle-orm";
 import { type AuditStore, recordAuditEvent } from "../audit";
+import { evaluatorRuntimeMetrics } from "../analytics/store";
 import type { Database } from "../db/client";
 import {
   analyticsSessions,
@@ -11,6 +12,7 @@ import {
 } from "../db/schema";
 import type { ContextGraph } from "../software-factory/context-graph";
 import { executionTiers } from "../software-factory/model-router";
+import { inferenceShadowMetrics } from "../software-factory/inference-shadow";
 import { managedJobKinds } from "../software-factory/orchestrator";
 
 const fingerprint = (value: unknown) =>
@@ -203,6 +205,8 @@ export function createProductionEngineerStore(
     claimFix,
     runClaimedFix,
     async prometheusMetrics() {
+      const evaluator = evaluatorRuntimeMetrics();
+      const shadow = inferenceShadowMetrics();
       const [[agentFailures], [toolFailures], [sessions]] = await Promise.all([
         database
           .select({ count: sql<number>`count(*)::int` })
@@ -228,6 +232,12 @@ export function createProductionEngineerStore(
         `openbot_tool_failures_total ${toolFailures?.count ?? 0}`,
         "# TYPE openbot_analytics_sessions_total counter",
         `openbot_analytics_sessions_total ${sessions?.count ?? 0}`,
+        "# TYPE openbot_evaluator_inflight gauge",
+        `openbot_evaluator_inflight ${evaluator.inflight}`,
+        "# TYPE openbot_shadow_inflight gauge",
+        `openbot_shadow_inflight ${shadow.inflight}`,
+        "# TYPE openbot_shadow_dropped_total counter",
+        `openbot_shadow_dropped_total ${shadow.dropped}`,
         "",
       ].join("\n");
     },

@@ -184,7 +184,16 @@ const processInstanceId = randomUUID();
 const processOwner = (role: string) =>
   `${role}/${process.env.HOSTNAME ?? "local"}/${processInstanceId}`;
 const port = Number.parseInt(process.env.PORT ?? "3001", 10);
-const database = createDatabase(config.databaseUrl);
+const configuredPoolMax = Number.parseInt(
+  process.env.DATABASE_POOL_MAX ?? "",
+  10,
+);
+const database = createDatabase(
+  config.databaseUrl,
+  Number.isSafeInteger(configuredPoolMax) && configuredPoolMax > 0
+    ? { max: configuredPoolMax }
+    : {},
+);
 await initializeDevActorUser(database, config.singleUser);
 // The vault, built before the agent store because a customer's agent may sit behind a key and that
 // key belongs here rather than on the agent row. See agents/auth-header.ts.

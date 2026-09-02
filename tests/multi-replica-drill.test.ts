@@ -38,6 +38,10 @@ test("the replica drill boots two real API processes and measures concurrent tra
         COPILOTKIT_LICENSE_TOKEN:
           process.env.COPILOTKIT_LICENSE_TOKEN ?? "ci-not-a-real-licence",
         OPENBOT_SINGLE_USER: "true",
+        // The full CI suite shares one PostgreSQL capped at 100 connections. The drill proves
+        // replica behavior, not pool size, so each real child gets one connection and cannot be
+        // starved by hundreds of concurrently registered test files.
+        DATABASE_POOL_MAX: "1",
         OPENBOT_REPLICA_DRILL_PORTS: ports.join(","),
         OPENBOT_REPLICA_DRILL_REQUESTS: "24",
         OPENBOT_REPLICA_DRILL_CONCURRENCY: "6",

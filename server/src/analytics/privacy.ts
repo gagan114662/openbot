@@ -18,7 +18,8 @@ const REDACTORS: readonly [string, RegExp][] = [
   ["SECRET", /\b(?:sk|pk|rk|xox[abprs]|gh[opusr])[_-]?[A-Za-z0-9_-]{12,}\b/g],
 ];
 
-const UUID = /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/giu;
+const UUID =
+  /\b[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/giu;
 
 export function redactAnalyticsText(value: string): string {
   // Protect complete UUIDs before the phone/card regexes inspect their numeric

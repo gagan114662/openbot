@@ -55,6 +55,10 @@ export function createCodexFixDrafter(repository: string): FixDrafter {
     );
     let keepBranch = false;
     try {
+      // Worktrees intentionally do not inherit ignored node_modules. Install the locked graph so
+      // the candidate's required typecheck tests code, instead of failing because binaries are
+      // absent (or accidentally finding dependencies from another checkout).
+      await command(["bun", "install", "--frozen-lockfile"], worktree);
       const prompt = [
         "Fix this production issue in the current worktree.",
         `Title: ${input.title}`,

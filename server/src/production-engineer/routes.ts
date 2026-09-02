@@ -343,13 +343,21 @@ export function createProductionEngineerRoutes(
       ),
     }),
   );
-  routes.post("/issues/:issueId/fix", (context) => {
+  routes.post("/issues/:issueId/fix", async (context) => {
     const issueId = context.req.param("issueId");
     const actorId = context.var.actor.id;
     // A real Codex fix takes minutes. Holding the request open lets Bun's HTTP idle timeout turn a
     // healthy child into a browser-visible failure while the child keeps working. The durable issue
     // row is the job state; the admin page polls it until the terminal status lands.
-    void store.draftFix(actorId, issueId).catch((error) => {
+    const issue = await store.claimFix(actorId, issueId).catch(() => null);
+    if (!issue)
+      return context.json(
+        {
+          error: "A fix is already running or awaiting review for this issue.",
+        },
+        409,
+      );
+    void store.runClaimedFix(actorId, issue).catch((error) => {
       console.error(
         JSON.stringify({
           type: "production-fix-failed",

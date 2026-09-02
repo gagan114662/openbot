@@ -23,7 +23,20 @@ test("the replica drill boots two real API processes and measures concurrent tra
         // The drill boots the real composition root. CI intentionally has no deployment secrets,
         // so give only these disposable child processes a syntactically valid, process-local key.
         KEY_ENCRYPTION_KEY:
-          process.env.KEY_ENCRYPTION_KEY ?? Buffer.alloc(32).toString("base64"),
+          process.env.KEY_ENCRYPTION_KEY ??
+          Buffer.from(crypto.getRandomValues(new Uint8Array(32))).toString(
+            "base64",
+          ),
+        INTELLIGENCE_API_URL:
+          process.env.INTELLIGENCE_API_URL ??
+          "https://api.intelligence.copilotkit.ai",
+        INTELLIGENCE_GATEWAY_WS_URL:
+          process.env.INTELLIGENCE_GATEWAY_WS_URL ??
+          "wss://realtime.intelligence.copilotkit.ai",
+        INTELLIGENCE_API_KEY:
+          process.env.INTELLIGENCE_API_KEY ?? "ci-not-a-real-key",
+        COPILOTKIT_LICENSE_TOKEN:
+          process.env.COPILOTKIT_LICENSE_TOKEN ?? "ci-not-a-real-licence",
         OPENBOT_REPLICA_DRILL_PORTS: ports.join(","),
         OPENBOT_REPLICA_DRILL_REQUESTS: "24",
         OPENBOT_REPLICA_DRILL_CONCURRENCY: "6",

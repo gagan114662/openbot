@@ -111,7 +111,97 @@ export function createProductionEngineerStore(
   }) => Promise<void>,
   factory?: { contextGraph: ContextGraph; tenantId: string },
 ) {
+  const claimFix = async (actorId: string, issueId: string) => {
+    if (!fixDrafter)
+      throw new Error("Fix automation is disabled for this deployment.");
+    const [issue] = await database
+      .update(productionIssues)
+      .set({
+        fixStatus: "running",
+        humanApprovedBy: actorId,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(productionIssues.id, issueId),
+          eq(productionIssues.status, "open"),
+          inArray(productionIssues.fixStatus, [
+            "none",
+            "failed",
+            "review_required",
+          ]),
+        ),
+      )
+      .returning();
+    if (!issue)
+      throw new Error(
+        "This production issue is not open for a new fix; a fix may already be running or awaiting review.",
+      );
+    return issue;
+  };
+
+  const runClaimedFix = async (
+    actorId: string,
+    issue: typeof productionIssues.$inferSelect,
+  ) => {
+    if (!fixDrafter) throw new Error("Fix automation is disabled.");
+    try {
+      const drafted = await fixDrafter({
+        issueId: issue.id,
+        title: issue.title,
+        rootCause: issue.rootCause,
+        evidence: issue.evidence,
+      });
+      if (drafted.debt && recordDebtAssessment)
+        await recordDebtAssessment({
+          issueId: issue.id,
+          actorId,
+          debt: drafted.debt,
+        });
+      await database
+        .update(productionIssues)
+        .set({
+          fixStatus: "pull_request_open",
+          fixBranch: drafted.branch,
+          pullRequestUrl: drafted.pullRequestUrl,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(productionIssues.id, issue.id),
+            eq(productionIssues.fixStatus, "running"),
+          ),
+        );
+      return drafted;
+    } catch (error) {
+      if (error instanceof TechnicalDebtGateError && recordDebtAssessment)
+        await recordDebtAssessment({
+          issueId: issue.id,
+          actorId,
+          debt: error.debt,
+        });
+      await database
+        .update(productionIssues)
+        .set({
+          fixStatus:
+            error instanceof TechnicalDebtGateError
+              ? "review_required"
+              : "failed",
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(productionIssues.id, issue.id),
+            eq(productionIssues.fixStatus, "running"),
+          ),
+        );
+      throw error;
+    }
+  };
+
   return {
+    claimFix,
+    runClaimedFix,
     async prometheusMetrics() {
       const [[agentFailures], [toolFailures], [sessions]] = await Promise.all([
         database
@@ -540,63 +630,8 @@ export function createProductionEngineerStore(
     },
 
     async draftFix(actorId: string, issueId: string) {
-      if (!fixDrafter)
-        throw new Error("Fix automation is disabled for this deployment.");
-      const [issue] = await database
-        .select()
-        .from(productionIssues)
-        .where(
-          and(
-            eq(productionIssues.id, issueId),
-            eq(productionIssues.status, "open"),
-          ),
-        )
-        .limit(1);
-      if (!issue) throw new Error("Open production issue not found.");
-      await database
-        .update(productionIssues)
-        .set({
-          fixStatus: "running",
-          humanApprovedBy: actorId,
-          updatedAt: new Date(),
-        })
-        .where(eq(productionIssues.id, issueId));
-      try {
-        const drafted = await fixDrafter({
-          issueId,
-          title: issue.title,
-          rootCause: issue.rootCause,
-          evidence: issue.evidence,
-        });
-        if (drafted.debt && recordDebtAssessment) {
-          await recordDebtAssessment({ issueId, actorId, debt: drafted.debt });
-        }
-        await database
-          .update(productionIssues)
-          .set({
-            fixStatus: "pull_request_open",
-            fixBranch: drafted.branch,
-            pullRequestUrl: drafted.pullRequestUrl,
-            updatedAt: new Date(),
-          })
-          .where(eq(productionIssues.id, issueId));
-        return drafted;
-      } catch (error) {
-        if (error instanceof TechnicalDebtGateError && recordDebtAssessment) {
-          await recordDebtAssessment({ issueId, actorId, debt: error.debt });
-        }
-        await database
-          .update(productionIssues)
-          .set({
-            fixStatus:
-              error instanceof TechnicalDebtGateError
-                ? "review_required"
-                : "failed",
-            updatedAt: new Date(),
-          })
-          .where(eq(productionIssues.id, issueId));
-        throw error;
-      }
+      const issue = await claimFix(actorId, issueId);
+      return runClaimedFix(actorId, issue);
     },
 
     async recordInvestigation(

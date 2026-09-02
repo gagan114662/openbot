@@ -6,6 +6,7 @@ import {
   gte,
   ilike,
   inArray,
+  isNull,
   lt,
   lte,
   or,
@@ -528,16 +529,34 @@ export function createAnalyticsStore(database: Database, tenantId?: string) {
       const events = (input.events ?? []).slice(0, 1_000);
       const spans = (input.spans ?? []).slice(0, 1_000);
 
+      const [owner] = await database
+        .select({
+          userId: analyticsSessions.userId,
+          agentId: analyticsSessions.agentId,
+        })
+        .from(analyticsSessions)
+        .where(eq(analyticsSessions.id, input.session.id))
+        .limit(1);
+      if (
+        owner &&
+        (owner.userId !== actorUserId ||
+          owner.agentId !== input.session.agentId)
+      ) {
+        await database.insert(auditEvents).values({
+          actorUserId,
+          eventType: "analytics.session_ownership_refused",
+          targetType: "analytics_session",
+          targetId: input.session.id,
+          payload: {
+            attemptedAgentId: input.session.agentId,
+            reason: "session-owner-or-agent-mismatch",
+          },
+        });
+        throw new Error("Analytics session belongs to another user or agent.");
+      }
+
       return database.transaction(async (tx) => {
-        const [existing] = await tx
-          .select({ userId: analyticsSessions.userId })
-          .from(analyticsSessions)
-          .where(eq(analyticsSessions.id, input.session.id))
-          .limit(1);
-        if (existing && existing.userId !== actorUserId) {
-          throw new Error("Analytics session belongs to another user.");
-        }
-        await tx
+        const claimedSession = await tx
           .insert(analyticsSessions)
           .values({
             id: input.session.id,
@@ -566,6 +585,12 @@ export function createAnalyticsStore(database: Database, tenantId?: string) {
           })
           .onConflictDoUpdate({
             target: analyticsSessions.id,
+            setWhere: and(
+              eq(analyticsSessions.userId, actorUserId),
+              input.session.agentId
+                ? eq(analyticsSessions.agentId, input.session.agentId)
+                : isNull(analyticsSessions.agentId),
+            ),
             set: {
               status: input.session.status ?? "running",
               taskCompleted: input.session.taskCompleted,
@@ -575,7 +600,10 @@ export function createAnalyticsStore(database: Database, tenantId?: string) {
               endedAt,
               updatedAt: now,
             },
-          });
+          })
+          .returning({ id: analyticsSessions.id });
+        if (claimedSession.length !== 1)
+          throw new Error("Analytics session ownership changed during ingest.");
 
         /*
          * A person answering `ask_person` starts a new turn. Close the pause on the previous turn
@@ -589,7 +617,7 @@ export function createAnalyticsStore(database: Database, tenantId?: string) {
             ? input.session.properties.threadId
             : "";
         if (
-          !existing &&
+          !owner &&
           threadId &&
           input.session.agentId &&
           (input.session.status ?? "running") === "running"

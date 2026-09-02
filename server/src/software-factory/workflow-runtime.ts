@@ -564,7 +564,7 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
 
     async readyStages(runId: string) {
       const snapshot = await this.snapshot(runId);
-      if (!snapshot || snapshot.run.status !== "running") return [];
+      if (snapshot?.run.status !== "running") return [];
       const completed = new Set(
         snapshot.stages
           .filter((stage) => stage.status === "succeeded")
@@ -596,12 +596,7 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
             eq(factoryWorkflowRuns.tenantId, tenantId),
           ),
         );
-      if (
-        !run ||
-        run.status !== "running" ||
-        run.pauseRequested ||
-        run.abortRequested
-      )
+      if (run?.status !== "running" || run.pauseRequested || run.abortRequested)
         return null;
       const [stage] = await database
         .update(factoryWorkflowStages)

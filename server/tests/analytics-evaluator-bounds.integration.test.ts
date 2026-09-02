@@ -3,7 +3,6 @@ import { and, eq, inArray } from "drizzle-orm";
 import { createAnalyticsStore } from "../src/analytics/store";
 import { createDatabase } from "../src/db/client";
 import {
-  analyticsDatasetSessions,
   analyticsDatasets,
   analyticsEvalResults,
   analyticsEvalRuns,

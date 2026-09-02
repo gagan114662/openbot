@@ -37,6 +37,7 @@ test("the replica drill boots two real API processes and measures concurrent tra
           process.env.INTELLIGENCE_API_KEY ?? "ci-not-a-real-key",
         COPILOTKIT_LICENSE_TOKEN:
           process.env.COPILOTKIT_LICENSE_TOKEN ?? "ci-not-a-real-licence",
+        OPENBOT_SINGLE_USER: "true",
         OPENBOT_REPLICA_DRILL_PORTS: ports.join(","),
         OPENBOT_REPLICA_DRILL_REQUESTS: "24",
         OPENBOT_REPLICA_DRILL_CONCURRENCY: "6",

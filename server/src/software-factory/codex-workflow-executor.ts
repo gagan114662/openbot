@@ -77,14 +77,16 @@ export function createCodexWorkflowExecutor(
     const schemaPath = join(evidence, `${sessionId}.schema.json`);
     const outputPath = join(evidence, `${sessionId}.json`);
     await writeFile(schemaPath, JSON.stringify(schema), { mode: 0o600 });
+    const permissionArgs =
+      sandbox === "workspace-write"
+        ? ["--approve-for-me"]
+        : ["--sandbox", "read-only"];
     await command(
       [
         "codex",
         "exec",
         "--ephemeral",
-        "--approve-for-me",
-        "--sandbox",
-        sandbox,
+        ...permissionArgs,
         "--output-schema",
         schemaPath,
         "--output-last-message",
@@ -140,8 +142,7 @@ export function createCodexWorkflowExecutor(
             checksum: artifactChecksum(content),
             revision: revision.stdout.trim(),
             producerSessionId: sessionId,
-            command:
-              "codex exec --ephemeral --approve-for-me --sandbox workspace-write",
+            command: "codex exec --ephemeral --approve-for-me",
             exitCode: 0,
             metadata: {
               checks: result.checks ?? [],

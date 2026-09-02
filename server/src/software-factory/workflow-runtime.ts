@@ -111,10 +111,18 @@ export function verifyWorkflowEvidence(snapshot: {
     revision: string;
     producerSessionId: string;
     exitCode: number | null;
+    metadata?: unknown;
   }>;
 }) {
   const succeeded = snapshot.stages.filter(
     (stage) => stage.status === "succeeded",
+  );
+  const successfulArtifacts = snapshot.artifacts.filter((artifact) =>
+    succeeded.some(
+      (stage) =>
+        stage.stageId === artifact.stageId &&
+        stage.sessionId === artifact.producerSessionId,
+    ),
   );
   const checks = {
     allStagesSucceeded:
@@ -125,14 +133,17 @@ export function verifyWorkflowEvidence(snapshot: {
     revisionBound: snapshot.artifacts.every((artifact) =>
       Boolean(artifact.revision.trim()),
     ),
-    producerBound: snapshot.artifacts.every((artifact) =>
-      snapshot.stages.some(
-        (stage) =>
-          stage.stageId === artifact.stageId &&
-          stage.sessionId === artifact.producerSessionId,
-      ),
-    ),
-    commandsSucceeded: snapshot.artifacts.every(
+    producerBound: snapshot.artifacts.every((artifact) => {
+      const metadata = artifact.metadata as
+        | { attemptStatus?: unknown }
+        | null
+        | undefined;
+      return (
+        successfulArtifacts.includes(artifact) ||
+        metadata?.attemptStatus === "failed"
+      );
+    }),
+    commandsSucceeded: successfulArtifacts.every(
       (artifact) => artifact.exitCode === 0,
     ),
     freshReviewers: succeeded.every(
@@ -695,6 +706,7 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
       stageId: string,
       sessionId: string,
       error: string,
+      artifacts: z.infer<typeof stageResultSchema>["artifacts"] = [],
     ) {
       return database.transaction(async (tx) => {
         const [run] = await tx
@@ -724,6 +736,26 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
           stage.sessionId !== sessionId
         )
           return null;
+        const checkedArtifacts = artifacts.length
+          ? stageResultSchema.shape.artifacts.parse(artifacts)
+          : [];
+        if (
+          checkedArtifacts.some(
+            (artifact) => artifact.producerSessionId !== sessionId,
+          )
+        )
+          throw new Error("Failed-attempt evidence has the wrong producer.");
+        if (checkedArtifacts.length > 0)
+          await tx
+            .insert(factoryWorkflowArtifacts)
+            .values(
+              checkedArtifacts.map((artifact) => ({
+                runId,
+                stageId,
+                ...artifact,
+              })),
+            )
+            .onConflictDoNothing();
         const terminal = stage.attempts >= run.maximumAttempts;
         await tx
           .update(factoryWorkflowStages)

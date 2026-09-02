@@ -20,6 +20,16 @@ export type StageCandidate = {
   }>;
 };
 
+export class StageExecutionFailure extends Error {
+  constructor(
+    message: string,
+    readonly artifacts: StageCandidate["artifacts"] = [],
+  ) {
+    super(message);
+    this.name = "StageExecutionFailure";
+  }
+}
+
 export type WorkflowStageExecutor = {
   execute(input: {
     runId: string;
@@ -162,6 +172,12 @@ export function createWorkflowWorker(options: {
           stage.stageId,
           workerSessionId,
           message,
+          error instanceof StageExecutionFailure
+            ? error.artifacts.map((artifact) => ({
+                ...artifact,
+                metadata: artifact.metadata ?? {},
+              }))
+            : [],
         );
         if (failure?.terminal)
           await options.onTerminalFailure?.({ runId, error: message });

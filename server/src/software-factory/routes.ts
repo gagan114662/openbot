@@ -51,6 +51,12 @@ export function managedWorkflowStages(
       timeoutMs: 120_000,
       required: true,
     },
+    {
+      id: "repository-lint",
+      command: ["bun", "run", "lint"],
+      timeoutMs: 120_000,
+      required: true,
+    },
   ];
   const stage = (
     id: string,
@@ -92,9 +98,12 @@ export function managedWorkflowStages(
       return [
         stage("reproduce", "Reproduce the reported behavior"),
         stage("diagnose", "Identify the causal root issue", ["reproduce"]),
-        stage("recommend", "Produce a bounded remediation with evidence", [
-          "diagnose",
-        ]),
+        stage(
+          "recommend",
+          "Produce a bounded remediation with evidence",
+          ["diagnose"],
+          focusedFactoryChecks,
+        ),
       ];
     case "visual-delivery":
       return [
@@ -103,6 +112,7 @@ export function managedWorkflowStages(
           "visual-verify",
           "Verify the rendered behavior and regression checks",
           ["implement"],
+          focusedFactoryChecks,
         ),
       ];
   }

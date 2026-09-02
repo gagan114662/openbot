@@ -58,15 +58,22 @@ export function createWebhookReconciler(
       return event;
     },
 
-    async claim(owner: string, now = new Date(), leaseMs = 30_000) {
+    async claim(owner: string, now?: Date, leaseMs = 30_000) {
+      // When the caller did not supply a test clock, compare database timestamps with the database
+      // clock. Constructing a JavaScript Date before the INSERT's default `now()` can put the claim
+      // a fraction of a millisecond before its own event and make fresh work intermittently invisible.
+      const eligibleAt = now ? sql`${now}` : sql`clock_timestamp()`;
+      const leaseUntil = now
+        ? sql`${new Date(now.getTime() + leaseMs)}`
+        : sql`clock_timestamp() + (${leaseMs} * interval '1 millisecond')`;
       const rows = await database.execute(sql`
         with candidate as (
           select event.id
           from reconciled_webhook_events event
           where event.tenant_id = ${options.tenantId}
             and event.status in ('pending', 'retrying')
-            and event.available_at <= ${now}
-            and (event.lease_expires_at is null or event.lease_expires_at <= ${now})
+            and event.available_at <= ${eligibleAt}
+            and (event.lease_expires_at is null or event.lease_expires_at <= ${eligibleAt})
             and not exists (
               select 1 from reconciled_webhook_events earlier
               where earlier.tenant_id = event.tenant_id
@@ -81,7 +88,7 @@ export function createWebhookReconciler(
         )
         update reconciled_webhook_events event
         set lease_owner = ${bounded(owner, "Lease owner", 200)},
-            lease_expires_at = ${new Date(now.getTime() + leaseMs)},
+            lease_expires_at = ${leaseUntil},
             attempts = event.attempts + 1,
             updated_at = now()
         from candidate

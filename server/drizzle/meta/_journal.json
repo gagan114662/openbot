@@ -253,6 +253,27 @@
       "when": 1788365593242,
       "tag": "0035_sparkling_mentallo",
       "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1788367049988,
+      "tag": "0036_charming_santa_claus",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1788367463586,
+      "tag": "0037_dry_punisher",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1788367484535,
+      "tag": "0038_blue_luckman",
+      "breakpoints": true
     }
   ]
 }

@@ -94,8 +94,11 @@ import { createIntentRouter } from "./routing/classify";
 import { createModelCompleter } from "./routing/model";
 import { installGracefulShutdown } from "./shutdown";
 import { createContextGraph } from "./software-factory/context-graph";
+import { createCodexWorkflowExecutor } from "./software-factory/codex-workflow-executor";
 import { createSoftwareFactoryStore } from "./software-factory/store";
 import { createShadowEvaluator } from "./software-factory/shadow-evaluator";
+import { createWorkflowRuntime } from "./software-factory/workflow-runtime";
+import { createWorkflowWorker } from "./software-factory/workflow-worker";
 import {
   createPackageStatusReader,
   loadTenantPackage,
@@ -303,6 +306,24 @@ const softwareFactoryStore = createSoftwareFactoryStore(
   tenantPackage.tenantId,
 );
 const shadowEvaluator = createShadowEvaluator(database, tenantPackage.tenantId);
+const workflowRuntime = createWorkflowRuntime(database, tenantPackage.tenantId);
+const workflowWorker = createWorkflowWorker({
+  runtime: workflowRuntime,
+  workerId: `software-factory/${process.env.HOSTNAME ?? randomUUID().slice(0, 8)}`,
+  executor: createCodexWorkflowExecutor(
+    process.env.SOFTWARE_FACTORY_REPOSITORY ?? process.cwd(),
+  ),
+});
+const workflowLoop =
+  process.env.SOFTWARE_FACTORY_WORKER === "false"
+    ? undefined
+    : repeatAfterEach(async () => {
+        await workflowWorker
+          .runOnce()
+          .catch((error) =>
+            console.error("Software-factory workflow tick failed.", error),
+          );
+      }, 1_000);
 const webhookReconciler = createWebhookReconciler(database, {
   tenantId: tenantPackage.tenantId,
 });
@@ -1176,6 +1197,7 @@ if (config.handoff.maxDepth > 0 && config.handoff.maxPerRun > 0) {
   handoffDrain = async () => {
     stopping = true;
     handoffLoop?.stop();
+    workflowLoop?.stop();
     await activeSweep;
   };
 }
@@ -1305,6 +1327,7 @@ const app = createApp(
     tenantId: tenantPackage.tenantId,
     webhooks: webhookReconciler,
     shadows: shadowEvaluator,
+    workflows: workflowRuntime,
   },
 );
 
@@ -1477,6 +1500,7 @@ installGracefulShutdown({
     await Promise.allSettled([
       server.stop(false),
       handoffDrain(),
+      workflowWorker.drain(),
       channelActivityListener.stop(),
       policyListener.stop(),
       // Started only where handing work between Bots is switched on, so it is often not there.

@@ -126,11 +126,49 @@ export type SoftwareFactoryDashboard = {
       createdAt: string;
     }>;
   };
+  workflows: Array<{
+    run: {
+      id: string;
+      jobId: string;
+      status: string;
+      maximumAttempts: number;
+      concurrencyLimit: number;
+      pauseRequested: boolean;
+      abortRequested: boolean;
+      approvedBy: string | null;
+      steering: {
+        events?: Array<{ actorId: string; instruction: string; at: string }>;
+      };
+    };
+    stages: Array<{
+      stageId: string;
+      objective: string;
+      status: string;
+      attempts: number;
+      sessionId: string | null;
+      lastError: string | null;
+    }>;
+  }>;
 };
 
 export async function fetchSoftwareFactory() {
   const response = await client("/api/software-factory");
   return response.json() as Promise<SoftwareFactoryDashboard>;
+}
+
+export async function controlWorkflow(input: {
+  runId: string;
+  action: "pause" | "resume" | "abort" | "approve" | "steer";
+  instruction?: string;
+}) {
+  const response = await client(
+    `/api/software-factory/workflows/${encodeURIComponent(input.runId)}/${input.action}`,
+    {
+      method: "POST",
+      body: input.instruction ? { instruction: input.instruction } : {},
+    },
+  );
+  return response.json();
 }
 
 export async function tuneProductionMonitor(monitorId: string) {

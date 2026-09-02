@@ -11,6 +11,7 @@ import {
 import { type ManagedJobKind, managedJobKinds } from "./orchestrator";
 import type { SoftwareFactoryStore } from "./store";
 import type { ShadowEvaluator } from "./shadow-evaluator";
+import type { WorkflowRuntime } from "./workflow-runtime";
 
 const record = (value: unknown): Record<string, unknown> | null =>
   value && typeof value === "object" && !Array.isArray(value)
@@ -26,6 +27,7 @@ export function createSoftwareFactoryRoutes(
   requireUser: MiddlewareHandler<{ Variables: AppVariables }>,
   webhooks?: WebhookReconciler,
   shadows?: ShadowEvaluator,
+  workflows?: WorkflowRuntime,
 ) {
   const routes = new Hono<{ Variables: AppVariables }>();
   routes.use("*", requireUser, async (context, next) => {
@@ -41,6 +43,7 @@ export function createSoftwareFactoryRoutes(
       managedJobKinds,
       webhooks: webhooks ? await webhooks.dashboard() : null,
       shadowTraffic: shadows ? await shadows.dashboard() : null,
+      workflows: workflows ? await workflows.list() : [],
     }),
   );
   routes.post("/benchmarks", async (context) => {
@@ -78,16 +81,29 @@ export function createSoftwareFactoryRoutes(
         { error: "A valid kind, tier, objective, and trigger are required." },
         400,
       );
-    return context.json(
-      await store.queueJob(context.var.actor.id, {
-        kind: kind as ManagedJobKind,
-        tier: tier as ExecutionTier,
-        objective,
-        trigger,
-        minimumQuality: Number(body?.minimumQuality ?? 0.8),
-      }),
-      201,
-    );
+    const queued = await store.queueJob(context.var.actor.id, {
+      kind: kind as ManagedJobKind,
+      tier: tier as ExecutionTier,
+      objective,
+      trigger,
+      minimumQuality: Number(body?.minimumQuality ?? 0.8),
+    });
+    const workflow = workflows
+      ? await workflows.create({
+          jobId: queued.job.id,
+          maximumAttempts: Number(body?.maximumAttempts ?? 3),
+          concurrencyLimit: Number(body?.concurrencyLimit ?? 1),
+          stages: [
+            {
+              id: "execute",
+              objective,
+              requiredContext: [],
+              dependsOn: [],
+            },
+          ],
+        })
+      : null;
+    return context.json({ ...queued, workflow }, 201);
   });
   routes.post("/jobs/:jobId/outcome", async (context) => {
     const body = record(await context.req.json().catch(() => null));
@@ -197,6 +213,54 @@ export function createSoftwareFactoryRoutes(
       { sampled: true, primaryUnaffected: true, evaluation },
       201,
     );
+  });
+  routes.post("/workflows", async (context) => {
+    if (!workflows) return context.notFound();
+    const body = record(await context.req.json().catch(() => null));
+    const jobId = nonempty(body?.jobId);
+    if (!jobId) return context.json({ error: "A job id is required." }, 400);
+    return context.json(
+      await workflows.create({
+        jobId,
+        stages: body?.stages,
+        maximumAttempts: Number(body?.maximumAttempts ?? 3),
+        concurrencyLimit: Number(body?.concurrencyLimit ?? 2),
+      }),
+      201,
+    );
+  });
+  routes.get("/workflows/:runId", async (context) => {
+    if (!workflows) return context.notFound();
+    const snapshot = await workflows.snapshot(context.req.param("runId"));
+    return snapshot ? context.json(snapshot) : context.notFound();
+  });
+  routes.post("/workflows/:runId/:action", async (context) => {
+    if (!workflows) return context.notFound();
+    const runId = context.req.param("runId");
+    const action = context.req.param("action");
+    const body = record(await context.req.json().catch(() => null));
+    const result =
+      action === "pause"
+        ? await workflows.requestPause(runId)
+        : action === "resume"
+          ? await workflows.resume(runId)
+          : action === "abort"
+            ? await workflows.requestAbort(runId)
+            : action === "approve"
+              ? await workflows.approve(runId, context.var.actor.id)
+              : action === "steer" && nonempty(body?.instruction)
+                ? await workflows.steer(
+                    runId,
+                    context.var.actor.id,
+                    nonempty(body?.instruction) as string,
+                  )
+                : null;
+    if (!result)
+      return context.json(
+        { error: "The workflow action is invalid for its current state." },
+        409,
+      );
+    return context.json({ run: result });
   });
   return routes;
 }

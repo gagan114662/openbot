@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   applyProductionMonitorTuning,
+  controlWorkflow,
   draftProductionFix,
   fetchProductionEngineer,
   fetchSoftwareFactory,
@@ -31,6 +32,7 @@ function ProductionEngineerPage() {
   const [investigationSummary, setInvestigationSummary] = useState("");
   const [investigationOutcome, setInvestigationOutcome] = useState("");
   const [investigationApproved, setInvestigationApproved] = useState(false);
+  const [workflowSteering, setWorkflowSteering] = useState("");
   const queryClient = useQueryClient();
   const dashboard = useQuery({
     queryKey: ["production-engineer"],
@@ -43,6 +45,13 @@ function ProductionEngineerPage() {
     queryKey: ["software-factory"],
     queryFn: fetchSoftwareFactory,
     refetchInterval: 5_000,
+  });
+  const workflowControl = useMutation({
+    mutationFn: controlWorkflow,
+    onSuccess: () => {
+      setWorkflowSteering("");
+      return queryClient.invalidateQueries({ queryKey: ["software-factory"] });
+    },
   });
   const refresh = () =>
     queryClient.invalidateQueries({ queryKey: ["production-engineer"] });
@@ -140,6 +149,134 @@ function ProductionEngineerPage() {
             }
           />
         </div>
+      </PageSection>
+      <PageSection title="Inspectable workflow runs">
+        {(factory.data?.workflows.length ?? 0) === 0 ? (
+          <PageEmpty>No durable workflow runs exist yet.</PageEmpty>
+        ) : (
+          <div className="space-y-3">
+            {factory.data?.workflows.map(({ run, stages }) => (
+              <div className="rounded-md border p-3" key={run.id}>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <p className="font-medium">Run {run.id.slice(0, 8)}</p>
+                    <p className="text-muted-foreground text-sm">
+                      {run.status} ·{" "}
+                      {
+                        stages.filter((stage) => stage.status === "succeeded")
+                          .length
+                      }
+                      /{stages.length} stages · concurrency{" "}
+                      {run.concurrencyLimit} · repair cap {run.maximumAttempts}
+                    </p>
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {run.status === "running" || run.status === "queued" ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() =>
+                          workflowControl.mutate({
+                            runId: run.id,
+                            action: "pause",
+                          })
+                        }
+                      >
+                        Pause
+                      </Button>
+                    ) : null}
+                    {run.status === "paused" || run.status === "pausing" ? (
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        onClick={() =>
+                          workflowControl.mutate({
+                            runId: run.id,
+                            action: "resume",
+                          })
+                        }
+                      >
+                        Resume
+                      </Button>
+                    ) : null}
+                    {run.status === "awaiting_approval" ? (
+                      <Button
+                        size="sm"
+                        onClick={() =>
+                          workflowControl.mutate({
+                            runId: run.id,
+                            action: "approve",
+                          })
+                        }
+                      >
+                        Approve
+                      </Button>
+                    ) : null}
+                    {!["succeeded", "failed", "aborted"].includes(
+                      run.status,
+                    ) ? (
+                      <Button
+                        size="sm"
+                        variant="destructive"
+                        onClick={() =>
+                          workflowControl.mutate({
+                            runId: run.id,
+                            action: "abort",
+                          })
+                        }
+                      >
+                        Abort
+                      </Button>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="mt-3 grid gap-2 md:grid-cols-2">
+                  {stages.map((stage) => (
+                    <div
+                      className="rounded-md bg-muted p-2 text-sm"
+                      key={stage.stageId}
+                    >
+                      <span className="font-medium">{stage.stageId}</span> ·{" "}
+                      {stage.status} · attempt {stage.attempts}/
+                      {run.maximumAttempts}
+                      <p className="text-muted-foreground">{stage.objective}</p>
+                    </div>
+                  ))}
+                </div>
+                {![
+                  "succeeded",
+                  "failed",
+                  "aborted",
+                  "awaiting_approval",
+                ].includes(run.status) ? (
+                  <div className="mt-3 flex gap-2">
+                    <Input
+                      aria-label={`Steer run ${run.id}`}
+                      value={workflowSteering}
+                      onChange={(event) =>
+                        setWorkflowSteering(event.target.value)
+                      }
+                      placeholder="Steer this run without stopping it"
+                    />
+                    <Button
+                      disabled={!workflowSteering.trim()}
+                      variant="outline"
+                      onClick={() =>
+                        workflowControl.mutate({
+                          runId: run.id,
+                          action: "steer",
+                          instruction: workflowSteering,
+                        })
+                      }
+                    >
+                      Steer
+                    </Button>
+                  </div>
+                ) : null}
+              </div>
+            ))}
+          </div>
+        )}
       </PageSection>
       <PageSection title="Monitors">
         {(dashboard.data?.monitors.length ?? 0) === 0 ? (

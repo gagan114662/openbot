@@ -53,6 +53,7 @@ import type { ContextGraph } from "./software-factory/context-graph";
 import { createSoftwareFactoryRoutes } from "./software-factory/routes";
 import type { SoftwareFactoryStore } from "./software-factory/store";
 import type { ShadowEvaluator } from "./software-factory/shadow-evaluator";
+import type { WorkflowRuntime } from "./software-factory/workflow-runtime";
 import type { WebhookReconciler } from "./webhooks/reconciler";
 
 export type AgentCallbackToolResolver = (input: {
@@ -246,6 +247,7 @@ export function createApp(
     tenantId: string;
     webhooks?: WebhookReconciler;
     shadows?: ShadowEvaluator;
+    workflows?: WorkflowRuntime;
   },
 ) {
   const app = new Hono<{ Variables: AppVariables }>();
@@ -973,6 +975,7 @@ export function createApp(
         requireUser,
         softwareFactory.webhooks,
         softwareFactory.shadows,
+        softwareFactory.workflows,
       ),
     );
   }

@@ -232,3 +232,99 @@ export const shadowEvaluations = pgTable(
     ),
   ],
 );
+
+export const factoryWorkflowRuns = pgTable(
+  "factory_workflow_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: text("tenant_id").notNull(),
+    jobId: uuid("job_id")
+      .notNull()
+      .references(() => factoryManagedJobs.id, { onDelete: "cascade" }),
+    status: text("status").notNull().default("queued"),
+    maximumAttempts: integer("maximum_attempts").notNull(),
+    concurrencyLimit: integer("concurrency_limit").notNull(),
+    steering: jsonb("steering").notNull().default({ events: [] }),
+    pauseRequested: boolean("pause_requested").notNull().default(false),
+    abortRequested: boolean("abort_requested").notNull().default(false),
+    approvedBy: text("approved_by"),
+    leaseOwner: text("lease_owner"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    uniqueIndex("factory_workflow_runs_job_uidx").on(
+      table.tenantId,
+      table.jobId,
+    ),
+    index("factory_workflow_runs_ready_idx").on(
+      table.tenantId,
+      table.status,
+      table.leaseExpiresAt,
+    ),
+  ],
+);
+
+export const factoryWorkflowStages = pgTable(
+  "factory_workflow_stages",
+  {
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => factoryWorkflowRuns.id, { onDelete: "cascade" }),
+    stageId: text("stage_id").notNull(),
+    objective: text("objective").notNull(),
+    requiredContext: jsonb("required_context").notNull().default({ keys: [] }),
+    dependsOn: jsonb("depends_on").notNull().default({ ids: [] }),
+    status: text("status").notNull().default("pending"),
+    attempts: integer("attempts").notNull().default(0),
+    sessionId: text("session_id"),
+    reviewerSessionId: text("reviewer_session_id"),
+    verification: jsonb("verification").notNull().default({}),
+    output: jsonb("output").notNull().default({}),
+    lastError: text("last_error"),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    updatedAt: updatedAt(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.runId, table.stageId] }),
+    index("factory_workflow_stages_status_idx").on(table.runId, table.status),
+  ],
+);
+
+export const factoryWorkflowArtifacts = pgTable(
+  "factory_workflow_artifacts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    runId: uuid("run_id")
+      .notNull()
+      .references(() => factoryWorkflowRuns.id, { onDelete: "cascade" }),
+    stageId: text("stage_id").notNull(),
+    kind: text("kind").notNull(),
+    uri: text("uri").notNull(),
+    content: text("content").notNull(),
+    checksum: text("checksum").notNull(),
+    revision: text("revision").notNull(),
+    producerSessionId: text("producer_session_id").notNull(),
+    command: text("command"),
+    exitCode: integer("exit_code"),
+    metadata: jsonb("metadata").notNull().default({}),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("factory_workflow_artifacts_identity_uidx").on(
+      table.runId,
+      table.stageId,
+      table.kind,
+      table.uri,
+      table.checksum,
+    ),
+    index("factory_workflow_artifacts_run_idx").on(
+      table.runId,
+      table.createdAt,
+    ),
+  ],
+);

@@ -54,4 +54,10 @@ describe("OpenBot workspace", () => {
       "COPY agent-codex/package.json agent-codex/package.json",
     );
   });
+
+  test("binds the container API to its published interface", () => {
+    const dockerfile = readFileSync(join(repositoryRoot, "Dockerfile"), "utf8");
+
+    expect(dockerfile).toContain("ENV SERVER_HOST=0.0.0.0");
+  });
 });

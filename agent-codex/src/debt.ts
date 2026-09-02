@@ -80,7 +80,10 @@ export async function assessTechnicalDebt(input: {
     const current = codeMetrics(text);
     // Modified legacy files are judged on debt added by this candidate, not debt that already
     // existed at HEAD. New files have no baseline and therefore remain fully accountable.
-    const baselineText = await output(["git", "show", `HEAD:${path}`], input.cwd);
+    const baselineText = await output(
+      ["git", "show", `HEAD:${path}`],
+      input.cwd,
+    );
     const baseline = baselineText
       ? codeMetrics(baselineText)
       : { complexityPoints: 0, duplicatedLines: 0, fileLines: 0 };

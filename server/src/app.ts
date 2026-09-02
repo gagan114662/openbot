@@ -240,9 +240,7 @@ export function createApp(
   const app = new Hono<{ Variables: AppVariables }>();
 
   app.get("/live", (context) => context.json({ status: "ok" }));
-  const readiness = async (
-    context: Context<{ Variables: AppVariables }>,
-  ) => {
+  const readiness = async (context: Context<{ Variables: AppVariables }>) => {
     try {
       await readinessProbe?.();
       return context.json({ status: "ok" });

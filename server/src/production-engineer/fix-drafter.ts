@@ -35,7 +35,8 @@ export function createCodexFixDrafter(repository: string): FixDrafter {
       ["git", "branch", "--show-current"],
       repository,
     );
-    if (!baseBranch) throw new Error("Autonomous fixes require a named base branch.");
+    if (!baseBranch)
+      throw new Error("Autonomous fixes require a named base branch.");
     const originUrl = await command(
       ["git", "remote", "get-url", "origin"],
       repository,

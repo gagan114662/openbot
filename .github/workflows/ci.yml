@@ -185,7 +185,9 @@ jobs:
     # postgres because the knowledge schema uses the extension.
     services:
       postgres:
-        image: pgvector/pgvector:pg17
+        # ubuntu-latest currently ships pg_dump 16. Keep the integration service on the same major
+        # so the executed backup/restore drill tests data instead of failing at client negotiation.
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_DB: openbot
           POSTGRES_USER: openbot

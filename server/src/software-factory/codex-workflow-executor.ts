@@ -198,7 +198,7 @@ export function createCodexWorkflowExecutor(
       stderr: stderr.slice(-100_000),
       interrupted: controller.signal.aborted,
     };
-    const content = JSON.stringify(result);
+    const content = JSON.stringify({ kind: "runtime-check", ...result });
     const material = await persistReviewMaterial(
       cwd,
       `${sessionId}.check`,
@@ -467,10 +467,21 @@ export function createCodexWorkflowExecutor(
           `Runtime-scoped candidate diff (runtime dependency/evidence paths excluded): ${scopedDiff.stdout || "empty"}`,
           `Artifacts: ${JSON.stringify(
             candidate.artifacts.map(
-              ({ uri, checksum, revision, metadata }) => ({
+              ({
+                kind,
                 uri,
                 checksum,
                 revision,
+                command,
+                exitCode,
+                metadata,
+              }) => ({
+                kind,
+                uri,
+                checksum,
+                revision,
+                command,
+                exitCode,
                 reviewMaterialPath: metadata?.reviewMaterialPath,
               }),
             ),

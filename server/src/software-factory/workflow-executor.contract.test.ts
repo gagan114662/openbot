@@ -104,6 +104,10 @@ describe.each(["codex", "claude"] as const)(
         kind: "runtime-check",
         exitCode: 0,
       });
+      expect(JSON.parse(candidate.artifacts[1]!.content)).toMatchObject({
+        kind: "runtime-check",
+        exitCode: 0,
+      });
       expect(
         String(candidate.artifacts[1]?.metadata?.reviewMaterialPath),
       ).not.toStartWith(`${root}/`);

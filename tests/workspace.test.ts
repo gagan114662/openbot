@@ -45,6 +45,7 @@ describe("OpenBot workspace", () => {
       );
     }
   });
+
   test("ships cross-workspace runtime imports in the production image", () => {
     const dockerfile = readFileSync(join(repositoryRoot, "Dockerfile"), "utf8");
 

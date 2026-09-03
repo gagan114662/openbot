@@ -501,13 +501,21 @@ export function createSoftwareFactoryRoutes(
     const action = context.req.param("action");
     const body = record(await context.req.json().catch(() => null));
     const before = await workflows.snapshot(runId);
+    const actorId = context.var.actor.id;
+    const fromStatus = before?.run.status ?? "unknown";
+    const instruction = nonempty(body?.instruction);
+    const instructionHash = instruction
+      ? createHash("sha256").update(instruction).digest("hex")
+      : undefined;
     const approve = async () => {
-      const actorId = context.var.actor.id;
-      const approved = await workflows.approve(runId, actorId);
+      const approved = await workflows.approve(runId, actorId, { fromStatus });
+      const afterApproval = approved ? null : await workflows.snapshot(runId);
       const run =
         approved ??
-        ((await workflows.snapshot(runId))?.run.status === "succeeded"
-          ? (await workflows.snapshot(runId))?.run
+        (afterApproval?.run.status === "succeeded"
+          ? Object.assign(afterApproval.run, {
+              controlAuditPersisted: true,
+            })
           : null);
       if (!run) return null;
       await store.completeJob(run.jobId, {
@@ -524,19 +532,18 @@ export function createSoftwareFactoryRoutes(
     };
     const result =
       action === "pause"
-        ? await workflows.requestPause(runId)
+        ? await workflows.requestPause(runId, { actorId, fromStatus })
         : action === "resume"
-          ? await workflows.resume(runId)
+          ? await workflows.resume(runId, { actorId, fromStatus })
           : action === "abort"
-            ? await workflows.requestAbort(runId)
+            ? await workflows.requestAbort(runId, { actorId, fromStatus })
             : action === "approve"
               ? await approve()
-              : action === "steer" && nonempty(body?.instruction)
-                ? await workflows.steer(
-                    runId,
-                    context.var.actor.id,
-                    nonempty(body?.instruction) as string,
-                  )
+              : action === "steer" && instruction && instructionHash
+                ? await workflows.steer(runId, actorId, instruction, {
+                    fromStatus,
+                    instructionHash,
+                  })
                 : null;
     if (!result)
       return context.json(
@@ -544,7 +551,7 @@ export function createSoftwareFactoryRoutes(
         409,
       );
     if (action === "abort") await cleanupWorktree?.(runId);
-    if (auditStore) {
+    if (auditStore && !("controlAuditPersisted" in result)) {
       await recordAuditEvent(auditStore, {
         eventType: "workflow.control_applied",
         targetType: "factory_workflow_run",
@@ -557,9 +564,7 @@ export function createSoftwareFactoryRoutes(
           toStatus: result.status,
           ...(action === "steer"
             ? {
-                instructionHash: createHash("sha256")
-                  .update(nonempty(body?.instruction) ?? "")
-                  .digest("hex"),
+                instructionHash,
               }
             : {}),
         },

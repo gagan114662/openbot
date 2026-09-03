@@ -184,6 +184,13 @@ export function createWorkflowWorker(options: {
           break;
         } catch (error) {
           reviewError = error;
+          if (attempt + 1 < reviewAttempts)
+            await options.runtime.recordReviewRetry(
+              runId,
+              stage.stageId,
+              reviewerSessionId,
+              error,
+            );
         }
       }
       if (!verification) throw reviewError;

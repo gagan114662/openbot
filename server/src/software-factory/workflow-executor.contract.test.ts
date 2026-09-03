@@ -59,7 +59,7 @@ if (${JSON.stringify(harness)} === "codex") {
   await Bun.write(output, JSON.stringify(payload));
 } else {
   if (!args.includes("--json-schema")) process.exit(42);
-  process.stdout.write(JSON.stringify({ structured_output: payload }));
+  process.stdout.write(JSON.stringify({ structured_output: payload, result: "fallback must not run" }));
 }
 `,
     { mode: 0o700 },
@@ -74,10 +74,17 @@ describe.each(["codex", "claude"] as const)(
     test("honours the persisted model and satisfies the shared executor contract", async () => {
       const { root, binary, workspaceRoot, reviewPrompt } =
         await fixture(harness);
+      let fallbackParses = 0;
       const executor =
         harness === "codex"
           ? createCodexWorkflowExecutor(root, { binary, workspaceRoot })
-          : createClaudeWorkflowExecutor(root, { binary, workspaceRoot });
+          : createClaudeWorkflowExecutor(root, {
+              binary,
+              workspaceRoot,
+              onFallbackParse: () => {
+                fallbackParses += 1;
+              },
+            });
       const runId = crypto.randomUUID();
       const stage = {
         stageId: "verify",
@@ -140,6 +147,7 @@ describe.each(["codex", "claude"] as const)(
       expect(prompt).not.toContain("fake worker result");
       expect(prompt).not.toContain("model reported");
       expect(prompt).toContain('"kind":"runtime-check"');
+      expect(fallbackParses).toBe(0);
       const evidencePath = String(
         candidate.artifacts[1]?.metadata?.reviewMaterialPath,
       );

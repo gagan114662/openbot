@@ -3,6 +3,7 @@ import { and, asc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Database } from "../db/client";
 import {
+  auditEvents,
   contextCompactionArtifacts,
   factoryManagedJobs,
   factoryWorkflowArtifacts,
@@ -203,6 +204,33 @@ export function verifyWorkflowEvidence(snapshot: {
 }
 
 export function createWorkflowRuntime(database: Database, tenantId: string) {
+  const controlAudit = async (
+    tx: Parameters<Parameters<typeof database.transaction>[0]>[0],
+    run: typeof factoryWorkflowRuns.$inferSelect,
+    input?: {
+      actorId: string;
+      action: "approve" | "abort" | "pause" | "resume" | "steer";
+      fromStatus: string;
+      instructionHash?: string;
+    },
+  ) => {
+    if (!input) return;
+    await tx.insert(auditEvents).values({
+      eventType: "workflow.control_applied",
+      targetType: "factory_workflow_run",
+      targetId: run.id,
+      actorUserId: input.actorId,
+      payload: {
+        action: input.action,
+        jobId: run.jobId,
+        fromStatus: input.fromStatus,
+        toStatus: run.status,
+        ...(input.instructionHash
+          ? { instructionHash: input.instructionHash }
+          : {}),
+      },
+    });
+  };
   return {
     async activeRunIds() {
       const rows = await database
@@ -417,6 +445,31 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
       return run ?? null;
     },
 
+    async recordReviewRetry(
+      runId: string,
+      stageId: string,
+      reviewerSessionId: string,
+      error: unknown,
+    ) {
+      const message = error instanceof Error ? error.message : String(error);
+      const [event] = await database
+        .insert(factoryWorkflowEvents)
+        .values({
+          runId,
+          stageId,
+          entity: "reviewer",
+          fromStatus: "malformed_output",
+          toStatus: "retrying",
+          detail: {
+            reviewerSessionId,
+            errorName: error instanceof Error ? error.name : "Error",
+            error: message.slice(0, 2_000),
+          },
+        })
+        .returning();
+      return event;
+    },
+
     async decideStageGate(
       runId: string,
       stageId: string,
@@ -514,47 +567,71 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
       });
     },
 
-    async requestPause(runId: string) {
-      const [run] = await database
-        .update(factoryWorkflowRuns)
-        .set({
-          pauseRequested: true,
-          status: "pausing",
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(factoryWorkflowRuns.id, runId),
-            eq(factoryWorkflowRuns.tenantId, tenantId),
-            inArray(factoryWorkflowRuns.status, ["queued", "running"]),
-          ),
-        )
-        .returning();
-      return run ?? null;
+    async requestPause(
+      runId: string,
+      audit?: { actorId: string; fromStatus: string },
+    ) {
+      return database.transaction(async (tx) => {
+        const [run] = await tx
+          .update(factoryWorkflowRuns)
+          .set({
+            pauseRequested: true,
+            status: "pausing",
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(factoryWorkflowRuns.id, runId),
+              eq(factoryWorkflowRuns.tenantId, tenantId),
+              inArray(factoryWorkflowRuns.status, ["queued", "running"]),
+            ),
+          )
+          .returning();
+        if (run && audit)
+          await controlAudit(tx, run, {
+            ...audit,
+            action: "pause",
+          });
+        return run
+          ? Object.assign(run, audit ? { controlAuditPersisted: true } : {})
+          : null;
+      });
     },
 
-    async resume(runId: string) {
-      const [run] = await database
-        .update(factoryWorkflowRuns)
-        .set({
-          pauseRequested: false,
-          status: "queued",
-          leaseOwner: null,
-          leaseExpiresAt: null,
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(factoryWorkflowRuns.id, runId),
-            eq(factoryWorkflowRuns.tenantId, tenantId),
-            inArray(factoryWorkflowRuns.status, ["paused", "pausing"]),
-          ),
-        )
-        .returning();
-      return run ?? null;
+    async resume(
+      runId: string,
+      audit?: { actorId: string; fromStatus: string },
+    ) {
+      return database.transaction(async (tx) => {
+        const [run] = await tx
+          .update(factoryWorkflowRuns)
+          .set({
+            pauseRequested: false,
+            status: "queued",
+            leaseOwner: null,
+            leaseExpiresAt: null,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(factoryWorkflowRuns.id, runId),
+              eq(factoryWorkflowRuns.tenantId, tenantId),
+              inArray(factoryWorkflowRuns.status, ["paused", "pausing"]),
+            ),
+          )
+          .returning();
+        if (run && audit)
+          await controlAudit(tx, run, { ...audit, action: "resume" });
+        return run
+          ? Object.assign(run, audit ? { controlAuditPersisted: true } : {})
+          : null;
+      });
     },
 
-    async requestAbort(runId: string) {
+    async requestAbort(
+      runId: string,
+      audit?: { actorId: string; fromStatus: string },
+    ) {
       const now = new Date();
       return database.transaction(async (tx) => {
         const [run] = await tx
@@ -581,7 +658,7 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
             ),
           )
           .returning();
-        if (run)
+        if (run && audit)
           await tx
             .update(factoryWorkflowStages)
             .set({ status: "aborted", updatedAt: now })
@@ -591,56 +668,89 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
                 inArray(factoryWorkflowStages.status, ["pending", "running"]),
               ),
             );
-        return run ?? null;
+        if (run && audit)
+          await controlAudit(tx, run, { ...audit, action: "abort" });
+        return run
+          ? Object.assign(run, audit ? { controlAuditPersisted: true } : {})
+          : null;
       });
     },
 
-    async steer(runId: string, actorId: string, instruction: string) {
+    async steer(
+      runId: string,
+      actorId: string,
+      instruction: string,
+      audit?: { fromStatus: string; instructionHash: string },
+    ) {
       const text = instruction.trim();
       if (!text || text.length > 4_000)
         throw new Error(
           "Steering instruction must contain 1-4,000 characters.",
         );
-      const [run] = await database
-        .update(factoryWorkflowRuns)
-        .set({
-          steering: sql`jsonb_set(coalesce(${factoryWorkflowRuns.steering}, '{"events":[]}'::jsonb), '{events}', coalesce(${factoryWorkflowRuns.steering}->'events', '[]'::jsonb) || ${JSON.stringify([{ actorId, instruction: text, at: new Date().toISOString() }])}::jsonb)`,
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(factoryWorkflowRuns.id, runId),
-            eq(factoryWorkflowRuns.tenantId, tenantId),
-            inArray(factoryWorkflowRuns.status, [
-              "queued",
-              "running",
-              "paused",
-              "pausing",
-            ]),
-          ),
-        )
-        .returning();
-      return run ?? null;
+      return database.transaction(async (tx) => {
+        const [run] = await tx
+          .update(factoryWorkflowRuns)
+          .set({
+            steering: sql`jsonb_set(coalesce(${factoryWorkflowRuns.steering}, '{"events":[]}'::jsonb), '{events}', coalesce(${factoryWorkflowRuns.steering}->'events', '[]'::jsonb) || ${JSON.stringify([{ actorId, instruction: text, at: new Date().toISOString() }])}::jsonb)`,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(factoryWorkflowRuns.id, runId),
+              eq(factoryWorkflowRuns.tenantId, tenantId),
+              inArray(factoryWorkflowRuns.status, [
+                "queued",
+                "running",
+                "paused",
+                "pausing",
+              ]),
+            ),
+          )
+          .returning();
+        if (run && audit)
+          await controlAudit(tx, run, {
+            actorId,
+            action: "steer",
+            ...audit,
+          });
+        return run
+          ? Object.assign(run, audit ? { controlAuditPersisted: true } : {})
+          : null;
+      });
     },
 
-    async approve(runId: string, actorId: string) {
-      const [run] = await database
-        .update(factoryWorkflowRuns)
-        .set({
-          approvedBy: actorId,
-          status: "succeeded",
-          completedAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(factoryWorkflowRuns.id, runId),
-            eq(factoryWorkflowRuns.tenantId, tenantId),
-            eq(factoryWorkflowRuns.status, "awaiting_approval"),
-          ),
-        )
-        .returning();
-      return run ?? null;
+    async approve(
+      runId: string,
+      actorId: string,
+      audit?: { fromStatus: string },
+    ) {
+      return database.transaction(async (tx) => {
+        const [run] = await tx
+          .update(factoryWorkflowRuns)
+          .set({
+            approvedBy: actorId,
+            status: "succeeded",
+            completedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(factoryWorkflowRuns.id, runId),
+              eq(factoryWorkflowRuns.tenantId, tenantId),
+              eq(factoryWorkflowRuns.status, "awaiting_approval"),
+            ),
+          )
+          .returning();
+        if (run && audit)
+          await controlAudit(tx, run, {
+            actorId,
+            action: "approve",
+            ...audit,
+          });
+        return run
+          ? Object.assign(run, audit ? { controlAuditPersisted: true } : {})
+          : null;
+      });
     },
 
     async claim(workerId: string, leaseMs = 30_000) {

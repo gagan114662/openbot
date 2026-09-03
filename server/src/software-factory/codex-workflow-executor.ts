@@ -127,6 +127,7 @@ export function createCodexWorkflowExecutor(
     harness?: "codex" | "claude";
     binary?: string;
     workspaceRoot?: string;
+    onFallbackParse?: () => void;
   } = {},
 ): WorkflowHarnessExecutor {
   const root = resolve(repository);
@@ -339,6 +340,7 @@ export function createCodexWorkflowExecutor(
       return envelope.structured_output as Record<string, unknown>;
     const payload =
       typeof envelope.result === "string" ? envelope.result : response.stdout;
+    options.onFallbackParse?.();
     return parseJsonPayload(payload);
   }
 

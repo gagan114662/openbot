@@ -77,6 +77,8 @@ describe("managed workflow plans", () => {
     expect(stages[0]?.checks.some(({ id }) => id === "observable-change")).toBe(
       false,
     );
+    expect(stages[0]?.objective).toContain("nonterminal stage");
+    expect(stages.at(-1)?.objective).toContain("terminal stage");
   });
 });
 

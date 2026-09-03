@@ -69,7 +69,7 @@ export function managedWorkflowStages(
     gate?: { kind: "human"; prompt: string; roles: string[] },
   ) => ({
     id,
-    objective: `${purpose}. Overall objective: ${objective}`,
+    objective: purpose,
     requiredContext,
     dependsOn,
     checks: checks.map((check) => ({ ...check, command: [...check.command] })),
@@ -147,6 +147,13 @@ export function managedWorkflowStages(
       ];
       break;
   }
+  const terminalIndex = stages.length - 1;
+  stages.forEach((plannedStage, index) => {
+    plannedStage.objective +=
+      index === terminalIndex
+        ? `. This is the terminal stage: satisfy the overall objective now: ${objective}`
+        : `. This is a nonterminal stage: use the overall objective only as context and do not require its final deliverable yet: ${objective}`;
+  });
   if (observableChange) {
     const terminal = stages.at(-1);
     if (!terminal) throw new Error("Managed workflow has no terminal stage.");

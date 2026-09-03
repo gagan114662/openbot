@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import { artifactChecksum, verifyWorkflowEvidence } from "./workflow-runtime";
 
-const validSnapshot = () => {
+type WorkflowEvidenceSnapshot = Parameters<typeof verifyWorkflowEvidence>[0];
+
+const validSnapshot = (): WorkflowEvidenceSnapshot => {
   const content = "real captured output";
   return {
     run: {
@@ -52,6 +54,24 @@ test("a machine-verified run is ready, but not verified, until a human approves 
     readyForApproval: true,
     verified: false,
     checks: { humanApproval: false },
+  });
+});
+
+test("an intermediate stage gate is pending, not a failed terminal proof", () => {
+  const snapshot = validSnapshot();
+  snapshot.run = { status: "awaiting_approval", approvedBy: null };
+  snapshot.stages.push({
+    stageId: "repair",
+    status: "awaiting_approval",
+    sessionId: null,
+    reviewerSessionId: null,
+    verification: {},
+  });
+  expect(verifyWorkflowEvidence(snapshot)).toMatchObject({
+    terminal: false,
+    readyForApproval: false,
+    verified: false,
+    checks: { allStagesSucceeded: false, humanApproval: false },
   });
 });
 

@@ -185,16 +185,18 @@ export function verifyWorkflowEvidence(snapshot: {
     ),
     humanApproval: Boolean(snapshot.run.approvedBy),
   };
-  const terminal = ["awaiting_approval", "succeeded"].includes(
-    snapshot.run.status,
-  );
+  const terminal =
+    snapshot.run.status === "succeeded" ||
+    (snapshot.run.status === "awaiting_approval" && checks.allStagesSucceeded);
   const machineChecksPassed = Object.entries(checks).every(
     ([check, passed]) => check === "humanApproval" || passed,
   );
   return {
     terminal,
     readyForApproval:
-      snapshot.run.status === "awaiting_approval" && machineChecksPassed,
+      terminal &&
+      snapshot.run.status === "awaiting_approval" &&
+      machineChecksPassed,
     verified: terminal && Object.values(checks).every(Boolean),
     checks,
   };

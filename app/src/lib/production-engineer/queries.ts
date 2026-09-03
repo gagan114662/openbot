@@ -152,6 +152,7 @@ export type SoftwareFactoryDashboard = {
   workflows: Array<{
     evidence: {
       terminal: boolean;
+      readyForApproval: boolean;
       verified: boolean;
       checks: Record<string, boolean>;
     };

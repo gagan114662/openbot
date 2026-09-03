@@ -437,9 +437,11 @@ function ProductionEngineerPage() {
                         Causal evidence integrity:{" "}
                         {evidence.verified
                           ? "VERIFIED"
-                          : evidence.terminal
-                            ? "FAILED"
-                            : "PENDING"}
+                          : evidence.readyForApproval
+                            ? "READY FOR APPROVAL"
+                            : evidence.terminal
+                              ? "FAILED"
+                              : "PENDING"}
                       </span>
                       <a
                         className="underline"
@@ -451,13 +453,19 @@ function ProductionEngineerPage() {
                       </a>
                     </div>
                     <ul className="mt-1 grid gap-x-3 text-xs md:grid-cols-2">
-                      {Object.entries(evidence.checks).map(
-                        ([check, passed]) => (
+                      {Object.entries(evidence.checks)
+                        .filter(
+                          ([check, passed]) =>
+                            check !== "humanApproval" || passed,
+                        )
+                        .map(([check, passed]) => (
                           <li key={check}>
                             {passed ? "✓" : "✗"} {check}
                           </li>
-                        ),
-                      )}
+                        ))}
+                      {evidence.readyForApproval ? (
+                        <li>○ human approval pending</li>
+                      ) : null}
                     </ul>
                   </div>
                   <details className="mt-3 text-sm">

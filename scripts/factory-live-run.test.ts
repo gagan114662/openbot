@@ -14,6 +14,30 @@ describe("factory live-run proof tools", () => {
   test("observable verifier rejects a missing change and accepts exact bytes", async () => {
     const root = await mkdtemp(join(tmpdir(), "openbot-observable-"));
     roots.push(root);
+    await writeFile(join(root, "PROOF.md"), "baseline\n");
+    for (const args of [
+      ["init", "-q"],
+      ["config", "user.email", "proof@openbot.test"],
+      ["config", "user.name", "OpenBot proof"],
+      ["add", "PROOF.md"],
+      ["commit", "-qm", "baseline"],
+    ])
+      expect(Bun.spawnSync(["git", ...args], { cwd: root }).exitCode).toBe(0);
+    const unchangedDigest = new Bun.CryptoHasher("sha256")
+      .update("baseline\n")
+      .digest("hex");
+    const unchanged = Bun.spawnSync(
+      [
+        "bun",
+        new URL("verify-observable-change.ts", import.meta.url).pathname,
+        "--path",
+        "PROOF.md",
+        "--sha256",
+        unchangedDigest,
+      ],
+      { cwd: root },
+    );
+    expect(unchanged.exitCode).not.toBe(0);
     await writeFile(join(root, "PROOF.md"), "proved\n");
     const digest = new Bun.CryptoHasher("sha256")
       .update("proved\n")

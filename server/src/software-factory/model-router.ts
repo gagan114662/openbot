@@ -16,6 +16,9 @@ export type ModelBenchmark = {
   attemptedOutcomes: number;
   totalCostMicros: number;
   enabled: boolean;
+  source?: "measured" | "seeded";
+  benchmarkRunId?: string | null;
+  seedReason?: string | null;
 };
 
 export type RoutingDecision = {
@@ -26,6 +29,7 @@ export type RoutingDecision = {
   expectedQuality: number;
   expectedCostPerOutcomeMicros: number;
   reason: string;
+  source: "measured" | "seeded";
 };
 
 const finiteNonNegative = (value: number) =>
@@ -67,6 +71,7 @@ export function chooseModel(input: {
   tier: ExecutionTier;
   minimumQuality: number;
   candidates: ModelBenchmark[];
+  allowSeeded?: boolean;
 }): RoutingDecision {
   if (!executionTiers.includes(input.tier))
     throw new Error("Unknown execution tier.");
@@ -79,6 +84,8 @@ export function chooseModel(input: {
   const eligible = input.candidates.filter(
     (candidate) =>
       candidate.enabled &&
+      ((candidate.source ?? "measured") === "measured" ||
+        input.allowSeeded === true) &&
       candidate.task === input.task &&
       Number.isFinite(candidate.quality) &&
       candidate.quality >= input.minimumQuality &&
@@ -105,7 +112,8 @@ export function chooseModel(input: {
     tier: input.tier,
     expectedQuality: selected.quality,
     expectedCostPerOutcomeMicros: observedCostPerOutcome(selected),
-    reason: `Cheapest observed cost per successful outcome on the quality-clearing Pareto frontier (${frontier.length} candidates).`,
+    source: selected.source ?? "measured",
+    reason: `${selected.source ?? "measured"} benchmark: cheapest observed cost per successful outcome on the quality-clearing Pareto frontier (${frontier.length} candidates).`,
   };
 }
 

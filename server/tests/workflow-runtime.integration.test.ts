@@ -57,6 +57,7 @@ let runId = crypto.randomUUID();
 describe("durable workflow runtime", () => {
   test("commits exactly one privacy-safe audit row with each durable control transition", async () => {
     await store.benchmark({
+      source: "measured",
       model: "audit-model",
       task: "ci-repair",
       quality: 0.9,
@@ -231,6 +232,7 @@ describe("durable workflow runtime", () => {
 
   test("repairs within budget, enforces dependencies, pauses, resumes, and requires approval", async () => {
     await store.benchmark({
+      source: "measured",
       model: "worker-small",
       task: "ci-repair",
       quality: 0.9,
@@ -577,6 +579,7 @@ if (!prompt.includes("Independently review")) {
       );
       await chmod(script, 0o700);
       await store.benchmark({
+        source: "measured",
         harness: "claude",
         model: "claude-contract",
         task: "ci-repair",

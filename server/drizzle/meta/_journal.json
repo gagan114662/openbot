@@ -330,6 +330,13 @@
       "when": 1788446267142,
       "tag": "0046_light_tyger_tiger",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1788450525841,
+      "tag": "0047_elite_mac_gargan",
+      "breakpoints": true
     }
   ]
 }

@@ -131,6 +131,9 @@ export const factoryModelBenchmarks = pgTable(
     attemptedOutcomes: integer("attempted_outcomes").notNull().default(0),
     totalCostMicros: integer("total_cost_micros").notNull().default(0),
     enabled: boolean("enabled").notNull().default(true),
+    source: text("source").notNull().default("seeded"),
+    benchmarkRunId: uuid("benchmark_run_id"),
+    seedReason: text("seed_reason"),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
@@ -154,6 +157,8 @@ export const factoryManagedJobs = pgTable(
     status: text("status").notNull().default("queued"),
     selectedModel: text("selected_model"),
     selectedHarness: text("selected_harness"),
+    routingSource: text("routing_source"),
+    routingReason: text("routing_reason"),
     outcome: jsonb("outcome").notNull().default({}),
     costMicros: integer("cost_micros").notNull().default(0),
     createdBy: text("created_by").notNull(),
@@ -164,6 +169,54 @@ export const factoryManagedJobs = pgTable(
     index("factory_managed_jobs_tenant_created_idx").on(
       table.tenantId,
       table.createdAt,
+    ),
+  ],
+);
+
+export const factoryBenchmarkRuns = pgTable(
+  "factory_benchmark_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    tenantId: text("tenant_id").notNull(),
+    task: text("task").notNull(),
+    revision: text("revision").notNull(),
+    status: text("status").notNull().default("running"),
+    createdBy: text("created_by").notNull(),
+    createdAt: createdAt(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  (table) => [
+    index("factory_benchmark_runs_tenant_created_idx").on(
+      table.tenantId,
+      table.createdAt,
+    ),
+  ],
+);
+
+export const factoryBenchmarkOutcomes = pgTable(
+  "factory_benchmark_outcomes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    benchmarkRunId: uuid("benchmark_run_id")
+      .notNull()
+      .references(() => factoryBenchmarkRuns.id, { onDelete: "cascade" }),
+    workflowRunId: uuid("workflow_run_id").notNull(),
+    harness: text("harness").notNull(),
+    model: text("model").notNull(),
+    checkId: text("check_id").notNull(),
+    passed: boolean("passed").notNull(),
+    wallTimeMs: integer("wall_time_ms").notNull(),
+    repairAttempts: integer("repair_attempts").notNull(),
+    tokens: integer("tokens"),
+    costMicros: integer("cost_micros").notNull().default(0),
+    createdAt: createdAt(),
+  },
+  (table) => [
+    uniqueIndex("factory_benchmark_outcomes_identity_uidx").on(
+      table.benchmarkRunId,
+      table.harness,
+      table.model,
+      table.checkId,
     ),
   ],
 );

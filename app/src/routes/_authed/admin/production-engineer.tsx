@@ -39,6 +39,8 @@ function ProductionEngineerPage() {
   const [gateFeedback, setGateFeedback] = useState<Record<string, string>>({});
   const [gateProducer, setGateProducer] = useState<Record<string, string>>({});
   const [streamState, setStreamState] = useState("connecting");
+  const [streamLines, setStreamLines] = useState<string[]>([]);
+  const [steeringMode, setSteeringMode] = useState<string | null>(null);
   const [jobObjective, setJobObjective] = useState("");
   const [jobContextKeys, setJobContextKeys] = useState("");
   const [jobObservablePath, setJobObservablePath] = useState("");
@@ -76,6 +78,30 @@ function ProductionEngineerPage() {
     events.addEventListener("snapshot", () => {
       setStreamState("live");
       void queryClient.invalidateQueries({ queryKey: ["software-factory"] });
+    });
+    const refreshFromPush = () =>
+      void queryClient.invalidateQueries({ queryKey: ["software-factory"] });
+    events.addEventListener("transition", refreshFromPush);
+    const appendOutput = (message: Event) => {
+      const event = JSON.parse((message as MessageEvent).data) as {
+        payload?: { chunk?: string };
+      };
+      if (!event.payload?.chunk) return;
+      setStreamLines((current) =>
+        [...current, event.payload?.chunk ?? ""]
+          .join("")
+          .slice(-65_536)
+          .split("\n"),
+      );
+    };
+    events.addEventListener("check-output", appendOutput);
+    events.addEventListener("executor-output", appendOutput);
+    events.addEventListener("control", (message) => {
+      const event = JSON.parse((message as MessageEvent).data) as {
+        payload?: { mode?: string };
+      };
+      setSteeringMode(event.payload?.mode ?? "applied");
+      refreshFromPush();
     });
     events.addEventListener("error", () => setStreamState("reconnecting"));
     return () => events.close();
@@ -187,6 +213,19 @@ function ProductionEngineerPage() {
             ? "Measured benchmark routes use executed checks, a judging orchestrator, bounded workers, and tenant-isolated graph context."
             : "Only seeded bootstrap routes exist. They are excluded from routing unless the explicit seeded-route override is enabled."}
         </p>
+        {steeringMode ? (
+          <p className="mb-2 text-xs" data-testid="steering-mode">
+            Latest steering mode: {steeringMode}
+          </p>
+        ) : null}
+        {streamLines.length ? (
+          <pre
+            className="mb-2 max-h-48 overflow-auto rounded-md bg-muted p-2 text-xs"
+            data-testid="workflow-live-output"
+          >
+            {streamLines.slice(-80).join("\n")}
+          </pre>
+        ) : null}
         <div className="grid gap-3 md:grid-cols-3">
           <FactoryCard
             label="Execution tiers"

@@ -6,6 +6,7 @@ import {
   createClaudeWorkflowExecutor,
   createCodexWorkflowExecutor,
 } from "./codex-workflow-executor";
+import { subscribeWorkflowEvents } from "./workflow-stream";
 import { StageExecutionFailure } from "./workflow-worker";
 
 const roots: string[] = [];
@@ -99,7 +100,7 @@ describe.each(["codex", "claude"] as const)(
           items: [
             {
               id: "runtime-command",
-              command: ["git", "diff", "--check"],
+              command: ["bun", "-e", "console.log('check-output')"],
               timeoutMs: 10_000,
               required: true,
             },
@@ -113,6 +114,13 @@ describe.each(["codex", "claude"] as const)(
         run: { steering: { events: [] } },
         artifacts: [],
       };
+      const streamed: string[] = [];
+      let candidateResolved = false;
+      const stopStream = subscribeWorkflowEvents(runId, (event) => {
+        if (event.type !== "check-output") return;
+        expect(candidateResolved).toBe(false);
+        streamed.push(String(event.payload.chunk));
+      });
       const candidate = await executor.run({
         runId,
         stage,
@@ -120,6 +128,9 @@ describe.each(["codex", "claude"] as const)(
         sessionId: "worker-session",
         signal: new AbortController().signal,
       } as never);
+      candidateResolved = true;
+      stopStream();
+      expect(streamed.join("")).toContain("check-output");
       expect(candidate.sessionId).toBe("worker-session");
       expect(candidate.artifacts).toHaveLength(3);
       expect(candidate.artifacts[0]?.metadata).toMatchObject({
@@ -168,7 +179,7 @@ describe.each(["codex", "claude"] as const)(
       expect(prompt).not.toContain("model reported");
       expect(prompt).toContain('"kind":"runtime-check"');
       const evidencePath = String(
-        candidate.artifacts[1]?.metadata?.reviewMaterialPath,
+        candidate.artifacts[2]?.metadata?.reviewMaterialPath,
       );
       await executor.cleanup?.(runId);
       await expect(

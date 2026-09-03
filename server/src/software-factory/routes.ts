@@ -11,6 +11,7 @@ import { type ManagedJobKind, managedJobKinds } from "./orchestrator";
 import type { ShadowEvaluator } from "./shadow-evaluator";
 import type { SoftwareFactoryStore } from "./store";
 import type { WorkflowRuntime } from "./workflow-runtime";
+import { subscribeWorkflowEvents } from "./workflow-stream";
 
 const record = (value: unknown): Record<string, unknown> | null =>
   value && typeof value === "object" && !Array.isArray(value)
@@ -436,7 +437,6 @@ export function createSoftwareFactoryRoutes(
     if (!workflows) return context.notFound();
     const runId = context.req.param("runId");
     const encoder = new TextEncoder();
-    let last = "";
     const stream = new ReadableStream({
       async start(controller) {
         const send = (event: string, value: unknown) =>
@@ -445,26 +445,37 @@ export function createSoftwareFactoryRoutes(
               `event: ${event}\ndata: ${JSON.stringify(value)}\n\n`,
             ),
           );
-        while (!context.req.raw.signal.aborted) {
-          const snapshot = await workflows.snapshot(runId);
-          if (!snapshot) {
-            send("error", { error: "Workflow not found." });
-            break;
-          }
-          const signature = JSON.stringify({
-            run: snapshot.run,
-            stages: snapshot.stages,
-            events: snapshot.events,
-          });
-          if (signature !== last) {
-            send("snapshot", snapshot);
-            last = signature;
-          } else send("heartbeat", { at: new Date().toISOString() });
-          if (["succeeded", "failed", "aborted"].includes(snapshot.run.status))
-            break;
-          await new Promise((resolve) => setTimeout(resolve, 1_500));
+        const snapshot = await workflows.snapshot(runId);
+        if (!snapshot) {
+          send("error", { error: "Workflow not found." });
+          controller.close();
+          return;
         }
-        controller.close();
+        send("snapshot", snapshot);
+        if (["succeeded", "failed", "aborted"].includes(snapshot.run.status)) {
+          controller.close();
+          return;
+        }
+        let closed = false;
+        let heartbeat: ReturnType<typeof setInterval> | undefined;
+        let unsubscribe = () => {};
+        const close = () => {
+          if (closed) return;
+          closed = true;
+          if (heartbeat) clearInterval(heartbeat);
+          unsubscribe();
+          controller.close();
+        };
+        unsubscribe = subscribeWorkflowEvents(runId, (event) => {
+          if (closed) return;
+          send(event.type, event);
+        });
+        heartbeat = setInterval(
+          () => send("heartbeat", { at: new Date().toISOString() }),
+          15_000,
+        );
+        heartbeat.unref?.();
+        context.req.raw.signal.addEventListener("abort", close, { once: true });
       },
     });
     return new Response(stream, {

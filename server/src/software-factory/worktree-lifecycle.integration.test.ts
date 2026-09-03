@@ -107,7 +107,8 @@ describe("real Git worktree lifecycle", () => {
       };
       expect(duringDisk.diskKilobytes).toBeGreaterThan(before.diskKilobytes);
       const evidencePath = String(
-        candidate.artifacts[0]?.metadata?.reviewMaterialPath,
+        candidate.artifacts.find(({ kind }) => kind === "codex-stage-result")
+          ?.metadata?.reviewMaterialPath,
       );
       let claimed = false;
       const worker = createWorkflowWorker({

@@ -280,6 +280,7 @@ export const analyticsEvalRuns = pgTable("analytics_eval_runs", {
   baselineScore: integer("baseline_score"),
   aggregateScore: integer("aggregate_score"),
   regression: boolean("regression").notNull().default(false),
+  failureReason: text("failure_reason"),
   startedAt: timestamp("started_at", { withTimezone: true }),
   finishedAt: timestamp("finished_at", { withTimezone: true }),
   createdBy: text("created_by").notNull(),

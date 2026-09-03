@@ -18,6 +18,9 @@ import {
   runWithAgentDeadline,
   runWithContextCompaction,
   runWithEvidenceRequirement,
+  runWithInferenceShadow,
+  setContextCapsuleRecorder,
+  setInferenceShadowRecorder,
   standingRoleMessage,
 } from "../src/copilot";
 import { grantedToolGuidance } from "../src/plugins/tools";
@@ -66,6 +69,29 @@ function answerEvents(text: string): BaseEvent[] {
 }
 
 describe("retrieved-evidence enforcement", () => {
+  test("shadows the final output emitted by a real agent stream", async () => {
+    let release: (() => void) | undefined;
+    const observed = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const shadows: unknown[] = [];
+    setInferenceShadowRecorder(async (input) => {
+      shadows.push(input);
+      release?.();
+    });
+    const input = evidenceInput("Run the actual primary path.");
+    await lastValueFrom(
+      runWithInferenceShadow(input, () =>
+        from(answerEvents("emitted primary output")),
+      ),
+    );
+    await observed;
+    expect(shadows).toEqual([
+      { run: input, primaryOutput: "emitted primary output" },
+    ]);
+    setInferenceShadowRecorder(undefined);
+  });
+
   test("aborts a built-in run that stops producing events", async () => {
     let aborted = 0;
     await expect(
@@ -101,6 +127,10 @@ describe("retrieved-evidence enforcement", () => {
   });
 
   test("publishes compaction metadata on the finished event for the UI", async () => {
+    const capsules: unknown[] = [];
+    setContextCapsuleRecorder(async (capsule) => {
+      capsules.push(capsule);
+    });
     const agent = new ScriptedEvidenceAgent([
       answerEvents("Still responsive."),
     ]);
@@ -120,6 +150,12 @@ describe("retrieved-evidence enforcement", () => {
 
     expect(finished).toMatchObject({
       result: { openbotContextCompaction: { omittedMessages: 2 } },
+    });
+    expect(capsules).toHaveLength(1);
+    expect(capsules[0]).toMatchObject({
+      runId: "run-evidence",
+      threadId: "thread-evidence",
+      messages: input.messages.slice(0, 2),
     });
   });
 

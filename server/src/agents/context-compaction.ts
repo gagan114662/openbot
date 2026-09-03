@@ -43,6 +43,8 @@ export type CompactionResult<T extends Message> = {
   compacted: boolean;
   capsuleChecksum: string;
   omittedMessages: number;
+  /** Exact omitted history for durable storage outside the model's active context. */
+  omittedArtifact: T[];
 };
 
 /**
@@ -79,6 +81,7 @@ export function compactMessages<T extends Message>(
       compacted: false,
       capsuleChecksum,
       omittedMessages: 0,
+      omittedArtifact: [],
     };
   }
 
@@ -115,5 +118,6 @@ export function compactMessages<T extends Message>(
     compacted: true,
     capsuleChecksum,
     omittedMessages: omitted.length,
+    omittedArtifact: omitted,
   };
 }

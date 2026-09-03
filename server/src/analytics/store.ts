@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, createHmac, randomUUID } from "node:crypto";
 import {
   and,
   desc,
@@ -6,6 +6,7 @@ import {
   gte,
   ilike,
   inArray,
+  isNull,
   lt,
   lte,
   or,
@@ -32,7 +33,32 @@ import {
   analyticsSpans,
   analyticsTopics,
   auditEvents,
+  verifiedValueOutcomes,
 } from "../db/schema";
+
+let evaluatorInflight = 0;
+
+export function evaluatorRuntimeMetrics() {
+  return { inflight: evaluatorInflight };
+}
+
+async function boundedMap<T, R>(
+  values: readonly T[],
+  limit: number,
+  map: (value: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const results = new Array<R>(values.length);
+  let cursor = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(limit, values.length) }, async () => {
+      while (cursor < values.length) {
+        const index = cursor++;
+        results[index] = await map(values[index] as T, index);
+      }
+    }),
+  );
+  return results;
+}
 import {
   type AnalyticsPrivacyMode,
   contentForPrivacyMode,
@@ -233,9 +259,63 @@ function behavioralClusters(rows: Array<{ id: string; tokens: string[] }>) {
   }));
 }
 
-export function createAnalyticsStore(database: Database) {
+export function createAnalyticsStore(database: Database, tenantId?: string) {
   let llmJudge: ((prompt: string) => Promise<string>) | undefined;
   return {
+    async ingestClient(actorUserId: string, input: AnalyticsIngest) {
+      const [namedSession] = await database
+        .select({
+          userId: analyticsSessions.userId,
+          agentId: analyticsSessions.agentId,
+        })
+        .from(analyticsSessions)
+        .where(eq(analyticsSessions.id, input.session.id))
+        .limit(1);
+      if (namedSession) {
+        if (
+          namedSession.userId !== actorUserId ||
+          (namedSession.agentId ?? undefined) !== input.session.agentId
+        ) {
+          await database.insert(auditEvents).values({
+            actorUserId,
+            eventType: "analytics.session_ownership_refused",
+            targetType: "analytics_session",
+            targetId: input.session.id,
+            payload: {
+              attemptedAgentId: input.session.agentId,
+              reason: "client-named-foreign-session",
+            },
+          });
+          throw new Error(
+            "Analytics session belongs to another user or agent.",
+          );
+        }
+        return this.ingest(actorUserId, input);
+      }
+      const key =
+        process.env.ANALYTICS_SESSION_HMAC_KEY ??
+        process.env.KEY_ENCRYPTION_KEY;
+      if (!key)
+        throw new Error(
+          "ANALYTICS_SESSION_HMAC_KEY or KEY_ENCRYPTION_KEY is required.",
+        );
+      const digest = Buffer.from(
+        createHmac("sha256", key)
+          .update(
+            `${actorUserId}\0${input.session.agentId ?? ""}\0${input.session.id}`,
+          )
+          .digest()
+          .subarray(0, 16),
+      );
+      digest[6] = ((digest[6] ?? 0) & 0x0f) | 0x40;
+      digest[8] = ((digest[8] ?? 0) & 0x3f) | 0x80;
+      const hex = digest.toString("hex");
+      const serverSessionId = `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+      return this.ingest(actorUserId, {
+        ...input,
+        session: { ...input.session, id: serverSessionId },
+      });
+    },
     setLlmJudge(judge: (prompt: string) => Promise<string>) {
       llmJudge = judge;
     },
@@ -377,7 +457,13 @@ export function createAnalyticsStore(database: Database) {
     async recordBusinessOutcome(
       actorUserId: string,
       sessionId: string,
-      input: { name: string; success: boolean; revenueMicros: number },
+      input: {
+        name: string;
+        success: boolean;
+        revenueMicros: number;
+        humanMinutesSaved: number;
+        laborValueMicros: number;
+      },
     ) {
       const [session] = await database
         .select({ agentId: analyticsSessions.agentId })
@@ -396,7 +482,11 @@ export function createAnalyticsStore(database: Database) {
           userId: actorUserId,
           agentId: session.agentId,
           success: input.success,
-          properties: { revenueMicros: input.revenueMicros },
+          properties: {
+            revenueMicros: input.revenueMicros,
+            humanMinutesSaved: input.humanMinutesSaved,
+            laborValueMicros: input.laborValueMicros,
+          },
         })
         .returning();
       if (!event) throw new Error("Business outcome was not recorded.");
@@ -517,16 +607,34 @@ export function createAnalyticsStore(database: Database) {
       const events = (input.events ?? []).slice(0, 1_000);
       const spans = (input.spans ?? []).slice(0, 1_000);
 
+      const [owner] = await database
+        .select({
+          userId: analyticsSessions.userId,
+          agentId: analyticsSessions.agentId,
+        })
+        .from(analyticsSessions)
+        .where(eq(analyticsSessions.id, input.session.id))
+        .limit(1);
+      if (
+        owner &&
+        (owner.userId !== actorUserId ||
+          (owner.agentId ?? undefined) !== input.session.agentId)
+      ) {
+        await database.insert(auditEvents).values({
+          actorUserId,
+          eventType: "analytics.session_ownership_refused",
+          targetType: "analytics_session",
+          targetId: input.session.id,
+          payload: {
+            attemptedAgentId: input.session.agentId,
+            reason: "session-owner-or-agent-mismatch",
+          },
+        });
+        throw new Error("Analytics session belongs to another user or agent.");
+      }
+
       return database.transaction(async (tx) => {
-        const [existing] = await tx
-          .select({ userId: analyticsSessions.userId })
-          .from(analyticsSessions)
-          .where(eq(analyticsSessions.id, input.session.id))
-          .limit(1);
-        if (existing && existing.userId !== actorUserId) {
-          throw new Error("Analytics session belongs to another user.");
-        }
-        await tx
+        const claimedSession = await tx
           .insert(analyticsSessions)
           .values({
             id: input.session.id,
@@ -555,6 +663,12 @@ export function createAnalyticsStore(database: Database) {
           })
           .onConflictDoUpdate({
             target: analyticsSessions.id,
+            setWhere: and(
+              eq(analyticsSessions.userId, actorUserId),
+              input.session.agentId
+                ? eq(analyticsSessions.agentId, input.session.agentId)
+                : isNull(analyticsSessions.agentId),
+            ),
             set: {
               status: input.session.status ?? "running",
               taskCompleted: input.session.taskCompleted,
@@ -564,7 +678,10 @@ export function createAnalyticsStore(database: Database) {
               endedAt,
               updatedAt: now,
             },
-          });
+          })
+          .returning({ id: analyticsSessions.id });
+        if (claimedSession.length !== 1)
+          throw new Error("Analytics session ownership changed during ingest.");
 
         /*
          * A person answering `ask_person` starts a new turn. Close the pause on the previous turn
@@ -578,7 +695,7 @@ export function createAnalyticsStore(database: Database) {
             ? input.session.properties.threadId
             : "";
         if (
-          !existing &&
+          !owner &&
           threadId &&
           input.session.agentId &&
           (input.session.status ?? "running") === "running"
@@ -1064,7 +1181,59 @@ export function createAnalyticsStore(database: Database) {
         )
         .groupBy(analyticsSessions.model)
         .orderBy(desc(sql`count(*)`));
-      return { totals, models };
+      // CFO-facing value comes only from signed source evidence joined to a human-approved
+      // workflow. Administrator annotations remain available elsewhere but cannot inflate ROI.
+      const [weeklyValue] = await database
+        .select({
+          outcomes: sql<number>`count(*)::int`,
+          humanMinutesSaved: sql<number>`coalesce(sum(${verifiedValueOutcomes.humanMinutesSaved}), 0)::float8`,
+          laborValueMicros: sql<number>`coalesce(sum(${verifiedValueOutcomes.laborValueMicros}), 0)::float8`,
+          revenueMicros: sql<number>`coalesce(sum(${verifiedValueOutcomes.revenueMicros}), 0)::float8`,
+        })
+        .from(verifiedValueOutcomes)
+        .where(
+          and(
+            gte(
+              verifiedValueOutcomes.createdAt,
+              sql`date_trunc('week', now())`,
+            ),
+            tenantId ? eq(verifiedValueOutcomes.tenantId, tenantId) : undefined,
+          ),
+        );
+      const recentValueEvidence = await database
+        .select({
+          id: verifiedValueOutcomes.id,
+          workflowRunId: verifiedValueOutcomes.workflowRunId,
+          source: verifiedValueOutcomes.source,
+          evidenceRef: verifiedValueOutcomes.evidenceRef,
+          evidenceChecksum: verifiedValueOutcomes.evidenceChecksum,
+          humanMinutesSaved: verifiedValueOutcomes.humanMinutesSaved,
+          laborValueMicros: verifiedValueOutcomes.laborValueMicros,
+          revenueMicros: verifiedValueOutcomes.revenueMicros,
+          createdAt: verifiedValueOutcomes.createdAt,
+        })
+        .from(verifiedValueOutcomes)
+        .where(
+          tenantId ? eq(verifiedValueOutcomes.tenantId, tenantId) : undefined,
+        )
+        .orderBy(desc(verifiedValueOutcomes.createdAt))
+        .limit(20);
+      const generatedValueMicros =
+        (weeklyValue?.laborValueMicros ?? 0) +
+        (weeklyValue?.revenueMicros ?? 0);
+      return {
+        totals,
+        models,
+        weeklyRoi: {
+          outcomes: weeklyValue?.outcomes ?? 0,
+          humanMinutesSaved: weeklyValue?.humanMinutesSaved ?? 0,
+          laborValueMicros: weeklyValue?.laborValueMicros ?? 0,
+          revenueMicros: weeklyValue?.revenueMicros ?? 0,
+          generatedValueMicros,
+          netValueMicros: generatedValueMicros - (totals?.costMicros ?? 0),
+          evidence: recentValueEvidence,
+        },
+      };
     },
 
     /** Operational surface for the evaluation assets that used to be schema-only. */
@@ -1631,117 +1800,156 @@ export function createAnalyticsStore(database: Database) {
             })
             .returning();
       if (!run) throw new Error("Evaluation run was not created.");
-      const scores = await Promise.all(
-        sessionRows.map(async ({ session }) => {
-          const properties = session.properties as Record<string, unknown>;
-          const humanWait = Number(properties.humanWaitMs ?? 0);
-          const toolCalls = Number(properties.toolCalls ?? 0);
-          let explanation = `${definition.signal ?? "code"} score`;
-          let score =
-            definition.signal === "task_completion"
-              ? session.taskCompleted === true
-                ? 100
-                : 0
-              : definition.signal === "helpfulness"
-                ? session.negativeFeedback
-                  ? 0
-                  : session.taskCompleted === true
-                    ? 100
-                    : 50
-                : Math.max(
-                    0,
-                    100 -
-                      (session.technicalFailure ? 50 : 0) -
-                      (session.toolFailure ? 30 : 0) -
-                      Math.min(
-                        20,
-                        humanWait / 1_000 + Math.max(0, toolCalls - 5),
-                      ),
-                  );
-          if (evaluator.kind === "llm_judge") {
-            if (!llmJudge) throw new Error("The LLM judge is not configured.");
-            const judged = JSON.parse(
-              await llmJudge(
-                `Return one JSON object with numeric score from 0 to 100 and a short explanation.\nRubric: ${JSON.stringify(definition)}\nPrivacy-safe session: ${JSON.stringify({ intent: session.intent, summary: session.summary, status: session.status, taskCompleted: session.taskCompleted, technicalFailure: session.technicalFailure, toolFailure: session.toolFailure })}`,
-              ),
-            ) as { score?: unknown; explanation?: unknown };
-            if (
-              typeof judged.score !== "number" ||
-              !Number.isFinite(judged.score)
-            ) {
-              throw new Error("The LLM judge returned no finite score.");
+      try {
+        const evaluatorConcurrency = Math.max(
+          1,
+          Math.floor(Number(process.env.EVALUATOR_CONCURRENCY ?? 4)),
+        );
+        const scores = await boundedMap(
+          sessionRows,
+          evaluatorConcurrency,
+          async ({ session }) => {
+            const properties = session.properties as Record<string, unknown>;
+            const humanWait = Number(properties.humanWaitMs ?? 0);
+            const toolCalls = Number(properties.toolCalls ?? 0);
+            let explanation = `${definition.signal ?? "code"} score`;
+            let score =
+              definition.signal === "task_completion"
+                ? session.taskCompleted === true
+                  ? 100
+                  : 0
+                : definition.signal === "helpfulness"
+                  ? session.negativeFeedback
+                    ? 0
+                    : session.taskCompleted === true
+                      ? 100
+                      : 50
+                  : Math.max(
+                      0,
+                      100 -
+                        (session.technicalFailure ? 50 : 0) -
+                        (session.toolFailure ? 30 : 0) -
+                        Math.min(
+                          20,
+                          humanWait / 1_000 + Math.max(0, toolCalls - 5),
+                        ),
+                    );
+            if (evaluator.kind === "llm_judge") {
+              if (!llmJudge)
+                throw new Error("The LLM judge is not configured.");
+              evaluatorInflight += 1;
+              try {
+                const judged = JSON.parse(
+                  await llmJudge(
+                    `Return one JSON object with numeric score from 0 to 100 and a short explanation.\nRubric: ${JSON.stringify(definition)}\nPrivacy-safe session: ${JSON.stringify({ intent: session.intent, summary: session.summary, status: session.status, taskCompleted: session.taskCompleted, technicalFailure: session.technicalFailure, toolFailure: session.toolFailure })}`,
+                  ),
+                ) as { score?: unknown; explanation?: unknown };
+                if (
+                  typeof judged.score !== "number" ||
+                  !Number.isFinite(judged.score)
+                ) {
+                  throw new Error("The LLM judge returned no finite score.");
+                }
+                score = Math.max(0, Math.min(100, judged.score));
+                explanation =
+                  typeof judged.explanation === "string"
+                    ? judged.explanation.slice(0, 2_000)
+                    : "LLM judge score";
+              } catch (error) {
+                return {
+                  sessionId: session.id,
+                  score: 0,
+                  category: "judge_error",
+                  explanation:
+                    `judge_error: ${error instanceof Error ? error.message : String(error)}`.slice(
+                      0,
+                      2_000,
+                    ),
+                };
+              } finally {
+                evaluatorInflight -= 1;
+              }
             }
-            score = Math.max(0, Math.min(100, judged.score));
-            explanation =
-              typeof judged.explanation === "string"
-                ? judged.explanation.slice(0, 2_000)
-                : "LLM judge score";
+            return {
+              sessionId: session.id,
+              score: Math.round(score),
+              explanation,
+            };
+          },
+        );
+        const threshold = definition.threshold ?? 70;
+        await database.transaction(async (tx) => {
+          if (scores.length > 0) {
+            await tx.insert(analyticsEvalResults).values(
+              scores.map((result) => ({
+                runId: run.id,
+                sessionId: result.sessionId,
+                numericScore: result.score,
+                category: "category" in result ? result.category : null,
+                passed: result.score >= threshold,
+                explanation: result.explanation,
+                evidence: { evaluatorVersion: evaluator.activeVersion },
+              })),
+            );
           }
-          return {
-            sessionId: session.id,
-            score: Math.round(score),
-            explanation,
-          };
-        }),
-      );
-      const threshold = definition.threshold ?? 70;
-      await database.transaction(async (tx) => {
-        if (scores.length > 0) {
-          await tx.insert(analyticsEvalResults).values(
-            scores.map((result) => ({
-              runId: run.id,
-              sessionId: result.sessionId,
-              numericScore: result.score,
-              passed: result.score >= threshold,
-              explanation: result.explanation,
-              evidence: { evaluatorVersion: evaluator.activeVersion },
-            })),
-          );
-        }
-        const aggregate =
-          scores.length === 0
-            ? 0
-            : Math.round(
-                scores.reduce((sum, item) => sum + item.score, 0) /
-                  scores.length,
-              );
-        const previous = await tx
-          .select({ aggregateScore: analyticsEvalRuns.aggregateScore })
-          .from(analyticsEvalRuns)
-          .where(
-            and(
-              eq(analyticsEvalRuns.evaluatorId, evaluatorId),
-              eq(analyticsEvalRuns.status, "completed"),
-            ),
-          )
-          .orderBy(desc(analyticsEvalRuns.finishedAt))
-          .limit(1);
-        const baseline = previous[0]?.aggregateScore ?? null;
-        const regression = baseline !== null && aggregate < baseline - 10;
-        await tx
+          const aggregate =
+            scores.length === 0
+              ? 0
+              : Math.round(
+                  scores.reduce((sum, item) => sum + item.score, 0) /
+                    scores.length,
+                );
+          const previous = await tx
+            .select({ aggregateScore: analyticsEvalRuns.aggregateScore })
+            .from(analyticsEvalRuns)
+            .where(
+              and(
+                eq(analyticsEvalRuns.evaluatorId, evaluatorId),
+                eq(analyticsEvalRuns.status, "completed"),
+              ),
+            )
+            .orderBy(desc(analyticsEvalRuns.finishedAt))
+            .limit(1);
+          const baseline = previous[0]?.aggregateScore ?? null;
+          const regression = baseline !== null && aggregate < baseline - 10;
+          await tx
+            .update(analyticsEvalRuns)
+            .set({
+              status: "completed",
+              aggregateScore: aggregate,
+              baselineScore: baseline,
+              regression,
+              finishedAt: new Date(),
+            })
+            .where(eq(analyticsEvalRuns.id, run.id));
+          if (regression && scores[0]) {
+            await tx.insert(analyticsEvents).values({
+              sessionId: scores[0].sessionId,
+              source: "openbot-evaluator",
+              idempotencyKey: `regression:${run.id}`,
+              eventType: "analytics.evaluator.regression",
+              name: `${evaluator.name} regressed`,
+              userId: actorUserId,
+              success: false,
+              properties: { evaluatorId, runId: run.id, baseline, aggregate },
+            });
+          }
+        });
+        return { runId: run.id, sessions: scores.length };
+      } catch (error) {
+        const reason = (
+          error instanceof Error ? error.message : String(error)
+        ).slice(0, 2_000);
+        await database
           .update(analyticsEvalRuns)
           .set({
-            status: "completed",
-            aggregateScore: aggregate,
-            baselineScore: baseline,
-            regression,
+            status: "failed",
+            failureReason: reason,
             finishedAt: new Date(),
           })
           .where(eq(analyticsEvalRuns.id, run.id));
-        if (regression && scores[0]) {
-          await tx.insert(analyticsEvents).values({
-            sessionId: scores[0].sessionId,
-            source: "openbot-evaluator",
-            idempotencyKey: `regression:${run.id}`,
-            eventType: "analytics.evaluator.regression",
-            name: `${evaluator.name} regressed`,
-            userId: actorUserId,
-            success: false,
-            properties: { evaluatorId, runId: run.id, baseline, aggregate },
-          });
-        }
-      });
-      return { runId: run.id, sessions: scores.length };
+        throw error;
+      }
     },
 
     async runScheduledEvaluators(actorUserId = "analytics-scheduler") {

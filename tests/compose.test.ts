@@ -173,6 +173,7 @@ test("runs Chromium as non-root with its process sandbox enabled", () => {
   ) as { syscalls?: Array<{ names?: string[] }> };
 
   expect(image).toContain("USER pwuser");
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: literal compose interpolation under test.
   expect(compose).toContain("COMPUTER_SANDBOX: ${COMPUTER_SANDBOX:-on}");
   expect(compose).toContain("seccomp=./agent-computer/seccomp_profile.json");
   expect(compose).toContain("cap_add: [SYS_CHROOT]");

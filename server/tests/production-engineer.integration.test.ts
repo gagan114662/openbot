@@ -40,6 +40,44 @@ afterAll(async () => {
 });
 
 describe("persistent production engineer", () => {
+  test("concurrent fix requests atomically claim one drafter", async () => {
+    const [issue] = await database
+      .insert(productionIssues)
+      .values({
+        fingerprint: `concurrent-fix-${crypto.randomUUID()}`,
+        title: "One fix only",
+        severity: "high",
+        rootCause: "one production cause",
+      })
+      .returning();
+    issueIds.push(issue!.id);
+    let invocations = 0;
+    let release = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const concurrentStore = createProductionEngineerStore(
+      database,
+      async () => {
+        invocations += 1;
+        await held;
+        return {
+          branch: `openbot/production-${issue!.id.slice(0, 8)}`,
+          pullRequestUrl: `https://example.test/pull/${issue!.id}`,
+        };
+      },
+    );
+    const first = concurrentStore.draftFix("admin-one", issue!.id);
+    while (invocations === 0) await Bun.sleep(5);
+    await expect(
+      concurrentStore.draftFix("admin-two", issue!.id),
+    ).rejects.toThrow("not open for a new fix");
+    expect(invocations).toBe(1);
+    release();
+    await first;
+    expect(invocations).toBe(1);
+  });
+
   test("derives only emitted monitor metrics from change intent and paths", async () => {
     expect(
       monitorForChange("Reduce connector tool failures", "server/src/index.ts"),
@@ -56,6 +94,9 @@ describe("persistent production engineer", () => {
     const metrics = await store.prometheusMetrics();
     expect(metrics).toContain("openbot_agent_failures_total");
     expect(metrics).toContain("openbot_tool_failures_total");
+    expect(metrics).toContain("openbot_evaluator_inflight");
+    expect(metrics).toContain("openbot_shadow_inflight");
+    expect(metrics).toContain("openbot_shadow_dropped_total");
     expect(metrics).not.toContain("openbot_http_errors_total");
   });
   test("refuses a debt-heavy generated fix and sends it to human review", async () => {

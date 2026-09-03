@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { and, desc, eq, gte, inArray, or, sql } from "drizzle-orm";
 import { type AuditStore, recordAuditEvent } from "../audit";
+import { evaluatorRuntimeMetrics } from "../analytics/store";
 import type { Database } from "../db/client";
 import {
   analyticsSessions,
@@ -9,6 +10,10 @@ import {
   productionIssues,
   productionMonitors,
 } from "../db/schema";
+import type { ContextGraph } from "../software-factory/context-graph";
+import { executionTiers } from "../software-factory/model-router";
+import { inferenceShadowMetrics } from "../software-factory/inference-shadow";
+import { managedJobKinds } from "../software-factory/orchestrator";
 
 const fingerprint = (value: unknown) =>
   createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -106,9 +111,102 @@ export function createProductionEngineerStore(
     actorId: string;
     debt: ProductionDebtAssessment;
   }) => Promise<void>,
+  factory?: { contextGraph: ContextGraph; tenantId: string },
 ) {
+  const claimFix = async (actorId: string, issueId: string) => {
+    if (!fixDrafter)
+      throw new Error("Fix automation is disabled for this deployment.");
+    const [issue] = await database
+      .update(productionIssues)
+      .set({
+        fixStatus: "running",
+        humanApprovedBy: actorId,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(productionIssues.id, issueId),
+          eq(productionIssues.status, "open"),
+          inArray(productionIssues.fixStatus, [
+            "none",
+            "failed",
+            "review_required",
+          ]),
+        ),
+      )
+      .returning();
+    if (!issue)
+      throw new Error(
+        "This production issue is not open for a new fix; a fix may already be running or awaiting review.",
+      );
+    return issue;
+  };
+
+  const runClaimedFix = async (
+    actorId: string,
+    issue: typeof productionIssues.$inferSelect,
+  ) => {
+    if (!fixDrafter) throw new Error("Fix automation is disabled.");
+    try {
+      const drafted = await fixDrafter({
+        issueId: issue.id,
+        title: issue.title,
+        rootCause: issue.rootCause,
+        evidence: issue.evidence,
+      });
+      if (drafted.debt && recordDebtAssessment)
+        await recordDebtAssessment({
+          issueId: issue.id,
+          actorId,
+          debt: drafted.debt,
+        });
+      await database
+        .update(productionIssues)
+        .set({
+          fixStatus: "pull_request_open",
+          fixBranch: drafted.branch,
+          pullRequestUrl: drafted.pullRequestUrl,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(productionIssues.id, issue.id),
+            eq(productionIssues.fixStatus, "running"),
+          ),
+        );
+      return drafted;
+    } catch (error) {
+      if (error instanceof TechnicalDebtGateError && recordDebtAssessment)
+        await recordDebtAssessment({
+          issueId: issue.id,
+          actorId,
+          debt: error.debt,
+        });
+      await database
+        .update(productionIssues)
+        .set({
+          fixStatus:
+            error instanceof TechnicalDebtGateError
+              ? "review_required"
+              : "failed",
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(productionIssues.id, issue.id),
+            eq(productionIssues.fixStatus, "running"),
+          ),
+        );
+      throw error;
+    }
+  };
+
   return {
+    claimFix,
+    runClaimedFix,
     async prometheusMetrics() {
+      const evaluator = evaluatorRuntimeMetrics();
+      const shadow = inferenceShadowMetrics();
       const [[agentFailures], [toolFailures], [sessions]] = await Promise.all([
         database
           .select({ count: sql<number>`count(*)::int` })
@@ -134,32 +232,67 @@ export function createProductionEngineerStore(
         `openbot_tool_failures_total ${toolFailures?.count ?? 0}`,
         "# TYPE openbot_analytics_sessions_total counter",
         `openbot_analytics_sessions_total ${sessions?.count ?? 0}`,
+        "# TYPE openbot_evaluator_inflight gauge",
+        `openbot_evaluator_inflight ${evaluator.inflight}`,
+        "# TYPE openbot_shadow_inflight gauge",
+        `openbot_shadow_inflight ${shadow.inflight}`,
+        "# TYPE openbot_shadow_dropped_total counter",
+        `openbot_shadow_dropped_total ${shadow.dropped}`,
         "",
       ].join("\n");
     },
     async dashboard() {
-      const [monitors, issues, investigations] = await Promise.all([
-        database
-          .select()
-          .from(productionMonitors)
-          .where(inArray(productionMonitors.expression, emittedMonitorMetrics))
-          .orderBy(productionMonitors.title),
-        database
-          .select()
-          .from(productionIssues)
-          .orderBy(desc(productionIssues.updatedAt))
-          .limit(200),
-        database
-          .select()
-          .from(productionInvestigations)
-          .orderBy(desc(productionInvestigations.createdAt))
-          .limit(200),
-      ]);
+      const [monitors, issues, investigations, contextGraph] =
+        await Promise.all([
+          database
+            .select()
+            .from(productionMonitors)
+            .where(
+              inArray(productionMonitors.expression, emittedMonitorMetrics),
+            )
+            .orderBy(productionMonitors.title),
+          database
+            .select()
+            .from(productionIssues)
+            .orderBy(desc(productionIssues.updatedAt))
+            .limit(200),
+          database
+            .select()
+            .from(productionInvestigations)
+            .orderBy(desc(productionInvestigations.createdAt))
+            .limit(200),
+          factory?.contextGraph.stats(factory.tenantId) ??
+            Promise.resolve({ nodes: 0, edges: 0, sourceSystems: 0 }),
+        ]);
       return {
         monitors,
         issues,
         investigations,
         fixAutomationEnabled: Boolean(fixDrafter),
+        runtimeBudgets: {
+          evaluatorConcurrency: Math.max(
+            1,
+            Math.floor(Number(process.env.EVALUATOR_CONCURRENCY ?? 4)),
+          ),
+          evaluatorInflight: evaluatorRuntimeMetrics().inflight,
+          shadowConcurrency: Math.max(
+            1,
+            Math.floor(Number(process.env.SHADOW_CONCURRENCY ?? 2)),
+          ),
+          shadowQueueCapacity: Math.max(
+            0,
+            Math.floor(Number(process.env.SHADOW_QUEUE_CAPACITY ?? 32)),
+          ),
+          shadowInflight: inferenceShadowMetrics().inflight,
+          shadowDropped: inferenceShadowMetrics().dropped,
+        },
+        factory: {
+          executionTiers,
+          managedJobKinds,
+          modelRouting: "benchmark-pareto-cost-per-outcome",
+          workerPattern: "judging-orchestrator-bounded-workers",
+          contextGraph,
+        },
       };
     },
 
@@ -524,63 +657,8 @@ export function createProductionEngineerStore(
     },
 
     async draftFix(actorId: string, issueId: string) {
-      if (!fixDrafter)
-        throw new Error("Fix automation is disabled for this deployment.");
-      const [issue] = await database
-        .select()
-        .from(productionIssues)
-        .where(
-          and(
-            eq(productionIssues.id, issueId),
-            eq(productionIssues.status, "open"),
-          ),
-        )
-        .limit(1);
-      if (!issue) throw new Error("Open production issue not found.");
-      await database
-        .update(productionIssues)
-        .set({
-          fixStatus: "running",
-          humanApprovedBy: actorId,
-          updatedAt: new Date(),
-        })
-        .where(eq(productionIssues.id, issueId));
-      try {
-        const drafted = await fixDrafter({
-          issueId,
-          title: issue.title,
-          rootCause: issue.rootCause,
-          evidence: issue.evidence,
-        });
-        if (drafted.debt && recordDebtAssessment) {
-          await recordDebtAssessment({ issueId, actorId, debt: drafted.debt });
-        }
-        await database
-          .update(productionIssues)
-          .set({
-            fixStatus: "pull_request_open",
-            fixBranch: drafted.branch,
-            pullRequestUrl: drafted.pullRequestUrl,
-            updatedAt: new Date(),
-          })
-          .where(eq(productionIssues.id, issueId));
-        return drafted;
-      } catch (error) {
-        if (error instanceof TechnicalDebtGateError && recordDebtAssessment) {
-          await recordDebtAssessment({ issueId, actorId, debt: error.debt });
-        }
-        await database
-          .update(productionIssues)
-          .set({
-            fixStatus:
-              error instanceof TechnicalDebtGateError
-                ? "review_required"
-                : "failed",
-            updatedAt: new Date(),
-          })
-          .where(eq(productionIssues.id, issueId));
-        throw error;
-      }
+      const issue = await claimFix(actorId, issueId);
+      return runClaimedFix(actorId, issue);
     },
 
     async recordInvestigation(

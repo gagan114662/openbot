@@ -500,6 +500,33 @@ export function setRuntimeEpisodeRecorder(
   persistRuntimeEpisode = recorder;
 }
 
+let persistContextCapsule:
+  | ((input: {
+      runId: string;
+      threadId: string;
+      checksum: string;
+      messages: unknown[];
+    }) => Promise<void>)
+  | undefined;
+
+/** Install the durable store that makes compacted verbatim history retrievable by checksum. */
+export function setContextCapsuleRecorder(
+  recorder: typeof persistContextCapsule,
+) {
+  persistContextCapsule = recorder;
+}
+
+let observeInferenceShadow:
+  | ((input: { run: RunAgentInput; primaryOutput: string }) => Promise<void>)
+  | undefined;
+
+/** Install an asynchronous shadow sink. It sees only the final output actually emitted to a user. */
+export function setInferenceShadowRecorder(
+  recorder: typeof observeInferenceShadow,
+) {
+  observeInferenceShadow = recorder;
+}
+
 function recordRuntimeEpisode(
   input: RunAgentInput,
   events: readonly BaseEvent[],
@@ -580,9 +607,19 @@ function endedWithRunError(events: readonly BaseEvent[]): boolean {
   return events.some((event) => event.type === "RUN_ERROR");
 }
 
-function compactRun(input: RunAgentInput) {
+async function compactRun(input: RunAgentInput) {
   const compacted = compactMessages(input.messages);
   if (compacted.compacted) {
+    if (!persistContextCapsule)
+      throw new Error(
+        "Context compaction requires a durable verbatim capsule recorder.",
+      );
+    await persistContextCapsule({
+      runId: input.runId,
+      threadId: input.threadId,
+      checksum: compacted.capsuleChecksum,
+      messages: compacted.omittedArtifact,
+    });
     console.info(
       JSON.stringify({
         type: "context-compacted",
@@ -625,19 +662,47 @@ export function runWithContextCompaction(
   input: RunAgentInput,
   runAttempt: (input: RunAgentInput) => Observable<BaseEvent>,
 ): Observable<BaseEvent> {
-  return defer(() => {
-    const prepared = compactRun(input);
-    const observed: BaseEvent[] = [];
-    return runAttempt(prepared.input).pipe(
-      tap((event) => observed.push(event)),
-      map((event) =>
-        exposeCompactionEvent(event, prepared.compacted.omittedMessages),
-      ),
-      tap({
-        complete: () => recordRuntimeEpisode(prepared.input, observed, false),
-      }),
-    );
-  });
+  return defer(() => compactRun(input)).pipe(
+    switchMap((prepared) => {
+      const observed: BaseEvent[] = [];
+      return runAttempt(prepared.input).pipe(
+        tap((event) => observed.push(event)),
+        map((event) =>
+          exposeCompactionEvent(event, prepared.compacted.omittedMessages),
+        ),
+        tap({
+          complete: () => recordRuntimeEpisode(prepared.input, observed, false),
+        }),
+      );
+    }),
+  );
+}
+
+/** Observe the real final stream without delaying or substituting the primary response. */
+export function runWithInferenceShadow(
+  input: RunAgentInput,
+  runPrimary: () => Observable<BaseEvent>,
+): Observable<BaseEvent> {
+  const emitted: BaseEvent[] = [];
+  return runPrimary().pipe(
+    tap((event) => emitted.push(event)),
+    tap({
+      complete: () => {
+        const primaryOutput = textFromEvents(emitted, "TEXT_MESSAGE_CONTENT");
+        if (!primaryOutput || !observeInferenceShadow) return;
+        void observeInferenceShadow({ run: input, primaryOutput }).catch(
+          (error) =>
+            console.error(
+              JSON.stringify({
+                type: "inference-shadow-failed",
+                runId: input.runId,
+                error: error instanceof Error ? error.message : String(error),
+              }),
+            ),
+        );
+      },
+    }),
+  );
 }
 
 async function eventsFromObservable(
@@ -711,7 +776,7 @@ function runEvidenceAttempts(
 ): Observable<BaseEvent> {
   return defer(async () => {
     try {
-      const prepared = compactRun(input);
+      const prepared = await compactRun(input);
       const { compacted } = prepared;
       const runInput = prepared.input;
       const exposeCompaction = (events: BaseEvent[]): BaseEvent[] => {
@@ -885,9 +950,8 @@ export async function buildAgents(
   const vendors = await loadVendors().catch(() => [] as readonly string[]);
   return Object.fromEntries(
     await Promise.all(
-      agents.map(async (agent) => [
-        agent.id,
-        await buildAgent(
+      agents.map(async (agent) => {
+        const built = await buildAgent(
           agent,
           model,
           apiKey,
@@ -900,10 +964,27 @@ export async function buildAgents(
           agentFetch,
           handoff,
           runTimeoutMs,
-        ),
-      ]),
+        );
+        return [agent.id, attachInferenceShadow(built)];
+      }),
     ),
   );
+}
+
+const inferenceShadowAttached = Symbol("openbot.inference-shadow-attached");
+
+/** Preserve concrete AG-UI agent identity and state while observing every cloned run. */
+function attachInferenceShadow<T extends AbstractAgent>(agent: T): T {
+  const tagged = agent as T & { [inferenceShadowAttached]?: boolean };
+  if (tagged[inferenceShadowAttached]) return agent;
+  tagged[inferenceShadowAttached] = true;
+  const originalRun = agent.run.bind(agent);
+  const originalClone = agent.clone.bind(agent);
+  agent.run = ((input: RunAgentInput) =>
+    runWithInferenceShadow(input, () => originalRun(input))) as T["run"];
+  agent.clone = (() =>
+    attachInferenceShadow(originalClone() as T)) as T["clone"];
+  return agent;
 }
 
 async function buildAgent(

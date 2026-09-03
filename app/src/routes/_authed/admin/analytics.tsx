@@ -53,6 +53,8 @@ export function AgentAnalyticsPage() {
   const [topicName, setTopicName] = useState("");
   const [outcomeName, setOutcomeName] = useState("");
   const [outcomeRevenue, setOutcomeRevenue] = useState("");
+  const [outcomeMinutesSaved, setOutcomeMinutesSaved] = useState("");
+  const [outcomeHourlyValue, setOutcomeHourlyValue] = useState("");
   const [outcomeSessionId, setOutcomeSessionId] = useState("");
   const [selectedSessions, setSelectedSessions] = useState<Set<string>>(
     () => new Set(),
@@ -106,6 +108,7 @@ export function AgentAnalyticsPage() {
     queryFn: fetchAnalyticsGovernance,
   });
   const totals = overview.data?.totals;
+  const weeklyRoi = overview.data?.weeklyRoi;
   const bootstrap = useMutation({
     mutationFn: bootstrapAnalyticsEvaluators,
     onSuccess: () =>
@@ -175,9 +178,16 @@ export function AgentAnalyticsPage() {
     onSuccess: () => {
       setOutcomeName("");
       setOutcomeRevenue("");
-      return queryClient.invalidateQueries({
-        queryKey: ["agent-analytics", "governance"],
-      });
+      setOutcomeMinutesSaved("");
+      setOutcomeHourlyValue("");
+      return Promise.all([
+        queryClient.invalidateQueries({
+          queryKey: ["agent-analytics", "governance"],
+        }),
+        queryClient.invalidateQueries({
+          queryKey: ["agent-analytics", "overview"],
+        }),
+      ]);
     },
   });
   const refreshing =
@@ -283,6 +293,55 @@ export function AgentAnalyticsPage() {
             />
           </div>
         )}
+      </PageSection>
+
+      <PageSection title="Verified customer ROI this week">
+        <p className="mb-3 text-sm text-muted-foreground">
+          Includes only signed source events tied to completed, human-approved
+          workflows. Saved time is computed from source baseline timestamps
+          versus the workflow runtime; administrator-entered outcome annotations
+          are excluded.
+        </p>
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+          <Metric
+            label="Hours saved"
+            loading={overview.isPending}
+            value={`${((weeklyRoi?.humanMinutesSaved ?? 0) / 60).toFixed(1)} h`}
+          />
+          <Metric
+            label="Labor value"
+            loading={overview.isPending}
+            value={`$${((weeklyRoi?.laborValueMicros ?? 0) / 1_000_000).toFixed(2)}`}
+          />
+          <Metric
+            label="Revenue influenced"
+            loading={overview.isPending}
+            value={`$${((weeklyRoi?.revenueMicros ?? 0) / 1_000_000).toFixed(2)}`}
+          />
+          <Metric
+            label="Net value after AI cost"
+            loading={overview.isPending}
+            value={`$${((weeklyRoi?.netValueMicros ?? 0) / 1_000_000).toFixed(2)}`}
+          />
+        </div>
+        <AnalyticsTable
+          empty="No signed value evidence has been received for an approved workflow."
+          headers={[
+            "Source",
+            "Workflow",
+            "Saved",
+            "Value",
+            "Evidence checksum",
+          ]}
+          loading={overview.isPending}
+          rows={(weeklyRoi?.evidence ?? []).map((item) => [
+            item.source,
+            item.workflowRunId,
+            `${item.humanMinutesSaved} min`,
+            `$${((item.laborValueMicros + item.revenueMicros) / 1_000_000).toFixed(2)}`,
+            item.evidenceChecksum.slice(0, 16),
+          ])}
+        />
       </PageSection>
 
       <PageSection title="Model comparison">
@@ -510,7 +569,7 @@ export function AgentAnalyticsPage() {
       </PageSection>
 
       <PageSection title="Tool and business outcomes">
-        <div className="mb-4 grid gap-3 rounded-lg border border-border bg-card p-4 md:grid-cols-[minmax(12rem,1fr)_minmax(12rem,1fr)_10rem_auto]">
+        <div className="mb-4 grid gap-3 rounded-lg border border-border bg-card p-4 md:grid-cols-2 lg:grid-cols-6">
           <label className="grid gap-1 text-sm">
             Session
             <select
@@ -540,12 +599,28 @@ export function AgentAnalyticsPage() {
             placeholder="Revenue ($)"
             value={outcomeRevenue}
           />
+          <Input
+            aria-label="Minutes saved"
+            inputMode="numeric"
+            onChange={(event) => setOutcomeMinutesSaved(event.target.value)}
+            placeholder="Minutes saved"
+            value={outcomeMinutesSaved}
+          />
+          <Input
+            aria-label="Hourly labor value"
+            inputMode="decimal"
+            onChange={(event) => setOutcomeHourlyValue(event.target.value)}
+            placeholder="Labor rate ($/hour)"
+            value={outcomeHourlyValue}
+          />
           <Button
             className="self-end"
             disabled={
               !outcomeName.trim() ||
               !(outcomeSessionId || sessions.data?.sessions[0]?.id) ||
               revenueMicrosFromDollars(outcomeRevenue) === null ||
+              !/^\d+$/.test(outcomeMinutesSaved) ||
+              revenueMicrosFromDollars(outcomeHourlyValue) === null ||
               recordOutcome.isPending
             }
             onClick={() => {
@@ -553,10 +628,21 @@ export function AgentAnalyticsPage() {
               const sessionId =
                 outcomeSessionId || sessions.data?.sessions[0]?.id || "";
               if (revenueMicros === null || !sessionId) return;
+              const humanMinutesSaved = Number(outcomeMinutesSaved);
+              const hourlyMicros = revenueMicrosFromDollars(outcomeHourlyValue);
+              if (
+                !Number.isSafeInteger(humanMinutesSaved) ||
+                hourlyMicros === null
+              )
+                return;
               recordOutcome.mutate({
                 sessionId,
                 name: outcomeName.trim(),
                 revenueMicros,
+                humanMinutesSaved,
+                laborValueMicros: Math.round(
+                  (hourlyMicros * humanMinutesSaved) / 60,
+                ),
               });
             }}
             size="sm"

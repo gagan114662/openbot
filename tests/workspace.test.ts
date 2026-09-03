@@ -32,4 +32,32 @@ describe("OpenBot workspace", () => {
       );
     }
   });
+
+  test("gives the production dependency install every workspace manifest", () => {
+    const rootManifest = JSON.parse(
+      readFileSync(join(repositoryRoot, "package.json"), "utf8"),
+    ) as { workspaces: string[] };
+    const dockerfile = readFileSync(join(repositoryRoot, "Dockerfile"), "utf8");
+
+    for (const packageName of rootManifest.workspaces) {
+      expect(dockerfile).toContain(
+        `cp /src/${packageName}/package.json ${packageName}/package.json`,
+      );
+    }
+  });
+
+  test("ships cross-workspace runtime imports in the production image", () => {
+    const dockerfile = readFileSync(join(repositoryRoot, "Dockerfile"), "utf8");
+
+    expect(dockerfile).toContain("COPY agent-codex/src agent-codex/src");
+    expect(dockerfile).toContain(
+      "COPY agent-codex/package.json agent-codex/package.json",
+    );
+  });
+
+  test("binds the container API to its published interface", () => {
+    const dockerfile = readFileSync(join(repositoryRoot, "Dockerfile"), "utf8");
+
+    expect(dockerfile).toContain("ENV SERVER_HOST=0.0.0.0");
+  });
 });

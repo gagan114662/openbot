@@ -119,6 +119,32 @@ function runner(options?: {
 }
 
 describe("delivering a hop", () => {
+  test("keys evolution lineage to the hop rather than its shared thread", async () => {
+    const chains: string[] = [];
+    const evolution = {
+      checkpoint: async (chainId: string) => {
+        chains.push(chainId);
+        return {
+          chainId,
+          stateHash: "trusted",
+          contextChecksum: "capsule",
+          version: 0,
+        };
+      },
+      promote: async () => ({
+        promoted: true,
+        candidateId: "candidate",
+        candidateHash: "candidate-hash",
+        previousStateHash: "trusted",
+        nextStateHash: "next",
+        reasons: [],
+        evidenceHash: "evidence",
+      }),
+      state: async () => "trusted",
+    } as unknown as EvolutionCheckpointGate;
+    await runner({ answer: "answer", evolution }).runner.sweep();
+    expect(chains).toEqual(["thread-1:run-1:abc"]);
+  });
   test("claims one long-running turn so idle replicas can take the rest", async () => {
     const { runner: sweep, claimLimits } = runner();
 

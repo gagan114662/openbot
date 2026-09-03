@@ -24,6 +24,25 @@ export type AnalyticsOverview = {
     failureRate: number;
     costMicros: number;
   }>;
+  weeklyRoi: {
+    outcomes: number;
+    humanMinutesSaved: number;
+    laborValueMicros: number;
+    revenueMicros: number;
+    generatedValueMicros: number;
+    netValueMicros: number;
+    evidence: Array<{
+      id: string;
+      workflowRunId: string;
+      source: string;
+      evidenceRef: string;
+      evidenceChecksum: string;
+      humanMinutesSaved: number;
+      laborValueMicros: number;
+      revenueMicros: number;
+      createdAt: string;
+    }>;
+  };
 };
 
 export type AnalyticsSession = {
@@ -264,6 +283,8 @@ export async function recordAnalyticsBusinessOutcome(input: {
   sessionId: string;
   name: string;
   revenueMicros: number;
+  humanMinutesSaved: number;
+  laborValueMicros: number;
 }) {
   const response = await client(
     `/api/analytics/admin/sessions/${encodeURIComponent(input.sessionId)}/outcomes`,
@@ -273,6 +294,8 @@ export async function recordAnalyticsBusinessOutcome(input: {
         name: input.name,
         success: true,
         revenueMicros: input.revenueMicros,
+        humanMinutesSaved: input.humanMinutesSaved,
+        laborValueMicros: input.laborValueMicros,
       },
     },
   );

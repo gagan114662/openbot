@@ -10,11 +10,13 @@ function testApp(
   canUseBot: (botId: string) => boolean = () => true,
 ) {
   const calls: unknown[] = [];
+  const ingest = async (actor: string, body: unknown) => {
+    calls.push({ actor, body });
+    return { sessionId: "session-1", acceptedEvents: 1, acceptedSpans: 0 };
+  };
   const store = {
-    ingest: async (actor: string, body: unknown) => {
-      calls.push({ actor, body });
-      return { sessionId: "session-1", acceptedEvents: 1, acceptedSpans: 0 };
-    },
+    ingest,
+    ingestClient: ingest,
     list: async () => ({ sessions: [] }),
     detail: async () => null,
     overview: async () => ({ totals: { sessions: 0 }, models: [] }),

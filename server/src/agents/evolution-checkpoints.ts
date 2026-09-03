@@ -45,7 +45,7 @@ export function createEvolutionCheckpointGate(
         critical: true,
       },
     ],
-    requiredVerifiers: ["delivery"],
+    requiredVerifiers: ["delivery", "tool-call-budget", "relay-contract"],
     minimumNovelCases: 1,
     minimumMutationScore: 0,
     debtBudget: {
@@ -98,6 +98,11 @@ export function createEvolutionCheckpointGate(
       candidateId: string;
       answer: string;
       debt?: DebtMetrics;
+      verification?: {
+        toolCallCount: number;
+        maximumToolCalls: number;
+        relayRequired: boolean;
+      };
     }) {
       await ensure(input.checkpoint.chainId);
       return database.transaction(async (tx) => {
@@ -119,6 +124,41 @@ export function createEvolutionCheckpointGate(
         const parentVerified =
           current.stateHash === input.checkpoint.stateHash &&
           current.version === input.checkpoint.version;
+        const verification = input.verification ?? {
+          toolCallCount: 0,
+          maximumToolCalls: 32,
+          relayRequired: true,
+        };
+        const verifierResults = [
+          {
+            id: "delivery",
+            passed: input.answer.trim().length > 0,
+            evidenceHash: evidenceHash(input.answer),
+          },
+          {
+            id: "tool-call-budget",
+            passed: verification.toolCallCount <= verification.maximumToolCalls,
+            evidenceHash: evidenceHash(verification),
+          },
+          {
+            id: "relay-contract",
+            passed:
+              !verification.relayRequired || input.answer.trim().length > 0,
+            evidenceHash: evidenceHash({
+              relayRequired: verification.relayRequired,
+              answerPresent: input.answer.trim().length > 0,
+            }),
+          },
+          {
+            id: "invariant:bounded-chain@1",
+            passed: parentVerified,
+            evidenceHash: evidenceHash({
+              chainId: input.checkpoint.chainId,
+              expectedVersion: input.checkpoint.version,
+              observedVersion: current.version,
+            }),
+          },
+        ];
         const decision = decidePromotion({
           contract,
           trustedStateHash: current.stateHash,
@@ -133,26 +173,11 @@ export function createEvolutionCheckpointGate(
             }),
             contextChecksum: capsule.checksum,
             changedPaths: ["handoff/result"],
-            verifierResults: [
-              {
-                id: "delivery",
-                passed: input.answer.trim().length > 0,
-                evidenceHash: evidenceHash(input.answer),
-              },
-              {
-                id: "invariant:bounded-chain@1",
-                passed: parentVerified,
-                evidenceHash: evidenceHash({
-                  chainId: input.checkpoint.chainId,
-                  expectedVersion: input.checkpoint.version,
-                  observedVersion: current.version,
-                }),
-              },
-            ],
+            verifierResults,
             novelCases: {
-              total: 1,
-              passed: 1,
-              suiteHash: evidenceHash("live-delivery"),
+              total: verifierResults.length,
+              passed: verifierResults.filter((result) => result.passed).length,
+              suiteHash: evidenceHash(verifierResults),
             },
             // Text is not an artifact: an answer can discuss or display a patch without applying
             // it. Only an execution layer that actually changed state may supply measured debt.

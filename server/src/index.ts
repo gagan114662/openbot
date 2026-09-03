@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import {
   CopilotKitIntelligence,
   IntelligenceAgentRunner,
@@ -65,6 +66,8 @@ import {
   type IdentifyUser,
   mountCopilotRuntime,
   resolveRuntimeAgents,
+  setContextCapsuleRecorder,
+  setInferenceShadowRecorder,
   setRuntimeEpisodeRecorder,
   type ToolSelection,
 } from "./copilot";
@@ -76,6 +79,7 @@ import {
 import { createDatabase } from "./db/client";
 import {
   agentToolAssertionUses,
+  contextCompactionArtifacts,
   intelligenceChannelMappings,
 } from "./db/schema";
 import { listeningHost, listeningUrl } from "./listening-address";
@@ -87,18 +91,35 @@ import { redirectUriFor } from "./plugins/oauth";
 import { createPluginStore } from "./plugins/store";
 import { grantedSkills, grantedTools, REFUSAL_MARKER } from "./plugins/tools";
 import { createCodexFixDrafter } from "./production-engineer/fix-drafter";
+import { processProductionWebhook } from "./production-engineer/routes";
 import { createProductionEngineerStore } from "./production-engineer/store";
 import { createTurnRunner } from "./routines/run-turn";
 import { createRoutineRunner } from "./routines/runner";
 import { createRoutineStore } from "./routines/store";
 import { createIntentRouter } from "./routing/classify";
-import { createModelCompleter } from "./routing/model";
+import { chatCompletionsUrl, createModelCompleter } from "./routing/model";
 import { installGracefulShutdown } from "./shutdown";
+import {
+  createClaudeWorkflowExecutor,
+  createCodexWorkflowExecutor,
+} from "./software-factory/codex-workflow-executor";
+import { createContextGraph } from "./software-factory/context-graph";
+import {
+  createInferenceShadowRecorder,
+  invokeCodexSubscriptionShadow,
+} from "./software-factory/inference-shadow";
+import { createShadowEvaluator } from "./software-factory/shadow-evaluator";
+import { createSoftwareFactoryStore } from "./software-factory/store";
+import { createVerifiedValueStore } from "./software-factory/verified-value";
+import { createRoutedWorkflowExecutor } from "./software-factory/workflow-executor";
+import { createWorkflowRuntime } from "./software-factory/workflow-runtime";
+import { createWorkflowWorker } from "./software-factory/workflow-worker";
 import {
   createPackageStatusReader,
   loadTenantPackage,
   synchronizeTenantPackage,
 } from "./tenant-package";
+import { createWebhookReconciler } from "./webhooks/reconciler";
 import { type Repeating, repeatAfterEach } from "./work/loop";
 import {
   createWorkQueue,
@@ -165,8 +186,20 @@ const identifyActor: IdentifyActor = async (request) => {
 };
 
 const config = loadConfig();
+const processInstanceId = randomUUID();
+const processOwner = (role: string) =>
+  `${role}/${process.env.HOSTNAME ?? "local"}/${processInstanceId}`;
 const port = Number.parseInt(process.env.PORT ?? "3001", 10);
-const database = createDatabase(config.databaseUrl);
+const configuredPoolMax = Number.parseInt(
+  process.env.DATABASE_POOL_MAX ?? "",
+  10,
+);
+const database = createDatabase(
+  config.databaseUrl,
+  Number.isSafeInteger(configuredPoolMax) && configuredPoolMax > 0
+    ? { max: configuredPoolMax }
+    : {},
+);
 await initializeDevActorUser(database, config.singleUser);
 // The vault, built before the agent store because a customer's agent may sit behind a key and that
 // key belongs here rather than on the agent row. See agents/auth-header.ts.
@@ -293,7 +326,128 @@ const retentionSweeps = startRetentionSweeps(
   config.auditRetentionDays,
   pageFrameStore,
 );
-const analyticsStore = createAnalyticsStore(database);
+const analyticsStore = createAnalyticsStore(database, tenantPackage.tenantId);
+setContextCapsuleRecorder(async ({ runId, threadId, checksum, messages }) => {
+  await database
+    .insert(contextCompactionArtifacts)
+    .values({
+      tenantId: tenantPackage.tenantId,
+      runId,
+      threadId,
+      checksum,
+      content: { version: 1, messages },
+    })
+    .onConflictDoNothing();
+});
+const factoryContextGraph = createContextGraph(database);
+const softwareFactoryStore = createSoftwareFactoryStore(
+  database,
+  tenantPackage.tenantId,
+);
+const gitText = (args: string[]) => {
+  const result = Bun.spawnSync(["git", ...args], {
+    cwd: process.env.SOFTWARE_FACTORY_REPOSITORY ?? process.cwd(),
+    stderr: "ignore",
+  });
+  return result.exitCode === 0 ? result.stdout.toString().trim() : "unknown";
+};
+const runtimeProvenance = {
+  revision:
+    process.env.OPENBOT_BUILD_SHA?.trim() || gitText(["rev-parse", "HEAD"]),
+  branch:
+    process.env.OPENBOT_BUILD_BRANCH?.trim() ||
+    gitText(["rev-parse", "--abbrev-ref", "HEAD"]),
+  dirty:
+    process.env.OPENBOT_BUILD_DIRTY === "true" ||
+    (process.env.OPENBOT_BUILD_DIRTY !== "false" &&
+      gitText(["status", "--porcelain"]) !== ""),
+};
+const shadowEvaluator = createShadowEvaluator(database, tenantPackage.tenantId);
+const verifiedValueStore = createVerifiedValueStore(
+  database,
+  tenantPackage.tenantId,
+);
+const shadowModel = process.env.SHADOW_MODEL?.trim();
+if (shadowModel) {
+  const codexSubscription =
+    process.env.SHADOW_PROVIDER === "codex-subscription";
+  setInferenceShadowRecorder(
+    createInferenceShadowRecorder({
+      evaluator: shadowEvaluator,
+      primaryModel: tenantPackage.model.defaultModel,
+      shadowModel,
+      rateBasisPoints: Number(process.env.SHADOW_RATE_BASIS_POINTS ?? 500),
+      concurrency: Number(process.env.SHADOW_CONCURRENCY ?? 2),
+      queueCapacity: Number(process.env.SHADOW_QUEUE_CAPACITY ?? 32),
+      ...(codexSubscription
+        ? {
+            invokeShadow: (messages, signal) =>
+              invokeCodexSubscriptionShadow(messages, {
+                model: shadowModel,
+                cwd: process.env.SOFTWARE_FACTORY_REPOSITORY ?? process.cwd(),
+                signal,
+              }),
+          }
+        : {
+            endpoint: chatCompletionsUrl(process.env),
+            resolveApiKey: () =>
+              resolveModelApiKey({
+                encryptionKey: config.keyEncryptionKey,
+                reader: credentialStore,
+                provider: tenantPackage.model.provider,
+                keyId: tenantPackage.model.credentialSecretRef,
+                environment: process.env,
+              }),
+          }),
+    }),
+  );
+}
+const workflowRuntime = createWorkflowRuntime(database, tenantPackage.tenantId);
+const workflowWorkerId = processOwner("software-factory");
+const softwareFactoryRepository =
+  process.env.SOFTWARE_FACTORY_REPOSITORY ??
+  fileURLToPath(new URL("../..", import.meta.url));
+const workflowWorker = createWorkflowWorker({
+  runtime: workflowRuntime,
+  workerId: workflowWorkerId,
+  executor: createRoutedWorkflowExecutor([
+    createCodexWorkflowExecutor(softwareFactoryRepository, {
+      groundContext: (keys) =>
+        factoryContextGraph.ground(tenantPackage.tenantId, keys),
+    }),
+    createClaudeWorkflowExecutor(softwareFactoryRepository, {
+      groundContext: (keys) =>
+        factoryContextGraph.ground(tenantPackage.tenantId, keys),
+    }),
+  ]),
+  onTerminalFailure: async ({ runId, error }) => {
+    const run = (await workflowRuntime.snapshot(runId))?.run;
+    if (!run) return;
+    await softwareFactoryStore.completeJob(run.jobId, {
+      success: false,
+      costMicros: 0,
+      outcome: {
+        workflowRunId: run.id,
+        verified: true,
+        error: error.slice(0, 2_000),
+        costBasis: "codex-subscription",
+      },
+    });
+  },
+});
+const workflowLoop =
+  process.env.SOFTWARE_FACTORY_WORKER === "false"
+    ? undefined
+    : repeatAfterEach(async () => {
+        await workflowWorker
+          .runOnce()
+          .catch((error) =>
+            console.error("Software-factory workflow tick failed.", error),
+          );
+      }, 1_000);
+const webhookReconciler = createWebhookReconciler(database, {
+  tenantId: tenantPackage.tenantId,
+});
 const productionEngineerStore = createProductionEngineerStore(
   database,
   process.env.PRODUCTION_ENGINEER_FIX_AUTOMATION === "true"
@@ -342,7 +496,27 @@ const productionEngineerStore = createProductionEngineerStore(
       scored: scoreEpisode(episode),
     });
   },
+  { contextGraph: factoryContextGraph, tenantId: tenantPackage.tenantId },
 );
+const webhookWorkerId = processOwner("production-webhook");
+const webhookLoop = repeatAfterEach(async () => {
+  const event = await webhookReconciler.claim(webhookWorkerId);
+  if (!event) return;
+  try {
+    await processProductionWebhook(
+      productionEngineerStore,
+      event,
+      verifiedValueStore,
+    );
+    await webhookReconciler.complete(event.id, webhookWorkerId);
+  } catch (error) {
+    await webhookReconciler.fail(
+      event.id,
+      webhookWorkerId,
+      error instanceof Error ? error.message : String(error),
+    );
+  }
+}, 1_000);
 setRuntimeEpisodeRecorder(
   async ({ run, episode, scored, toolCalls, usage }) => {
     const forwarded = run.forwardedProps as
@@ -1028,7 +1202,7 @@ const handoffEvolution = createEvolutionCheckpointGate(database);
 if (config.handoff.maxDepth > 0 && config.handoff.maxPerRun > 0) {
   const runner = createHandoffRunner({
     queue: createWorkQueue(database),
-    owner: `handoff/${process.env.HOSTNAME ?? randomUUID().slice(0, 8)}`,
+    owner: processOwner("handoff"),
     auditStore: bootAuditStore,
     evolution: handoffEvolution,
     /*
@@ -1164,6 +1338,8 @@ if (config.handoff.maxDepth > 0 && config.handoff.maxPerRun > 0) {
   handoffDrain = async () => {
     stopping = true;
     handoffLoop?.stop();
+    workflowLoop?.stop();
+    webhookLoop.stop();
     await activeSweep;
   };
 }
@@ -1182,7 +1358,7 @@ if (config.handoff.maxDepth > 0 && config.handoff.maxPerRun > 0) {
  */
 const reaper = createHandoffRunner({
   queue: createWorkQueue(database),
-  owner: `reaper/${process.env.HOSTNAME ?? randomUUID().slice(0, 8)}`,
+  owner: processOwner("reaper"),
   sign: () => ({ lineage: "", toolCalls: [] }),
   auditStore: bootAuditStore,
   // Never called: `reap` deletes rows by age and claims nothing.
@@ -1286,6 +1462,15 @@ const app = createApp(
   productionEngineerStore,
   async () => {
     await database.execute(sql`select 1`);
+  },
+  {
+    store: softwareFactoryStore,
+    contextGraph: factoryContextGraph,
+    tenantId: tenantPackage.tenantId,
+    webhooks: webhookReconciler,
+    shadows: shadowEvaluator,
+    workflows: workflowRuntime,
+    provenance: { ...runtimeProvenance, workerId: workflowWorkerId },
   },
 );
 
@@ -1460,6 +1645,7 @@ installGracefulShutdown({
     await Promise.allSettled([
       server.stop(false),
       handoffDrain(),
+      workflowWorker.drain(),
       channelActivityListener.stop(),
       policyListener.stop(),
       // Started only where handing work between Bots is switched on, so it is often not there.

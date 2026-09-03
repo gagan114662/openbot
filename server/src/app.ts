@@ -49,6 +49,12 @@ import type { PluginStore } from "./plugins/store";
 import { REFUSAL_MARKER } from "./plugins/tools";
 import { createProductionEngineerRoutes } from "./production-engineer/routes";
 import type { ProductionEngineerStore } from "./production-engineer/store";
+import type { ContextGraph } from "./software-factory/context-graph";
+import { createSoftwareFactoryRoutes } from "./software-factory/routes";
+import type { SoftwareFactoryStore } from "./software-factory/store";
+import type { ShadowEvaluator } from "./software-factory/shadow-evaluator";
+import type { WorkflowRuntime } from "./software-factory/workflow-runtime";
+import type { WebhookReconciler } from "./webhooks/reconciler";
 
 export type AgentCallbackToolResolver = (input: {
   name: string;
@@ -236,13 +242,26 @@ export function createApp(
    * need to distinguish a dead process from a temporarily unready one.
    */
   readinessProbe?: () => Promise<void>,
+  /** Benchmark routing, managed jobs, and the tenant-isolated organizational graph. */
+  softwareFactory?: {
+    store: SoftwareFactoryStore;
+    contextGraph: ContextGraph;
+    tenantId: string;
+    webhooks?: WebhookReconciler;
+    shadows?: ShadowEvaluator;
+    workflows?: WorkflowRuntime;
+    provenance?: {
+      revision: string;
+      branch: string;
+      dirty: boolean;
+      workerId?: string;
+    };
+  },
 ) {
   const app = new Hono<{ Variables: AppVariables }>();
 
   app.get("/live", (context) => context.json({ status: "ok" }));
-  const readiness = async (
-    context: Context<{ Variables: AppVariables }>,
-  ) => {
+  const readiness = async (context: Context<{ Variables: AppVariables }>) => {
     try {
       await readinessProbe?.();
       return context.json({ status: "ok" });
@@ -952,7 +971,31 @@ export function createApp(
   if (productionEngineerStore) {
     app.route(
       "/api/production-engineer",
-      createProductionEngineerRoutes(productionEngineerStore, requireUser),
+      createProductionEngineerRoutes(productionEngineerStore, requireUser, {
+        githubWebhookSecret:
+          process.env.PRODUCTION_ENGINEER_GITHUB_WEBHOOK_SECRET,
+        alertmanagerWebhookSecret:
+          process.env.PRODUCTION_ENGINEER_ALERTMANAGER_WEBHOOK_SECRET,
+        githubToken: process.env.GITHUB_TOKEN,
+        valueWebhookSecret:
+          process.env.PRODUCTION_ENGINEER_VALUE_WEBHOOK_SECRET,
+        reconciler: softwareFactory?.webhooks,
+      }),
+    );
+  }
+  if (softwareFactory) {
+    app.route(
+      "/api/software-factory",
+      createSoftwareFactoryRoutes(
+        softwareFactory.store,
+        softwareFactory.contextGraph,
+        softwareFactory.tenantId,
+        requireUser,
+        softwareFactory.webhooks,
+        softwareFactory.shadows,
+        softwareFactory.workflows,
+        softwareFactory.provenance,
+      ),
     );
   }
 

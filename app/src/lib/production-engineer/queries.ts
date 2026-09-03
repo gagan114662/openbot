@@ -34,6 +34,23 @@ export function fixAutomationMessage(enabled: boolean): string {
 
 export type ProductionEngineerDashboard = {
   fixAutomationEnabled: boolean;
+  runtimeBudgets: {
+    evaluatorConcurrency: number;
+    evaluatorInflight: number;
+    shadowConcurrency: number;
+    shadowQueueCapacity: number;
+    shadowInflight: number;
+    shadowDropped: number;
+  };
+  factory: {
+    executionTiers: Array<"chat" | "assisted" | "managed" | "autonomous">;
+    managedJobKinds: Array<
+      "pull-request-review" | "ci-repair" | "bug-triage" | "visual-delivery"
+    >;
+    modelRouting: string;
+    workerPattern: string;
+    contextGraph: { nodes: number; edges: number; sourceSystems: number };
+  };
   monitors: Array<{
     id: string;
     key: string;
@@ -66,6 +83,196 @@ export type ProductionEngineerDashboard = {
 export async function fetchProductionEngineer() {
   const response = await client("/api/production-engineer");
   return response.json() as Promise<ProductionEngineerDashboard>;
+}
+
+export type SoftwareFactoryDashboard = {
+  provenance: null | {
+    revision: string;
+    branch: string;
+    dirty: boolean;
+    workerId?: string;
+  };
+  executionTiers: string[];
+  managedJobKinds: string[];
+  contextGraph: { nodes: number; edges: number; sourceSystems: number };
+  benchmarks: Array<{
+    harness: "codex" | "claude";
+    model: string;
+    task: string;
+    quality: number;
+    successfulOutcomes: number;
+    attemptedOutcomes: number;
+    totalCostMicros: number;
+    enabled: boolean;
+  }>;
+  jobs: Array<{
+    id: string;
+    kind: string;
+    tier: string;
+    objective: string;
+    status: string;
+    selectedModel: string | null;
+    selectedHarness: string | null;
+    costMicros: number;
+  }>;
+  webhooks: null | {
+    pending: number;
+    processed: number;
+    dead: number;
+    events: Array<{
+      id: string;
+      provider: string;
+      eventId: string;
+      status: string;
+      attempts: number;
+      lastError: string | null;
+    }>;
+  };
+  shadowTraffic: null | {
+    completed: number;
+    failed: number;
+    averageAgreement: number;
+    averageLatencyMs: number;
+    recent: Array<{
+      id: string;
+      requestKey: string;
+      primaryModel: string;
+      shadowModel: string;
+      agreementBasisPoints: number;
+      shadowLatencyMs: number;
+      primaryOutputHash: string;
+      shadowOutputHash: string;
+      evaluatorVersion: string;
+      status: string;
+      error: string | null;
+      createdAt: string;
+    }>;
+  };
+  workflows: Array<{
+    evidence: {
+      terminal: boolean;
+      verified: boolean;
+      checks: Record<string, boolean>;
+    };
+    run: {
+      id: string;
+      jobId: string;
+      status: string;
+      maximumAttempts: number;
+      concurrencyLimit: number;
+      pauseRequested: boolean;
+      abortRequested: boolean;
+      approvedBy: string | null;
+      steering: {
+        events?: Array<{ actorId: string; instruction: string; at: string }>;
+      };
+    };
+    stages: Array<{
+      stageId: string;
+      objective: string;
+      status: string;
+      attempts: number;
+      sessionId: string | null;
+      reviewerSessionId: string | null;
+      selectedModel: string | null;
+      selectedHarness: string | null;
+      verification: null | {
+        accepted?: boolean;
+        summary?: string;
+        checks?: string[];
+      };
+      lastError: string | null;
+    }>;
+    artifacts: Array<{
+      id: string;
+      stageId: string;
+      kind: string;
+      uri: string;
+      checksum: string;
+      revision: string;
+      producerSessionId: string;
+      command: string;
+      exitCode: number;
+      metadata: null | {
+        checks?: string[];
+        diffBytes?: number;
+        checkId?: string;
+        durationMs?: number;
+        required?: boolean;
+        evidenceSource?: string;
+        harness?: string;
+        model?: string;
+        trustedContext?: Array<{
+          key: string;
+          sourceSystem: string;
+          sourceUrl: string | null;
+          refreshedAt: string;
+          checksum: string;
+        }>;
+        debt?: {
+          metrics: Record<string, number>;
+          budget: Record<string, number>;
+          changedPaths: string[];
+          violations: string[];
+        };
+      };
+    }>;
+    events: Array<{
+      id: string;
+      stageId: string | null;
+      entity: string;
+      fromStatus: string | null;
+      toStatus: string;
+      detail: Record<string, unknown>;
+      createdAt: string;
+    }>;
+  }>;
+  contextCapsules: Array<{
+    id: string;
+    runId: string;
+    threadId: string;
+    checksum: string;
+    createdAt: string;
+  }>;
+};
+
+export async function fetchSoftwareFactory() {
+  const response = await client("/api/software-factory");
+  return response.json() as Promise<SoftwareFactoryDashboard>;
+}
+
+export async function createManagedJob(input: {
+  kind: "pull-request-review" | "ci-repair" | "bug-triage" | "visual-delivery";
+  objective: string;
+  maximumAttempts: number;
+  concurrencyLimit: number;
+  requiredContext: string[];
+}) {
+  const response = await client("/api/software-factory/jobs", {
+    method: "POST",
+    body: {
+      ...input,
+      tier: "managed",
+      trigger: "operator-ui",
+      minimumQuality: 0.8,
+    },
+  });
+  return response.json();
+}
+
+export async function controlWorkflow(input: {
+  runId: string;
+  action: "pause" | "resume" | "abort" | "approve" | "steer";
+  instruction?: string;
+}) {
+  const response = await client(
+    `/api/software-factory/workflows/${encodeURIComponent(input.runId)}/${input.action}`,
+    {
+      method: "POST",
+      body: input.instruction ? { instruction: input.instruction } : {},
+    },
+  );
+  return response.json();
 }
 
 export async function tuneProductionMonitor(monitorId: string) {

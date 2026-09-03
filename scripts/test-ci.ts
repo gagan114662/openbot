@@ -20,9 +20,7 @@ import { join } from "node:path";
 const MINIMUM_TESTS = 400;
 const databaseUrl = process.env.DATABASE_URL?.trim();
 let suiteLock: SuiteLock | undefined;
-let testDatabase:
-  | { admin: SQL; name: string; url: string }
-  | undefined;
+let testDatabase: { admin: SQL; name: string; url: string } | undefined;
 
 if (databaseUrl) {
   try {
@@ -44,13 +42,7 @@ if (databaseUrl) {
   try {
     await admin.unsafe(`create database "${name}"`);
     const migration = Bun.spawn(
-      [
-        "bun",
-        "x",
-        "drizzle-kit",
-        "migrate",
-        "--config=drizzle.config.ts",
-      ],
+      ["bun", "x", "drizzle-kit", "migrate", "--config=drizzle.config.ts"],
       {
         cwd: join(import.meta.dir, "..", "server"),
         env: { ...process.env, DATABASE_URL: testUrl.toString() },
@@ -59,7 +51,9 @@ if (databaseUrl) {
       },
     );
     if ((await migration.exited) !== 0) {
-      throw new Error("Schema migration failed for the disposable test database.");
+      throw new Error(
+        "Schema migration failed for the disposable test database.",
+      );
     }
     testDatabase = { admin, name, url: testUrl.toString() };
     console.error(`Test database: ${name} (disposable)`);
@@ -102,6 +96,9 @@ async function finish(status: number): Promise<never> {
 const proc = Bun.spawn(["bun", "run", "test"], {
   env: {
     ...process.env,
+    // The real two-process drill has its own required CI job. Running it inside Bun's broad,
+    // concurrent file registration starves process startup and tests scheduler contention instead.
+    OPENBOT_FULL_SUITE: "true",
     ...(testDatabase ? { DATABASE_URL: testDatabase.url } : {}),
   },
   stdout: "inherit",

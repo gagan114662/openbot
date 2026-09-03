@@ -1,5 +1,6 @@
 import {
   access,
+  cp,
   mkdir,
   readdir,
   readFile,
@@ -155,6 +156,7 @@ export function createCodexWorkflowExecutor(
     harness?: "codex" | "claude";
     binary?: string;
     workspaceRoot?: string;
+    retentionMs?: number;
   } = {},
 ): WorkflowHarnessExecutor {
   const root = resolve(repository);
@@ -215,6 +217,26 @@ export function createCodexWorkflowExecutor(
 
   const durableEvidence = (runId: string) => join(evidenceRoot, runId);
 
+  async function removeRegisteredWorktree(directory: string) {
+    await command(["git", "worktree", "remove", "--force", directory], root);
+    await command(["git", "worktree", "prune"], root);
+  }
+
+  async function archiveLegacyEvidence(runId: string, directory: string) {
+    const source = join(directory, ".openbot-evidence");
+    try {
+      await access(source);
+    } catch {
+      return;
+    }
+    await mkdir(durableEvidence(runId), { recursive: true });
+    await cp(source, join(durableEvidence(runId), "legacy"), {
+      recursive: true,
+      force: false,
+      errorOnExist: false,
+    });
+  }
+
   async function removeWorktree(runId: string) {
     const directory = join(worktreeRoot, runId);
     if (!directory.startsWith(`${worktreeRoot}/`))
@@ -224,8 +246,7 @@ export function createCodexWorkflowExecutor(
     } catch {
       return;
     }
-    await command(["git", "worktree", "remove", "--force", directory], root);
-    await command(["git", "worktree", "prune"], root);
+    await removeRegisteredWorktree(directory);
   }
 
   async function runCheck(
@@ -649,13 +670,34 @@ export function createCodexWorkflowExecutor(
     },
     cleanup: removeWorktree,
     async sweep(protectedRunIds) {
-      const cutoff = Date.now() - retentionMs();
+      const cutoff = Date.now() - (options.retentionMs ?? retentionMs());
       for (const entry of await readdir(worktreeRoot, {
         withFileTypes: true,
       }).catch(() => [])) {
         if (!entry.isDirectory() || protectedRunIds.has(entry.name)) continue;
         const details = await stat(join(worktreeRoot, entry.name));
         if (details.mtimeMs <= cutoff) await removeWorktree(entry.name);
+      }
+      const legacyRoots = [
+        join(root, ".openbot", "workflows"),
+        join(root, "server", ".openbot", "workflows"),
+        join(dirname(root), ".openbot-workflows", basename(root)),
+      ];
+      for (const legacyRoot of legacyRoots) {
+        for (const entry of await readdir(legacyRoot, {
+          withFileTypes: true,
+        }).catch(() => [])) {
+          if (
+            !entry.isDirectory() ||
+            entry.name === "worktrees" ||
+            entry.name === "evidence" ||
+            protectedRunIds.has(entry.name)
+          )
+            continue;
+          const directory = join(legacyRoot, entry.name);
+          await archiveLegacyEvidence(entry.name, directory);
+          await removeRegisteredWorktree(directory);
+        }
       }
     },
     async worktreeStats() {

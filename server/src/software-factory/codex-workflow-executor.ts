@@ -345,6 +345,7 @@ export function createCodexWorkflowExecutor(
     const response = await command(
       [
         options.binary ?? "claude",
+        "--restricted",
         "-p",
         `${prompt}\nReturn only JSON matching this schema: ${JSON.stringify(schema)}`,
         "--output-format",
@@ -355,6 +356,8 @@ export function createCodexWorkflowExecutor(
         model,
         "--permission-mode",
         sandbox === "workspace-write" ? "acceptEdits" : "plan",
+        "--permission-prompts",
+        "none",
         "--allowedTools",
         sandbox === "workspace-write"
           ? "Read,Edit,Write,Glob,Grep"

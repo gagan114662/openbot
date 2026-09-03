@@ -62,6 +62,8 @@ if (${JSON.stringify(harness)} === "codex") {
   await Bun.write(output, JSON.stringify(payload));
 } else {
   if (!args.includes("--json-schema")) process.exit(42);
+  if (!args.includes("--restricted")) process.exit(44);
+  if (!args.includes("--permission-prompts") || !args.includes("none")) process.exit(45);
   if (!args.includes("--disallowedTools") || !args.includes("Bash,WebFetch,WebSearch")) process.exit(43);
   process.stdout.write(JSON.stringify({ structured_output: payload, result: "fallback must not run" }));
 }

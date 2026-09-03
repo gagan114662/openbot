@@ -180,7 +180,6 @@ jobs:
   test:
     name: tests
     runs-on: ubuntu-latest
-    if: false # ISSUE-83 NEGATIVE CONTROL: removed after verify proves this skip is rejected.
     # The suite includes a real database integration test. Without a database it fails on every run,
     # including on main, which trains everyone to read a red CI as normal. pgvector rather than plain
     # postgres because the knowledge schema uses the extension.

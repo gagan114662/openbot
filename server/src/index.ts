@@ -90,6 +90,7 @@ import { CATALOGUE } from "./plugins/catalogue";
 import { redirectUriFor } from "./plugins/oauth";
 import { createPluginStore } from "./plugins/store";
 import { grantedSkills, grantedTools, REFUSAL_MARKER } from "./plugins/tools";
+import { processOwner } from "./process-owner";
 import { createCodexFixDrafter } from "./production-engineer/fix-drafter";
 import { processProductionWebhook } from "./production-engineer/routes";
 import { createProductionEngineerStore } from "./production-engineer/store";
@@ -187,9 +188,6 @@ const identifyActor: IdentifyActor = async (request) => {
 };
 
 const config = loadConfig();
-const processInstanceId = randomUUID();
-const processOwner = (role: string) =>
-  `${role}/${process.env.HOSTNAME ?? "local"}/${processInstanceId}`;
 const port = Number.parseInt(process.env.PORT ?? "3001", 10);
 const configuredPoolMax = Number.parseInt(
   process.env.DATABASE_POOL_MAX ?? "",

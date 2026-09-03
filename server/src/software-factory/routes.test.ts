@@ -74,6 +74,9 @@ describe("managed workflow plans", () => {
       timeoutMs: 30_000,
       required: true,
     });
+    expect(stages[0]?.checks.some(({ id }) => id === "observable-change")).toBe(
+      false,
+    );
   });
 });
 

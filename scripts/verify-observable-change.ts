@@ -30,7 +30,7 @@ if (statusCode !== 0)
   throw new Error(`Could not inspect observable change: ${statusError.trim()}`);
 if (!statusOutput.trim())
   throw new Error(
-    `Observable path ${relativePath} exists but was not changed by this run.`,
+    `Observable path ${relativePath} was not changed by this run.`,
   );
 const actual = createHash("sha256")
   .update(await readFile(path))

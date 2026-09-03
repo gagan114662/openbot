@@ -72,7 +72,7 @@ export function managedWorkflowStages(
     objective: `${purpose}. Overall objective: ${objective}`,
     requiredContext,
     dependsOn,
-    checks,
+    checks: checks.map((check) => ({ ...check, command: [...check.command] })),
     ...(gate ? { gate } : {}),
   });
   let stages: ReturnType<typeof stage>[];

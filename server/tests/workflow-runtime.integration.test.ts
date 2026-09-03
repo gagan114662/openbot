@@ -20,6 +20,7 @@ import {
 } from "../src/software-factory/workflow-runtime";
 import {
   createWorkflowWorker,
+  HarnessUnavailableError,
   StageExecutionFailure,
 } from "../src/software-factory/workflow-worker";
 import { TEST_POOL } from "./support/database";
@@ -1159,10 +1160,6 @@ if (!prompt.includes("Independently review")) {
         },
       ],
     });
-    let release = () => {};
-    const held = new Promise<void>((resolve) => {
-      release = resolve;
-    });
     const worker = createWorkflowWorker({
       runtime,
       workerId: "heartbeat-worker",
@@ -1171,7 +1168,11 @@ if (!prompt.includes("Independently review")) {
       stageTimeoutMs: 1_000,
       executor: {
         async execute({ sessionId }) {
-          await held;
+          const child = Bun.spawn(
+            [process.execPath, "-e", "await Bun.sleep(180)"],
+            { stdout: "pipe", stderr: "pipe" },
+          );
+          expect(await child.exited).toBe(0);
           const content = "held by one worker";
           return {
             sessionId,
@@ -1200,13 +1201,141 @@ if (!prompt.includes("Independently review")) {
     const activeRun = worker.runOnce();
     while ((await runtime.snapshot(run.id))?.stages[0]?.status !== "running")
       await Bun.sleep(5);
-    await Bun.sleep(180);
+    await Bun.sleep(130);
     expect(await runtime.claim("competing-replica", 90)).toBeNull();
-    release();
     await activeRun;
     expect((await runtime.snapshot(run.id))?.run.status).toBe(
       "awaiting_approval",
     );
+    expect((await runtime.snapshot(run.id))?.stages[0]?.attempts).toBe(1);
+    expect(
+      (await runtime.snapshot(run.id))?.events.some(
+        (event) =>
+          (event.detail as { classification?: string }).classification ===
+          "lease-policy",
+      ),
+    ).toBe(true);
+  });
+
+  test("a harness transport failure is audited, backed off, and refunds the attempt", async () => {
+    const queued = await store.queueJob("admin", {
+      kind: "ci-repair",
+      tier: "managed",
+      objective: "survive a provider outage",
+      trigger: "harness-unavailable-proof",
+      minimumQuality: 0.8,
+    });
+    const run = await runtime.create({
+      jobId: queued.job.id,
+      maximumAttempts: 1,
+      concurrencyLimit: 1,
+      stages: [
+        {
+          id: "transport",
+          objective: "execute",
+          requiredContext: [],
+          dependsOn: [],
+        },
+      ],
+    });
+    const started = performance.now();
+    const worker = createWorkflowWorker({
+      runtime,
+      workerId: "transport-worker",
+      harnessBackoffMs: 40,
+      executor: {
+        async execute() {
+          throw new HarnessUnavailableError(
+            "codex failed (1): retries=4 max_retries",
+          );
+        },
+        async review() {
+          throw new Error("review must not run");
+        },
+      },
+    });
+    await worker.runOnce();
+    expect(performance.now() - started).toBeGreaterThanOrEqual(35);
+    const snapshot = await runtime.snapshot(run.id);
+    expect(snapshot?.stages[0]).toMatchObject({
+      status: "pending",
+      attempts: 0,
+    });
+    expect(snapshot?.stages[0]?.lastError).toContain("harness-unavailable");
+    expect(
+      snapshot?.events.some(
+        (event) =>
+          (event.detail as { classification?: string }).classification ===
+            "harness-unavailable" &&
+          (event.detail as { attemptRefunded?: boolean }).attemptRefunded ===
+            true,
+      ),
+    ).toBe(true);
+  });
+
+  test("losing a lease interrupts a live child and refunds its attempt", async () => {
+    const queued = await store.queueJob("admin", {
+      kind: "ci-repair",
+      tier: "managed",
+      objective: "interrupt a live child on lease loss",
+      trigger: "lease-loss-proof",
+      minimumQuality: 0.8,
+    });
+    const run = await runtime.create({
+      jobId: queued.job.id,
+      maximumAttempts: 1,
+      concurrencyLimit: 1,
+      stages: [
+        {
+          id: "live-child",
+          objective: "wait",
+          requiredContext: [],
+          dependsOn: [],
+        },
+      ],
+    });
+    let childWasKilled = false;
+    const worker = createWorkflowWorker({
+      runtime: { ...runtime, renewLease: async () => false },
+      workerId: "lease-loss-worker",
+      leaseMs: 100,
+      heartbeatMs: 20,
+      executor: {
+        async execute({ signal }) {
+          const child = Bun.spawn(
+            [process.execPath, "-e", "await Bun.sleep(1000)"],
+            {
+              stdout: "pipe",
+              stderr: "pipe",
+            },
+          );
+          signal.addEventListener("abort", () => child.kill("SIGTERM"), {
+            once: true,
+          });
+          await child.exited;
+          childWasKilled = true;
+          throw new Error(String(signal.reason));
+        },
+        async review() {
+          throw new Error("review must not run");
+        },
+      },
+    });
+    await worker.runOnce();
+    expect(childWasKilled).toBe(true);
+    const snapshot = await runtime.snapshot(run.id);
+    expect(snapshot?.stages[0]).toMatchObject({
+      status: "pending",
+      attempts: 0,
+    });
+    expect(snapshot?.stages[0]?.lastError).toContain("interrupted-by-lease");
+    expect(
+      snapshot?.events.some(
+        (event) =>
+          (event.detail as { classification?: string }).classification ===
+          "interrupted-by-lease",
+      ),
+    ).toBe(true);
   });
 
   test("a stage that exceeds its deadline enters the bounded failure path", async () => {

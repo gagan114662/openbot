@@ -409,6 +409,16 @@ const softwareFactoryRepository =
 const workflowWorker = createWorkflowWorker({
   runtime: workflowRuntime,
   workerId: workflowWorkerId,
+  leaseMs: Number(process.env.SOFTWARE_FACTORY_WORKER_LEASE_MS ?? 300_000),
+  heartbeatMs: Number(
+    process.env.SOFTWARE_FACTORY_WORKER_HEARTBEAT_MS ?? 30_000,
+  ),
+  stageTimeoutMs: Number(
+    process.env.SOFTWARE_FACTORY_STAGE_TIMEOUT_MS ?? 600_000,
+  ),
+  harnessBackoffMs: Number(
+    process.env.SOFTWARE_FACTORY_HARNESS_BACKOFF_MS ?? 2_000,
+  ),
   executor: createRoutedWorkflowExecutor([
     createCodexWorkflowExecutor(softwareFactoryRepository, {
       groundContext: (keys) =>

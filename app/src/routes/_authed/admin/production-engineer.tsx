@@ -41,6 +41,7 @@ function ProductionEngineerPage() {
   const [jobContextKeys, setJobContextKeys] = useState("");
   const [jobObservablePath, setJobObservablePath] = useState("");
   const [jobExpectedContent, setJobExpectedContent] = useState("");
+  const [jobMaximumAttempts, setJobMaximumAttempts] = useState(3);
   const [jobKind, setJobKind] = useState<
     "pull-request-review" | "ci-repair" | "bug-triage" | "visual-delivery"
   >("pull-request-review");
@@ -332,6 +333,19 @@ function ProductionEngineerPage() {
             value={jobExpectedContent}
             onChange={(event) => setJobExpectedContent(event.target.value)}
           />
+          <Input
+            aria-label="Maximum repair attempts"
+            className="md:col-start-2"
+            max={10}
+            min={1}
+            type="number"
+            value={jobMaximumAttempts}
+            onChange={(event) =>
+              setJobMaximumAttempts(
+                Math.max(1, Math.min(10, Number(event.target.value) || 1)),
+              )
+            }
+          />
           <Button
             className="md:col-start-3 md:row-start-1"
             disabled={
@@ -343,7 +357,7 @@ function ProductionEngineerPage() {
               createJob.mutate({
                 kind: jobKind,
                 objective: jobObjective,
-                maximumAttempts: 3,
+                maximumAttempts: jobMaximumAttempts,
                 concurrencyLimit: 1,
                 requiredContext: jobContextKeys
                   .split(",")

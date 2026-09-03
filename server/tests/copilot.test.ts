@@ -69,7 +69,7 @@ function answerEvents(text: string): BaseEvent[] {
 }
 
 describe("retrieved-evidence enforcement", () => {
-  test("shadows the final output emitted by a real agent stream", async () => {
+  test("shadows the final output emitted by an agent stream", async () => {
     let release: (() => void) | undefined;
     const observed = new Promise<void>((resolve) => {
       release = resolve;

@@ -588,7 +588,7 @@ describe("a rule about one surface does not refuse another", () => {
     expect(decision.allowed).toBe(true);
   });
 
-  test("the MCP rule still refuses a real MCP write", () => {
+  test("the MCP rule still refuses a representative MCP write", () => {
     const decision = evaluateActionPolicy(
       { mode: "enforce", deny: ['mcp.effect == "write"'], allow: ["true"] },
       {
@@ -601,7 +601,7 @@ describe("a rule about one surface does not refuse another", () => {
     expect(decision.source).toBe("deny");
   });
 
-  test("the shell rule still refuses a real command", () => {
+  test("the shell rule still refuses a representative command", () => {
     const decision = evaluateActionPolicy(
       {
         mode: "enforce",
@@ -653,7 +653,7 @@ describe("refusal wording under the context the gateway actually builds", () => 
     expect(decision.reason).not.toContain(" on  is blocked");
   });
 
-  test("a real tool call still reads as its server and tool", () => {
+  test("a tool call still reads as its server and tool", () => {
     const decision = evaluateActionPolicy(
       { mode: "enforce", deny: ['mcp.server == "notes"'], allow: ["true"] },
       {

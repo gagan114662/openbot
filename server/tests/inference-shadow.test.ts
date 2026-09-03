@@ -10,7 +10,7 @@ import {
   inferenceShadowMetrics,
 } from "../src/software-factory/inference-shadow";
 
-describe("real inference shadow path", () => {
+describe("inference shadow path wired to the agent stream", () => {
   test("bounds concurrent shadows and drops overflow before spawning", async () => {
     let release!: () => void;
     const held = new Promise<void>((resolve) => {

@@ -290,29 +290,45 @@ export function createWorkflowRuntime(
         .where(eq(factoryWorkflowRuns.tenantId, tenantId))
         .orderBy(asc(factoryWorkflowRuns.createdAt))
         .limit(Math.max(1, Math.min(100, limit)));
-      return Promise.all(
-        runs.map(async (run) => {
-          const [stages, artifacts, events] = await Promise.all([
-            database
-              .select()
-              .from(factoryWorkflowStages)
-              .where(eq(factoryWorkflowStages.runId, run.id))
-              .orderBy(asc(factoryWorkflowStages.stageId)),
-            database
-              .select()
-              .from(factoryWorkflowArtifacts)
-              .where(eq(factoryWorkflowArtifacts.runId, run.id))
-              .orderBy(asc(factoryWorkflowArtifacts.createdAt)),
-            database
-              .select()
-              .from(factoryWorkflowEvents)
-              .where(eq(factoryWorkflowEvents.runId, run.id))
-              .orderBy(asc(factoryWorkflowEvents.createdAt)),
-          ]);
-          const snapshot = { run, stages, artifacts, events };
-          return { ...snapshot, evidence: verifyWorkflowEvidence(snapshot) };
-        }),
-      );
+      if (runs.length === 0) return [];
+      const runIds = runs.map((run) => run.id);
+      // Keep dashboard load constant-query. The previous per-run fan-out issued as many as 301
+      // queries and crossed the HTTP idle timeout once real execution history accumulated.
+      const [stages, artifacts, events] = await Promise.all([
+        database
+          .select()
+          .from(factoryWorkflowStages)
+          .where(inArray(factoryWorkflowStages.runId, runIds))
+          .orderBy(
+            asc(factoryWorkflowStages.runId),
+            asc(factoryWorkflowStages.stageId),
+          ),
+        database
+          .select()
+          .from(factoryWorkflowArtifacts)
+          .where(inArray(factoryWorkflowArtifacts.runId, runIds))
+          .orderBy(
+            asc(factoryWorkflowArtifacts.runId),
+            asc(factoryWorkflowArtifacts.createdAt),
+          ),
+        database
+          .select()
+          .from(factoryWorkflowEvents)
+          .where(inArray(factoryWorkflowEvents.runId, runIds))
+          .orderBy(
+            asc(factoryWorkflowEvents.runId),
+            asc(factoryWorkflowEvents.createdAt),
+          ),
+      ]);
+      return runs.map((run) => {
+        const snapshot = {
+          run,
+          stages: stages.filter((stage) => stage.runId === run.id),
+          artifacts: artifacts.filter((artifact) => artifact.runId === run.id),
+          events: events.filter((event) => event.runId === run.id),
+        };
+        return { ...snapshot, evidence: verifyWorkflowEvidence(snapshot) };
+      });
     },
 
     async create(input: {

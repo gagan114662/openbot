@@ -1161,6 +1161,102 @@ if (!prompt.includes("Independently review")) {
     await worker.drain();
   });
 
+  test("five pause cycles do not spend the only attempt before the stage succeeds", async () => {
+    await store.benchmark({
+      source: "measured",
+      model: "pause-proof-model",
+      task: "ci-repair",
+      quality: 0.9,
+      successfulOutcomes: 1,
+      attemptedOutcomes: 1,
+      totalCostMicros: 0,
+      enabled: true,
+    });
+    const queued = await store.queueJob("admin", {
+      kind: "ci-repair",
+      tier: "managed",
+      objective: "survive repeated operator pauses",
+      trigger: "five-pause-proof",
+      minimumQuality: 0.8,
+    });
+    const run = await runtime.create({
+      jobId: queued.job.id,
+      maximumAttempts: 1,
+      concurrencyLimit: 1,
+      stages: [
+        {
+          id: "pause-safe",
+          objective: "finish after five pauses",
+          requiredContext: [],
+          dependsOn: [],
+        },
+      ],
+    });
+    let executions = 0;
+    const worker = createWorkflowWorker({
+      runtime,
+      workerId: "five-pause-worker",
+      executor: {
+        async execute({ sessionId, signal }) {
+          executions += 1;
+          if (executions <= 5)
+            await new Promise<never>((_resolve, reject) =>
+              signal.addEventListener(
+                "abort",
+                () => reject(new Error(String(signal.reason))),
+                { once: true },
+              ),
+            );
+          const content = "completed after five pauses";
+          return {
+            sessionId,
+            summary: content,
+            artifacts: [
+              {
+                kind: "pause-proof",
+                uri: `workflow://${run.id}/pause-proof`,
+                content,
+                checksum: artifactChecksum(content),
+                revision: "deadbeef",
+                producerSessionId: sessionId,
+              },
+            ],
+          };
+        },
+        async review() {
+          return {
+            accepted: true,
+            summary: "pause budget preserved",
+            checks: ["five pause cycles"],
+          };
+        },
+      },
+    });
+
+    for (let cycle = 0; cycle < 5; cycle += 1) {
+      const interrupted = worker.runOnce();
+      while ((await runtime.snapshot(run.id))?.stages[0]?.status !== "running")
+        await Bun.sleep(10);
+      expect((await runtime.snapshot(run.id))?.stages[0]?.attempts).toBe(1);
+      await runtime.requestPause(run.id);
+      await interrupted;
+      await runtime.claim("five-pause-worker");
+      expect(await runtime.snapshot(run.id)).toMatchObject({
+        run: { status: "paused" },
+        stages: [{ status: "pending", attempts: 0 }],
+      });
+      await runtime.resume(run.id);
+    }
+
+    await worker.runOnce();
+    expect(await runtime.snapshot(run.id)).toMatchObject({
+      run: { status: "awaiting_approval" },
+      stages: [{ status: "succeeded", attempts: 1 }],
+    });
+    expect(executions).toBe(6);
+    await worker.drain();
+  }, 15_000);
+
   test("same-owner crash recovery resets an expired stage and stale sessions cannot mutate it", async () => {
     const queued = await store.queueJob("admin", {
       kind: "ci-repair",

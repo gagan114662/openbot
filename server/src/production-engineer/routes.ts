@@ -3,8 +3,8 @@ import type { MiddlewareHandler } from "hono";
 import { Hono } from "hono";
 import type { AppVariables } from "../auth/guards";
 import { requireAdmin } from "../auth/guards";
-import type { WebhookReconciler } from "../webhooks/reconciler";
 import type { VerifiedValueStore } from "../software-factory/verified-value";
+import type { WebhookReconciler } from "../webhooks/reconciler";
 import type { ProductionEngineerStore } from "./store";
 
 const text = (value: unknown, maximum = 2_000) =>
@@ -154,7 +154,51 @@ export function createProductionEngineerRoutes(
     ) {
       return context.json({ error: "Webhook signature is invalid." }, 401);
     }
-    if (context.req.header("x-github-event") !== "pull_request") {
+    const eventName = context.req.header("x-github-event");
+    if (eventName === "workflow_run") {
+      const payload = JSON.parse(raw) as {
+        action?: unknown;
+        repository?: { full_name?: unknown };
+        workflow_run?: {
+          conclusion?: unknown;
+          pull_requests?: Array<{ number?: unknown }>;
+        };
+      };
+      const repository = text(payload.repository?.full_name, 200);
+      const conclusion = text(payload.workflow_run?.conclusion, 100);
+      const failedConclusions = new Set([
+        "failure",
+        "timed_out",
+        "cancelled",
+        "startup_failure",
+      ]);
+      if (
+        payload.action !== "completed" ||
+        !repository ||
+        !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository) ||
+        !conclusion ||
+        !failedConclusions.has(conclusion)
+      ) {
+        return context.json({ ignored: true }, 202);
+      }
+      const pullRequests = (payload.workflow_run?.pull_requests ?? [])
+        .map((pullRequest) => pullRequest.number)
+        .filter((number): number is number => Number.isSafeInteger(number));
+      const updated = (
+        await Promise.all(
+          pullRequests.map((number) =>
+            store.failFixFromCi(
+              `https://github.com/${repository}/pull/${number}`,
+            ),
+          ),
+        )
+      ).flat();
+      return context.json(
+        { accepted: true, conclusion, failedFixes: updated.length },
+        202,
+      );
+    }
+    if (eventName !== "pull_request") {
       return context.json({ ignored: true }, 202);
     }
     const payload = JSON.parse(raw) as {

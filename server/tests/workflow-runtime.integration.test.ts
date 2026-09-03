@@ -1533,7 +1533,13 @@ if (!prompt.includes("Independently review")) {
         },
       ],
     });
-    await runtime.claim("no-progress-worker");
+    // Exercise reconciliation on this exact run. A generic queue claim can legitimately select
+    // an older run left by another scenario in the same tenant and makes this assertion order-
+    // dependent under the full suite.
+    await database
+      .update(factoryWorkflowRuns)
+      .set({ status: "running", leaseOwner: "no-progress-worker" })
+      .where(eq(factoryWorkflowRuns.id, run.id));
     await database
       .update(factoryWorkflowStages)
       .set({ attempts: 1, status: "pending" })

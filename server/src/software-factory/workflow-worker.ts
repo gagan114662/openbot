@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { WorkflowRuntime } from "./workflow-runtime";
+import { publishWorkflowEvent } from "./workflow-stream";
 
 type Snapshot = NonNullable<Awaited<ReturnType<WorkflowRuntime["snapshot"]>>>;
 type Stage = Snapshot["stages"][number];
@@ -63,6 +64,11 @@ export type WorkflowExecutor = {
     checks: string[];
   }>;
   interrupt(): Promise<void>;
+  steer?(input: {
+    runId: string;
+    stageId: string;
+    instruction: string;
+  }): Promise<void>;
   cleanup?(runId: string): Promise<void>;
   sweep?(protectedRunIds: Set<string>): Promise<void>;
   worktreeStats?(): Promise<{ active: number; diskBytes: number }>;
@@ -122,6 +128,12 @@ export function createWorkflowWorker(options: {
       workerSessionId,
     );
     if (!started) return;
+    publishWorkflowEvent({
+      runId,
+      stageId: stage.stageId,
+      type: "transition",
+      payload: { status: "running", sessionId: workerSessionId },
+    });
     const controller = new AbortController();
     const runControllers = controllers.get(runId) ?? new Set<AbortController>();
     runControllers.add(controller);
@@ -135,25 +147,51 @@ export function createWorkflowWorker(options: {
     );
     deadline.unref?.();
     const initialSnapshot = await options.runtime.snapshot(runId);
-    const initialSteering =
+    let observedSteering =
       (initialSnapshot?.run.steering as { events?: unknown[] } | undefined)
         ?.events?.length ?? 0;
     const controlWatcher = setInterval(() => {
       // One narrow control-row read replaces the old four-query snapshot poll.
-      void options.runtime.control(runId).then((current) => {
-        const steering =
-          (current?.steering as { events?: unknown[] } | undefined)?.events
-            ?.length ?? 0;
-        if (
-          !current ||
-          current.abortRequested ||
-          current.pauseRequested ||
-          steering > initialSteering
-        )
-          controller.abort(
-            "Workflow control changed while the stage was running.",
-          );
-      });
+      void options.runtime
+        .control(runId)
+        .then(async (current) => {
+          const steering =
+            (current?.steering as { events?: unknown[] } | undefined)?.events
+              ?.length ?? 0;
+          if (steering > observedSteering && "steer" in options.executor) {
+            const events = (
+              current?.steering as {
+                events?: Array<{ instruction?: string }>;
+              }
+            )?.events;
+            const instruction = events?.at(-1)?.instruction;
+            if (options.executor.steer && instruction) {
+              await options.executor.steer({
+                runId,
+                stageId: stage.stageId,
+                instruction,
+              });
+              observedSteering = steering;
+              publishWorkflowEvent({
+                runId,
+                stageId: stage.stageId,
+                type: "control",
+                payload: { mode: "continued", reason: "steer" },
+              });
+              return;
+            }
+          }
+          if (
+            !current ||
+            current.abortRequested ||
+            current.pauseRequested ||
+            steering > observedSteering
+          )
+            controller.abort(
+              "Workflow control changed while the stage was running.",
+            );
+        })
+        .catch(() => controller.abort("Workflow control delivery failed."));
     }, 1_250);
     controlWatcher.unref?.();
     try {
@@ -216,13 +254,19 @@ export function createWorkflowWorker(options: {
         reviewerSessionId,
         verification: { ...verification, accepted: true as const },
       });
+      publishWorkflowEvent({
+        runId,
+        stageId: stage.stageId,
+        type: "transition",
+        payload: { status: "succeeded" },
+      });
     } catch (error) {
       const current = await options.runtime.snapshot(runId);
       const steering =
         (current?.run.steering as { events?: unknown[] } | undefined)?.events
           ?.length ?? 0;
       if (current?.run.status === "aborted") return;
-      if (current?.run.pauseRequested || steering > initialSteering) {
+      if (current?.run.pauseRequested || steering > observedSteering) {
         await options.runtime.interruptStage(
           runId,
           stage.stageId,
@@ -231,6 +275,15 @@ export function createWorkflowWorker(options: {
             ? "Paused by an operator while running."
             : "Restarted to apply new operator steering.",
         );
+        publishWorkflowEvent({
+          runId,
+          stageId: stage.stageId,
+          type: "control",
+          payload: {
+            mode: "restarted",
+            reason: current?.run.pauseRequested ? "pause" : "steer",
+          },
+        });
       } else if (
         error instanceof HarnessUnavailableError ||
         String(controller.signal.reason ?? "").startsWith("Workflow lease")
@@ -265,6 +318,12 @@ export function createWorkflowWorker(options: {
         );
         if (failure?.terminal)
           await options.onTerminalFailure?.({ runId, error: message });
+        publishWorkflowEvent({
+          runId,
+          stageId: stage.stageId,
+          type: "transition",
+          payload: { status: failure?.terminal ? "failed" : "retrying" },
+        });
       }
     } finally {
       clearInterval(controlWatcher);

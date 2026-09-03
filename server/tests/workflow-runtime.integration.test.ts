@@ -103,6 +103,13 @@ describe("durable workflow runtime", () => {
       fromStatus: "queued",
       instructionHash,
     });
+    expect((await runtime.snapshot(controlled.id))?.run.steering).toMatchObject(
+      {
+        events: [
+          expect.objectContaining({ actorId: "audit-admin", instruction }),
+        ],
+      },
+    );
     await runtime.requestAbort(controlled.id, {
       actorId: "audit-admin",
       fromStatus: "queued",
@@ -652,6 +659,7 @@ if (!prompt.includes("Independently review")) {
         reviewerSessionId: "claude-cli-session-3",
       });
       expect(snapshot?.artifacts.map((artifact) => artifact.kind)).toEqual([
+        "model-prompt",
         "codex-stage-result",
         "runtime-check",
         "runtime-check",

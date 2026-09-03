@@ -6,6 +6,7 @@ import {
   createClaudeWorkflowExecutor,
   createCodexWorkflowExecutor,
 } from "./codex-workflow-executor";
+import { subscribeWorkflowEvents } from "./workflow-stream";
 import { StageExecutionFailure } from "./workflow-worker";
 
 const roots: string[] = [];
@@ -99,7 +100,7 @@ describe.each(["codex", "claude"] as const)(
           items: [
             {
               id: "runtime-command",
-              command: ["git", "diff", "--check"],
+              command: ["bun", "-e", "console.log('check-output')"],
               timeoutMs: 10_000,
               required: true,
             },
@@ -113,6 +114,13 @@ describe.each(["codex", "claude"] as const)(
         run: { steering: { events: [] } },
         artifacts: [],
       };
+      const streamed: string[] = [];
+      let candidateResolved = false;
+      const stopStream = subscribeWorkflowEvents(runId, (event) => {
+        if (event.type !== "check-output") return;
+        expect(candidateResolved).toBe(false);
+        streamed.push(String(event.payload.chunk));
+      });
       const candidate = await executor.run({
         runId,
         stage,
@@ -120,19 +128,24 @@ describe.each(["codex", "claude"] as const)(
         sessionId: "worker-session",
         signal: new AbortController().signal,
       } as never);
+      candidateResolved = true;
+      stopStream();
+      expect(streamed.join("")).toContain("check-output");
       expect(candidate.sessionId).toBe("worker-session");
-      expect(candidate.artifacts).toHaveLength(3);
-      expect(candidate.artifacts[0]?.metadata).toMatchObject({
+      expect(candidate.artifacts).toHaveLength(4);
+      expect(candidate.artifacts[0]?.kind).toBe("model-prompt");
+      expect(candidate.artifacts[0]?.content).toContain("Operator steering:");
+      expect(candidate.artifacts[1]?.metadata).toMatchObject({
         harness,
         model: stage.selectedModel,
         usage: expect.objectContaining({ totalTokens: expect.any(Number) }),
       });
-      expect(candidate.artifacts[1]).toMatchObject({
+      expect(candidate.artifacts[2]).toMatchObject({
         kind: "runtime-check",
         exitCode: 0,
         metadata: { checkId: "gate-integrity" },
       });
-      expect(candidate.artifacts[2]).toMatchObject({
+      expect(candidate.artifacts[3]).toMatchObject({
         kind: "runtime-check",
         exitCode: 0,
         metadata: {
@@ -146,12 +159,12 @@ describe.each(["codex", "claude"] as const)(
       expect(executionPrompt).toContain("prove the shared harness contract");
       expect(executionPrompt).not.toContain("with these exact UTF-8 bytes");
       expect(executionPrompt).not.toContain("OPENBOT_PRIVATE_EXPECTED_BYTES");
-      expect(JSON.parse(candidate.artifacts[2]!.content)).toMatchObject({
+      expect(JSON.parse(candidate.artifacts[3]!.content)).toMatchObject({
         kind: "runtime-check",
         exitCode: 0,
       });
       expect(
-        String(candidate.artifacts[2]?.metadata?.reviewMaterialPath),
+        String(candidate.artifacts[3]?.metadata?.reviewMaterialPath),
       ).not.toStartWith(`${root}/`);
       const review = await executor.review({
         runId,
@@ -168,7 +181,7 @@ describe.each(["codex", "claude"] as const)(
       expect(prompt).not.toContain("model reported");
       expect(prompt).toContain('"kind":"runtime-check"');
       const evidencePath = String(
-        candidate.artifacts[1]?.metadata?.reviewMaterialPath,
+        candidate.artifacts[2]?.metadata?.reviewMaterialPath,
       );
       await executor.cleanup?.(runId);
       await expect(

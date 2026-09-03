@@ -796,7 +796,7 @@ export function createWorkflowRuntime(
         const [run] = await tx
           .update(factoryWorkflowRuns)
           .set({
-            steering: sql`jsonb_set(coalesce(${factoryWorkflowRuns.steering}, '{"events":[]}'::jsonb), '{events}', coalesce(${factoryWorkflowRuns.steering}->'events', '[]'::jsonb) || ${JSON.stringify([{ actorId, instruction: text, at: new Date().toISOString() }])}::jsonb)`,
+            steering: sql`jsonb_set(coalesce(${factoryWorkflowRuns.steering}, '{"events":[]}'::jsonb), '{events}', coalesce(${factoryWorkflowRuns.steering}->'events', '[]'::jsonb) || jsonb_build_array(jsonb_build_object('actorId', cast(${actorId} as text), 'instruction', cast(${text} as text), 'at', cast(${new Date().toISOString()} as text))))`,
             updatedAt: new Date(),
           })
           .where(

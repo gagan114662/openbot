@@ -25,6 +25,7 @@ import {
   tuningProposalFrom,
   updateProductionIssueStatus,
 } from "@/lib/production-engineer/queries";
+import { workflowStreamRunIds } from "@/lib/production-engineer/workflow-streams";
 
 export const Route = createFileRoute("/_authed/admin/production-engineer")({
   component: ProductionEngineerPage,
@@ -39,6 +40,8 @@ function ProductionEngineerPage() {
   const [gateFeedback, setGateFeedback] = useState<Record<string, string>>({});
   const [gateProducer, setGateProducer] = useState<Record<string, string>>({});
   const [streamState, setStreamState] = useState("connecting");
+  const [streamLines, setStreamLines] = useState<string[]>([]);
+  const [steeringMode, setSteeringMode] = useState<string | null>(null);
   const [jobObjective, setJobObjective] = useState("");
   const [jobContextKeys, setJobContextKeys] = useState("");
   const [jobObservablePath, setJobObservablePath] = useState("");
@@ -59,27 +62,55 @@ function ProductionEngineerPage() {
     queryKey: ["software-factory"],
     queryFn: fetchSoftwareFactory,
   });
-  const liveRun = factory.data?.workflows.find(({ run }) =>
-    ["queued", "running", "pausing", "paused", "awaiting_approval"].includes(
-      run.status,
-    ),
-  )?.run.id;
+  const liveRuns = workflowStreamRunIds(factory.data?.workflows ?? []);
+  const liveRunKey = liveRuns.join(",");
   useEffect(() => {
-    if (!liveRun) {
+    const runIds = liveRunKey ? liveRunKey.split(",") : [];
+    if (runIds.length === 0) {
       setStreamState("idle");
       return;
     }
-    const events = new EventSource(
-      `/api/software-factory/workflows/${encodeURIComponent(liveRun)}/events`,
-    );
-    events.addEventListener("open", () => setStreamState("live"));
-    events.addEventListener("snapshot", () => {
-      setStreamState("live");
+    const refreshFromPush = () =>
       void queryClient.invalidateQueries({ queryKey: ["software-factory"] });
+    const appendOutput = (message: Event) => {
+      const event = JSON.parse((message as MessageEvent).data) as {
+        payload?: { chunk?: string };
+      };
+      if (!event.payload?.chunk) return;
+      setStreamLines((current) =>
+        [...current, event.payload?.chunk ?? ""]
+          .join("")
+          .slice(-65_536)
+          .split("\n"),
+      );
+    };
+    const streams = runIds.map((runId) => {
+      const events = new EventSource(
+        `/api/software-factory/workflows/${encodeURIComponent(runId)}/events`,
+      );
+      events.addEventListener("open", () => setStreamState("live"));
+      events.addEventListener("snapshot", () => {
+        setStreamState("live");
+        refreshFromPush();
+      });
+      events.addEventListener("transition", refreshFromPush);
+      events.addEventListener("check-output", appendOutput);
+      events.addEventListener("executor-output", appendOutput);
+      events.addEventListener("control", (message) => {
+        const event = JSON.parse((message as MessageEvent).data) as {
+          payload?: { mode?: string };
+        };
+        setSteeringMode(event.payload?.mode ?? "applied");
+        refreshFromPush();
+      });
+      events.addEventListener("error", () => setStreamState("reconnecting"));
+      return events;
     });
-    events.addEventListener("error", () => setStreamState("reconnecting"));
-    return () => events.close();
-  }, [liveRun, queryClient]);
+    return () =>
+      streams.forEach((events) => {
+        events.close();
+      });
+  }, [liveRunKey, queryClient]);
   const workflowControl = useMutation({
     mutationFn: controlWorkflow,
     onSuccess: () => {
@@ -187,6 +218,19 @@ function ProductionEngineerPage() {
             ? "Measured benchmark routes use executed checks, a judging orchestrator, bounded workers, and tenant-isolated graph context."
             : "Only seeded bootstrap routes exist. They are excluded from routing unless the explicit seeded-route override is enabled."}
         </p>
+        {steeringMode ? (
+          <p className="mb-2 text-xs" data-testid="steering-mode">
+            Latest steering mode: {steeringMode}
+          </p>
+        ) : null}
+        {streamLines.length ? (
+          <pre
+            className="mb-2 max-h-48 overflow-auto rounded-md bg-muted p-2 text-xs"
+            data-testid="workflow-live-output"
+          >
+            {streamLines.slice(-80).join("\n")}
+          </pre>
+        ) : null}
         <div className="grid gap-3 md:grid-cols-3">
           <FactoryCard
             label="Execution tiers"

@@ -3,6 +3,7 @@ import type { MiddlewareHandler } from "hono";
 import type { AppVariables } from "../auth/guards";
 import { focusedTestsFromChangedPaths } from "./codex-workflow-executor";
 import { createSoftwareFactoryRoutes, managedWorkflowStages } from "./routes";
+import { publishWorkflowEvent } from "./workflow-stream";
 
 describe("managed workflow plans", () => {
   test("derives focused tests from the candidate's changed paths", () => {
@@ -385,6 +386,73 @@ describe("workflow live control surface", () => {
     expect(body).toContain("event: snapshot");
     expect(body).toContain("runtime-check");
     expect(body).toContain("1 passed");
+  });
+
+  test("pushes only each active run's own events to simultaneous streams", async () => {
+    const snapshotReads = new Map<string, number>();
+    const routes = createSoftwareFactoryRoutes(
+      {} as never,
+      {} as never,
+      "tenant-1",
+      async (context, next) => {
+        context.set("actor", {
+          id: "admin-1",
+          email: "admin@example.test",
+          role: "admin",
+        });
+        await next();
+      },
+      undefined,
+      undefined,
+      {
+        snapshot: async (runId: string) => {
+          snapshotReads.set(runId, (snapshotReads.get(runId) ?? 0) + 1);
+          return {
+            run: { id: runId, status: "running" },
+            stages: [],
+            events: [],
+            artifacts: [],
+          };
+        },
+      } as never,
+    );
+    const abortA = new AbortController();
+    const abortB = new AbortController();
+    const responseA = await routes.request("/workflows/run-a/events", {
+      signal: abortA.signal,
+    });
+    const responseB = await routes.request("/workflows/run-b/events", {
+      signal: abortB.signal,
+    });
+    const readerA = responseA.body!.getReader();
+    const readerB = responseB.body!.getReader();
+    await readerA.read();
+    await readerB.read();
+    publishWorkflowEvent({
+      runId: "run-a",
+      type: "executor-output",
+      payload: { chunk: "only-a" },
+    });
+    publishWorkflowEvent({
+      runId: "run-b",
+      type: "executor-output",
+      payload: { chunk: "only-b" },
+    });
+    const decoder = new TextDecoder();
+    const eventA = decoder.decode((await readerA.read()).value);
+    const eventB = decoder.decode((await readerB.read()).value);
+    expect(eventA).toContain("only-a");
+    expect(eventA).not.toContain("only-b");
+    expect(eventB).toContain("only-b");
+    expect(eventB).not.toContain("only-a");
+    expect(snapshotReads).toEqual(
+      new Map([
+        ["run-a", 1],
+        ["run-b", 1],
+      ]),
+    );
+    abortA.abort();
+    abortB.abort();
   });
 
   test("routes a stage rejection and its mandatory feedback to the durable runtime", async () => {

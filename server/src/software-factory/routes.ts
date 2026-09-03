@@ -209,6 +209,24 @@ export function createSoftwareFactoryRoutes(
         : { active: 0, diskBytes: 0 },
     }),
   );
+  routes.get("/metrics", async (context) => {
+    const stats = worktreeStats
+      ? await worktreeStats()
+      : { active: 0, diskBytes: 0 };
+    return context.text(
+      [
+        "# HELP factory_worktrees_active Active managed-workflow Git worktrees.",
+        "# TYPE factory_worktrees_active gauge",
+        `factory_worktrees_active ${stats.active}`,
+        "# HELP factory_worktrees_disk_bytes Bytes consumed by managed-workflow Git worktrees.",
+        "# TYPE factory_worktrees_disk_bytes gauge",
+        `factory_worktrees_disk_bytes ${stats.diskBytes}`,
+        "",
+      ].join("\n"),
+      200,
+      { "content-type": "text/plain; version=0.0.4" },
+    );
+  });
   routes.post("/benchmarks", async (context) => {
     const body = record(await context.req.json().catch(() => null));
     const model = nonempty(body?.model);
@@ -468,6 +486,28 @@ export function createSoftwareFactoryRoutes(
           stages: snapshot.stages,
           artifacts: snapshot.artifacts,
           events: snapshot.events,
+        })
+      : context.notFound();
+  });
+  routes.get("/workflows/:runId/artifacts/:artifactId", async (context) => {
+    if (!workflows) return context.notFound();
+    const snapshot = await workflows.snapshot(context.req.param("runId"));
+    const artifact = snapshot?.artifacts.find(
+      ({ id }) => id === context.req.param("artifactId"),
+    );
+    return artifact
+      ? context.json({
+          id: artifact.id,
+          runId: artifact.runId,
+          stageId: artifact.stageId,
+          kind: artifact.kind,
+          uri: artifact.uri,
+          checksum: artifact.checksum,
+          revision: artifact.revision,
+          producerSessionId: artifact.producerSessionId,
+          command: artifact.command,
+          exitCode: artifact.exitCode,
+          content: artifact.content,
         })
       : context.notFound();
   });

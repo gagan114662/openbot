@@ -1,8 +1,11 @@
 import { afterAll, describe, expect, test } from "bun:test";
+import { existsSync } from "node:fs";
 import {
   access,
   chmod,
+  mkdir,
   mkdtemp,
+  readdir,
   rm,
   utimes,
   writeFile,
@@ -10,7 +13,9 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createCodexWorkflowExecutor } from "./codex-workflow-executor";
+import { createSoftwareFactoryRoutes } from "./routes";
 import { verifyWorkflowEvidence } from "./workflow-runtime";
+import { createWorkflowWorker } from "./workflow-worker";
 
 const roots: string[] = [];
 afterAll(async () => {
@@ -70,6 +75,13 @@ await Bun.write(output, JSON.stringify({ summary: "bounded worker", checks: [] }
   return { root, workspaceRoot, executor, execute, git };
 }
 
+function diskKilobytes(directory: string) {
+  if (!existsSync(directory)) return 0;
+  const result = Bun.spawnSync(["du", "-sk", directory]);
+  if (result.exitCode !== 0) throw new Error(result.stderr.toString());
+  return Number(result.stdout.toString().trim().split(/\s+/)[0]);
+}
+
 describe("real Git worktree lifecycle", () => {
   test.each(["succeeded", "failed", "aborted"] as const)(
     "removes and prunes a %s run while retaining external evidence",
@@ -80,14 +92,55 @@ describe("real Git worktree lifecycle", () => {
         active: 0,
         diskBytes: 0,
       });
+      await mkdir(join(workspaceRoot, "worktrees"), { recursive: true });
+      const before = {
+        at: new Date().toISOString(),
+        diskKilobytes: diskKilobytes(join(workspaceRoot, "worktrees")),
+      };
       const candidate = await execute(runId);
       const during = await executor.worktreeStats?.();
       expect(during?.active).toBe(1);
       expect(during?.diskBytes).toBeGreaterThan(0);
+      const duringDisk = {
+        at: new Date().toISOString(),
+        diskKilobytes: diskKilobytes(join(workspaceRoot, "worktrees")),
+      };
+      expect(duringDisk.diskKilobytes).toBeGreaterThan(before.diskKilobytes);
       const evidencePath = String(
         candidate.artifacts[0]?.metadata?.reviewMaterialPath,
       );
-      await executor.cleanup?.(runId);
+      let claimed = false;
+      const worker = createWorkflowWorker({
+        workerId: "terminal-cleanup-proof",
+        executor: {
+          harness: "codex",
+          run: executor.run,
+          review: executor.review,
+          interrupt: executor.interrupt,
+          cleanup: executor.cleanup,
+          worktreeStats: executor.worktreeStats,
+        },
+        runtime: {
+          activeRunIds: async () => [runId],
+          claim: async () => {
+            if (claimed) return null;
+            claimed = true;
+            return { id: runId, status: "running" };
+          },
+          renewLease: async () => true,
+          readyStages: async () => [],
+          snapshot: async () => ({
+            run: { id: runId, status: terminalState },
+            stages: [],
+            artifacts: [],
+            events: [],
+          }),
+        } as never,
+      });
+      expect(await worker.runOnce()).toMatchObject({
+        claimed: true,
+        runId,
+      });
       await expect(
         access(join(workspaceRoot, "worktrees", runId)),
       ).rejects.toThrow();
@@ -97,7 +150,36 @@ describe("real Git worktree lifecycle", () => {
         active: 0,
         diskBytes: 0,
       });
+      const after = {
+        at: new Date().toISOString(),
+        diskKilobytes: diskKilobytes(join(workspaceRoot, "worktrees")),
+      };
+      console.info(
+        JSON.stringify({
+          proof: "worktree-terminal-cleanup",
+          runId,
+          terminalState,
+          before,
+          during: { ...duringDisk, ...during },
+          after: { ...after, ...(await executor.worktreeStats?.()) },
+          evidencePath,
+        }),
+      );
+      expect(after.diskKilobytes).toBe(before.diskKilobytes);
+      expect(Date.parse(duringDisk.at)).toBeGreaterThanOrEqual(
+        Date.parse(before.at),
+      );
+      expect(Date.parse(after.at)).toBeGreaterThanOrEqual(
+        Date.parse(duringDisk.at),
+      );
       if (terminalState === "succeeded") {
+        const durableArtifacts = candidate.artifacts.map((artifact, index) => ({
+          id: `${runId}-artifact-${index}`,
+          runId,
+          ...artifact,
+          stageId: "verify",
+          exitCode: artifact.exitCode ?? null,
+        }));
         const proof = verifyWorkflowEvidence({
           run: { status: "succeeded", approvedBy: "admin" },
           stages: [
@@ -109,13 +191,37 @@ describe("real Git worktree lifecycle", () => {
               verification: { accepted: true },
             },
           ],
-          artifacts: candidate.artifacts.map((artifact) => ({
-            ...artifact,
-            stageId: "verify",
-            exitCode: artifact.exitCode ?? null,
-          })),
+          artifacts: durableArtifacts,
         });
         expect(proof.verified).toBe(true);
+        const routes = createSoftwareFactoryRoutes(
+          {} as never,
+          {} as never,
+          "tenant-proof",
+          async (context, next) => {
+            context.set("actor", {
+              id: "admin-proof",
+              email: "admin@example.test",
+              role: "admin",
+            });
+            await next();
+          },
+          undefined,
+          undefined,
+          {
+            snapshot: async () => ({ artifacts: durableArtifacts }),
+          } as never,
+        );
+        const artifactResponse = await routes.request(
+          `/workflows/${runId}/artifacts/${durableArtifacts[0]!.id}`,
+        );
+        expect(artifactResponse.status).toBe(200);
+        expect(await artifactResponse.json()).toMatchObject({
+          id: durableArtifacts[0]!.id,
+          runId,
+          content: durableArtifacts[0]!.content,
+          checksum: durableArtifacts[0]!.checksum,
+        });
       }
     },
   );
@@ -146,19 +252,28 @@ describe("real Git worktree lifecycle", () => {
     await executor.cleanup?.(youngRun);
   });
 
-  test("migrates evidence before removing a registered legacy-location worktree", async () => {
+  test("migrates evidence and empties every registered legacy-location worktree", async () => {
     const { root, workspaceRoot, executor, git } = await fixture();
-    const runId = `legacy-${crypto.randomUUID()}`;
-    const legacy = join(root, "server", ".openbot", "workflows", runId);
-    git("worktree", "add", "--detach", legacy, "HEAD");
-    await writeFile(join(legacy, ".openbot-evidence"), "legacy evidence");
+    const legacyRoot = join(root, "server", ".openbot", "workflows");
+    const runIds = [
+      `legacy-${crypto.randomUUID()}`,
+      `legacy-${crypto.randomUUID()}`,
+    ];
+    for (const runId of runIds) {
+      const legacy = join(legacyRoot, runId);
+      git("worktree", "add", "--detach", legacy, "HEAD");
+      await writeFile(join(legacy, ".openbot-evidence"), runId);
+    }
 
     await executor.sweep?.(new Set());
 
-    await expect(access(legacy)).rejects.toThrow();
-    expect(git("worktree", "list", "--porcelain")).not.toContain(runId);
-    expect(
-      await Bun.file(join(workspaceRoot, "evidence", runId, "legacy")).text(),
-    ).toBe("legacy evidence");
+    expect(await readdir(legacyRoot)).toEqual([]);
+    const listed = git("worktree", "list", "--porcelain");
+    for (const runId of runIds) {
+      expect(listed).not.toContain(runId);
+      expect(
+        await Bun.file(join(workspaceRoot, "evidence", runId, "legacy")).text(),
+      ).toBe(runId);
+    }
   });
 });

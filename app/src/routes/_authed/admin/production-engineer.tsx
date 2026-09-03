@@ -646,6 +646,11 @@ function ProductionEngineerPage() {
                         <p className="text-muted-foreground">
                           {stage.objective}
                         </p>
+                        {stage.lastError ? (
+                          <p className="mt-1 text-destructive text-xs">
+                            {stage.lastError}
+                          </p>
+                        ) : null}
                         {stage.sessionId ? (
                           <dl className="mt-2 grid gap-x-2 text-xs md:grid-cols-[80px_1fr]">
                             <dt>Worker</dt>

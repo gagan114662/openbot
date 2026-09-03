@@ -94,6 +94,47 @@ describe("Production Engineer GitHub ingress", () => {
       },
     ]);
   });
+
+  test("marks the matching autonomous fix failed from a signed red workflow", async () => {
+    const failedPullRequests: string[] = [];
+    const routes = createProductionEngineerRoutes(
+      {
+        async failFixFromCi(pullRequestUrl) {
+          failedPullRequests.push(pullRequestUrl);
+          return [{ id: "issue-1" }];
+        },
+      } as ProductionEngineerStore,
+      async (_context, next) => next(),
+      { githubWebhookSecret: secret },
+    );
+    const workflowPayload = JSON.stringify({
+      action: "completed",
+      repository: { full_name: "gagan114662/openbot" },
+      workflow_run: {
+        conclusion: "failure",
+        pull_requests: [{ number: 25 }],
+      },
+    });
+    const response = await routes.request("/github-webhook", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-github-event": "workflow_run",
+        "x-hub-signature-256": signature(workflowPayload),
+      },
+      body: workflowPayload,
+    });
+
+    expect(response.status).toBe(202);
+    expect(await response.json()).toEqual({
+      accepted: true,
+      conclusion: "failure",
+      failedFixes: 1,
+    });
+    expect(failedPullRequests).toEqual([
+      "https://github.com/gagan114662/openbot/pull/25",
+    ]);
+  });
 });
 
 describe("Production Engineer Alertmanager ingress", () => {

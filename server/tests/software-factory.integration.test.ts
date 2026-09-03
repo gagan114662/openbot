@@ -74,6 +74,7 @@ describe("persistent software factory", () => {
 
   test("persists a benchmark route and feeds verified outcome cost back exactly once", async () => {
     await store.benchmark({
+      source: "measured",
       harness: "claude",
       model: "worker-small",
       task: "ci-repair",

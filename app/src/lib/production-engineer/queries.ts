@@ -105,6 +105,9 @@ export type SoftwareFactoryDashboard = {
     attemptedOutcomes: number;
     totalCostMicros: number;
     enabled: boolean;
+    source: "measured" | "seeded";
+    benchmarkRunId: string | null;
+    seedReason: string | null;
   }>;
   jobs: Array<{
     id: string;
@@ -171,6 +174,7 @@ export type SoftwareFactoryDashboard = {
     };
     stages: Array<{
       stageId: string;
+      dependsOn: { ids: string[] };
       objective: string;
       status: string;
       attempts: number;
@@ -273,6 +277,15 @@ export async function createManagedJob(input: {
   return response.json();
 }
 
+export async function runFactoryBenchmark(id = "ci-repair-v1") {
+  const response = await client(
+    `/api/software-factory/benchmarks/${encodeURIComponent(id)}/run`,
+    { method: "POST", body: {} },
+  );
+  if (!response.ok) throw new Error(await response.text());
+  return response.json();
+}
+
 export async function controlWorkflow(input: {
   runId: string;
   action: "pause" | "resume" | "abort" | "approve" | "steer";
@@ -293,9 +306,10 @@ export async function decideWorkflowGate(input: {
   stageId: string;
   decision: "approve" | "reject";
   feedback?: string;
+  producerStageId?: string;
 }) {
   const response = await client(
-    `/api/software-factory/workflows/${encodeURIComponent(input.runId)}/stages/${encodeURIComponent(input.stageId)}/gate`,
+    `/api/software-factory/workflows/${encodeURIComponent(input.runId)}/stages/${encodeURIComponent(input.stageId)}/decision`,
     { method: "POST", body: input },
   );
   if (!response.ok) throw new Error(await response.text());

@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { and, asc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Database } from "../db/client";
@@ -90,6 +90,19 @@ const stageControl = (value: unknown) =>
     })
     .parse(value);
 
+const durableArtifact = <T extends { kind: string; metadata?: unknown }>(
+  artifact: T,
+) => ({
+  ...artifact,
+  metadata: {
+    ...((artifact.metadata as Record<string, unknown> | undefined) ?? {}),
+    evidenceSource:
+      artifact.kind === "runtime-check"
+        ? "runtime-recorded"
+        : "executor-supplied",
+  },
+});
+
 const assertDag = (stages: z.infer<typeof stagePlanSchema>) => {
   const ids = new Set(stages.map((stage) => stage.id));
   if (ids.size !== stages.length)
@@ -131,6 +144,7 @@ export function verifyWorkflowEvidence(snapshot: {
   }>;
   artifacts: Array<{
     stageId: string;
+    kind?: string;
     content: string;
     checksum: string;
     revision: string;
@@ -160,12 +174,14 @@ export function verifyWorkflowEvidence(snapshot: {
     ),
     producerBound: snapshot.artifacts.every((artifact) => {
       const metadata = artifact.metadata as
-        | { attemptStatus?: unknown }
+        | { attemptStatus?: unknown; actorId?: unknown }
         | null
         | undefined;
       return (
         successfulArtifacts.includes(artifact) ||
-        metadata?.attemptStatus === "failed"
+        metadata?.attemptStatus === "failed" ||
+        (artifact.kind === "human-decision" &&
+          metadata?.actorId === artifact.producerSessionId)
       );
     }),
     commandsSucceeded: successfulArtifacts.every(
@@ -290,35 +306,52 @@ export function createWorkflowRuntime(
         .where(eq(factoryWorkflowRuns.tenantId, tenantId))
         .orderBy(asc(factoryWorkflowRuns.createdAt))
         .limit(Math.max(1, Math.min(100, limit)));
-      return Promise.all(
-        runs.map(async (run) => {
-          const [stages, artifacts, events] = await Promise.all([
-            database
-              .select()
-              .from(factoryWorkflowStages)
-              .where(eq(factoryWorkflowStages.runId, run.id))
-              .orderBy(asc(factoryWorkflowStages.stageId)),
-            database
-              .select()
-              .from(factoryWorkflowArtifacts)
-              .where(eq(factoryWorkflowArtifacts.runId, run.id))
-              .orderBy(asc(factoryWorkflowArtifacts.createdAt)),
-            database
-              .select()
-              .from(factoryWorkflowEvents)
-              .where(eq(factoryWorkflowEvents.runId, run.id))
-              .orderBy(asc(factoryWorkflowEvents.createdAt)),
-          ]);
-          const snapshot = { run, stages, artifacts, events };
-          return { ...snapshot, evidence: verifyWorkflowEvidence(snapshot) };
-        }),
-      );
+      if (runs.length === 0) return [];
+      const runIds = runs.map((run) => run.id);
+      // Keep dashboard load constant-query. The previous per-run fan-out issued as many as 301
+      // queries and crossed the HTTP idle timeout once real execution history accumulated.
+      const [stages, artifacts, events] = await Promise.all([
+        database
+          .select()
+          .from(factoryWorkflowStages)
+          .where(inArray(factoryWorkflowStages.runId, runIds))
+          .orderBy(
+            asc(factoryWorkflowStages.runId),
+            asc(factoryWorkflowStages.stageId),
+          ),
+        database
+          .select()
+          .from(factoryWorkflowArtifacts)
+          .where(inArray(factoryWorkflowArtifacts.runId, runIds))
+          .orderBy(
+            asc(factoryWorkflowArtifacts.runId),
+            asc(factoryWorkflowArtifacts.createdAt),
+          ),
+        database
+          .select()
+          .from(factoryWorkflowEvents)
+          .where(inArray(factoryWorkflowEvents.runId, runIds))
+          .orderBy(
+            asc(factoryWorkflowEvents.runId),
+            asc(factoryWorkflowEvents.createdAt),
+          ),
+      ]);
+      return runs.map((run) => {
+        const snapshot = {
+          run,
+          stages: stages.filter((stage) => stage.runId === run.id),
+          artifacts: artifacts.filter((artifact) => artifact.runId === run.id),
+          events: events.filter((event) => event.runId === run.id),
+        };
+        return { ...snapshot, evidence: verifyWorkflowEvidence(snapshot) };
+      });
     },
 
     async create(input: {
       jobId: string;
       maximumAttempts: number;
       concurrencyLimit: number;
+      baseRevision?: string;
       stages: unknown;
     }) {
       const stages = stagePlanSchema.parse(input.stages);
@@ -359,6 +392,7 @@ export function createWorkflowRuntime(
             jobId: input.jobId,
             maximumAttempts: input.maximumAttempts,
             concurrencyLimit: input.concurrencyLimit,
+            baseRevision: input.baseRevision?.trim() || null,
           })
           .onConflictDoNothing()
           .returning();
@@ -478,9 +512,14 @@ export function createWorkflowRuntime(
     async decideStageGate(
       runId: string,
       stageId: string,
-      actorId: string,
-      decision: "approve" | "reject",
-      feedback?: string,
+      input: {
+        actorId: string;
+        actorRole: string;
+        decision: "approve" | "reject";
+        feedback?: string;
+        producerStageId?: string;
+        revision: string;
+      },
     ) {
       return database.transaction(async (tx) => {
         const [stage] = await tx
@@ -497,11 +536,26 @@ export function createWorkflowRuntime(
         if (!stage) return null;
         const control = stageControl(stage.checks);
         if (!control.gate) return null;
+        if (
+          control.gate.roles?.length &&
+          !control.gate.roles.includes(input.actorRole)
+        )
+          return { status: "forbidden" as const };
+        const producers = dependencyIds(stage.dependsOn);
+        const producerStageId =
+          input.producerStageId ??
+          (producers.length === 1 ? producers[0] : null);
+        if (
+          input.decision === "reject" &&
+          (!producerStageId || !producers.includes(producerStageId))
+        )
+          throw new Error(
+            "Gate rejection must identify one direct producer stage.",
+          );
         const now = new Date();
-        if (decision === "reject") {
-          const text = feedback?.trim();
+        if (input.decision === "reject") {
+          const text = input.feedback?.trim();
           if (!text) throw new Error("Gate rejection requires feedback.");
-          const producers = dependencyIds(stage.dependsOn);
           await tx
             .update(factoryWorkflowStages)
             .set({
@@ -515,19 +569,19 @@ export function createWorkflowRuntime(
             .where(
               and(
                 eq(factoryWorkflowStages.runId, runId),
-                inArray(factoryWorkflowStages.stageId, producers),
+                eq(factoryWorkflowStages.stageId, producerStageId as string),
                 eq(factoryWorkflowStages.status, "succeeded"),
               ),
             );
           await tx
             .update(factoryWorkflowArtifacts)
             .set({
-              metadata: sql`coalesce(${factoryWorkflowArtifacts.metadata}, '{}'::jsonb) || ${JSON.stringify({ attemptStatus: "failed", gateRejected: true })}::jsonb`,
+              metadata: sql`coalesce(${factoryWorkflowArtifacts.metadata}, '{}'::jsonb) || jsonb_build_object('attemptStatus', 'failed', 'gateRejected', true)`,
             })
             .where(
               and(
                 eq(factoryWorkflowArtifacts.runId, runId),
-                inArray(factoryWorkflowArtifacts.stageId, producers),
+                eq(factoryWorkflowArtifacts.stageId, producerStageId as string),
               ),
             );
         }
@@ -539,8 +593,8 @@ export function createWorkflowRuntime(
               ...control,
               gate: {
                 ...control.gate,
-                status: decision === "approve" ? "approved" : "pending",
-                ...(feedback ? { feedback: feedback.trim() } : {}),
+                status: input.decision === "approve" ? "approved" : "pending",
+                ...(input.feedback ? { feedback: input.feedback.trim() } : {}),
               },
             },
             updatedAt: now,
@@ -556,8 +610,50 @@ export function createWorkflowRuntime(
           stageId,
           entity: "human_gate",
           fromStatus: "awaiting_approval",
-          toStatus: decision === "approve" ? "approved" : "rejected",
-          detail: { actorId, feedback: feedback?.trim() ?? null },
+          toStatus: input.decision === "approve" ? "approved" : "rejected",
+          detail: {
+            actorId: input.actorId,
+            producerStageId,
+            feedback: input.feedback?.trim() ?? null,
+          },
+        });
+        const decisionContent = JSON.stringify({
+          actorId: input.actorId,
+          decision: input.decision,
+          feedback: input.feedback?.trim() ?? null,
+          producerStageId,
+          revision: input.revision,
+        });
+        await tx.insert(factoryWorkflowArtifacts).values({
+          runId,
+          stageId,
+          kind: "human-decision",
+          uri: `workflow://${runId}/${stageId}/human-decision/${randomUUID()}`,
+          content: decisionContent,
+          checksum: artifactChecksum(decisionContent),
+          revision: input.revision,
+          producerSessionId: input.actorId,
+          command: "human-stage-decision",
+          exitCode: 0,
+          metadata: {
+            actorId: input.actorId,
+            actorRole: input.actorRole,
+            producerStageId,
+          },
+        });
+        await tx.insert(auditEvents).values({
+          eventType: "workflow.control_applied",
+          targetType: "factory_workflow_run",
+          targetId: runId,
+          actorUserId: input.actorId,
+          payload: {
+            action: `stage_${input.decision}`,
+            stageId,
+            producerStageId,
+            feedbackHash: input.feedback
+              ? artifactChecksum(input.feedback.trim())
+              : null,
+          },
         });
         await tx
           .update(factoryWorkflowRuns)
@@ -568,7 +664,11 @@ export function createWorkflowRuntime(
             updatedAt: now,
           })
           .where(eq(factoryWorkflowRuns.id, runId));
-        return { stageId, decision };
+        return {
+          status: "applied" as const,
+          stageId,
+          decision: input.decision,
+        };
       });
     },
 
@@ -726,9 +826,11 @@ export function createWorkflowRuntime(
 
     async approve(
       runId: string,
-      actorId: string,
+      actor: { id: string; role: "admin" },
       audit?: { fromStatus: string },
     ) {
+      if (actor?.role !== "admin" || !actor.id.trim()) return null;
+      const actorId = actor.id;
       return database.transaction(async (tx) => {
         const [run] = await tx
           .update(factoryWorkflowRuns)
@@ -756,6 +858,30 @@ export function createWorkflowRuntime(
           ? Object.assign(run, audit ? { controlAuditPersisted: true } : {})
           : null;
       });
+    },
+
+    async completeSystem(runId: string, systemId: string) {
+      const completedBy = systemId.trim();
+      if (!completedBy || completedBy.length > 200)
+        throw new Error("System completion identity is invalid.");
+      const [run] = await database
+        .update(factoryWorkflowRuns)
+        .set({
+          completedBy,
+          approvedBy: null,
+          status: "succeeded",
+          completedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(factoryWorkflowRuns.id, runId),
+            eq(factoryWorkflowRuns.tenantId, tenantId),
+            eq(factoryWorkflowRuns.status, "awaiting_approval"),
+          ),
+        )
+        .returning();
+      return run ?? null;
     },
 
     async claim(
@@ -964,6 +1090,51 @@ export function createWorkflowRuntime(
             ),
           );
       }
+      if (
+        runnable.length === 0 &&
+        gated.length === 0 &&
+        running === 0 &&
+        !snapshot.stages.some(
+          (stage) => stage.status === "awaiting_approval",
+        ) &&
+        snapshot.stages.some(
+          (stage) =>
+            stage.status === "pending" &&
+            stage.attempts >= snapshot.run.maximumAttempts,
+        )
+      ) {
+        // A rejected stage can be returned to pending at the attempt ceiling. Without this
+        // reconciliation the oldest run is reclaimable forever but can never make progress,
+        // starving every newer workflow behind it.
+        await database.transaction(async (tx) => {
+          const [failed] = await tx
+            .update(factoryWorkflowRuns)
+            .set({
+              status: "failed",
+              completedAt: new Date(),
+              leaseOwner: null,
+              leaseExpiresAt: null,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(factoryWorkflowRuns.id, runId),
+                eq(factoryWorkflowRuns.status, "running"),
+              ),
+            )
+            .returning({ id: factoryWorkflowRuns.id });
+          if (failed)
+            await tx.insert(factoryWorkflowEvents).values({
+              runId,
+              entity: "run",
+              fromStatus: "running",
+              toStatus: "failed",
+              detail: {
+                reason: "No runnable stage remains within the attempt budget.",
+              },
+            });
+        });
+      }
       return runnable;
     },
 
@@ -1044,7 +1215,7 @@ export function createWorkflowRuntime(
             result.artifacts.map((artifact) => ({
               runId,
               stageId,
-              ...artifact,
+              ...durableArtifact(artifact),
             })),
           )
           .onConflictDoNothing();
@@ -1122,7 +1293,7 @@ export function createWorkflowRuntime(
               checkedArtifacts.map((artifact) => ({
                 runId,
                 stageId,
-                ...artifact,
+                ...durableArtifact(artifact),
               })),
             )
             .onConflictDoNothing();

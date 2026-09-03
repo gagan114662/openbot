@@ -1,9 +1,9 @@
+import { expect, test } from "bun:test";
 import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { expect, test } from "bun:test";
-import { artifactChecksum } from "./workflow-runtime";
 import { persistReviewMaterial } from "./codex-workflow-executor";
+import { artifactChecksum } from "./workflow-runtime";
 
 test("review material is retrievable, permission-restricted, and byte-bound to its checksum", async () => {
   const directory = await mkdtemp(join(tmpdir(), "openbot-review-material-"));

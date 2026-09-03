@@ -20,7 +20,7 @@ import { testAgentConnection } from "../src/agents/connection-test";
  * this belongs in CI, which is where an agent-facing contract most needs watching.
  */
 
-describe("registering an agent that really answers", () => {
+describe("registering an agent that answers over AG-UI", () => {
   const mock = new AGUIMock();
   let url = "";
 
@@ -40,7 +40,7 @@ describe("registering an agent that really answers", () => {
     await mock.stop?.();
   });
 
-  test("an agent speaking real AG-UI is reported as working, with what it sent", async () => {
+  test("an agent speaking AG-UI over HTTP is reported as working, with what it sent", async () => {
     const result = await testAgentConnection(url, { allowPrivateHosts: true });
 
     expect(result.ok).toBe(true);

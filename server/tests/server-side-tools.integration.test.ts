@@ -147,7 +147,7 @@ describe("the tools a Bot is handed on the server", () => {
     expect(tools[0]?.parameters.safeParse({}).success).toBe(false);
   });
 
-  test("executing it reaches the real MCP server, with no browser anywhere", async () => {
+  test("executing it reaches the spawned MCP server, with no browser anywhere", async () => {
     const tools = await grantedTools({
       store,
       botId: holderId,

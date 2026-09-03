@@ -266,7 +266,7 @@ describe("claiming durable work", () => {
    * next replica to look took the item out from under it. Both ran it. Every moment is named in SQL
    * now, so a wrong local clock cannot produce one.
    */
-  test("a replica whose clock is behind still holds a real lease", async () => {
+  test("a replica whose clock is behind still holds its database lease", async () => {
     await queue.offer({ kind, key: "bot-a" });
 
     const realNow = Date.now;

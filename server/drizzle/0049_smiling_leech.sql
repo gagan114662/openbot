@@ -1,0 +1,1 @@
+ALTER TABLE "factory_benchmark_outcomes" ADD COLUMN "cost_basis" text;

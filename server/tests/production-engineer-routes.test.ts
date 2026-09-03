@@ -49,7 +49,7 @@ describe("Production Engineer GitHub ingress", () => {
     expect(fetched).toBe(false);
   });
 
-  test("turns a signed merged pull request into monitors from its real files", async () => {
+  test("turns a signed merged pull request into monitors from repository files", async () => {
     const observed: unknown[] = [];
     const routes = createProductionEngineerRoutes(
       {

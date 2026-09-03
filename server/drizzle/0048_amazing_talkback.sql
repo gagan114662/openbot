@@ -1,0 +1,1 @@
+ALTER TABLE "factory_workflow_runs" ADD COLUMN "completed_by" text;

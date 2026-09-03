@@ -18,11 +18,11 @@ import {
 } from "../src/production-engineer/routes";
 import { createProductionEngineerStore } from "../src/production-engineer/store";
 import { createSoftwareFactoryStore } from "../src/software-factory/store";
+import { createVerifiedValueStore } from "../src/software-factory/verified-value";
 import {
   artifactChecksum,
   createWorkflowRuntime,
 } from "../src/software-factory/workflow-runtime";
-import { createVerifiedValueStore } from "../src/software-factory/verified-value";
 import { createWebhookReconciler } from "../src/webhooks/reconciler";
 import { TEST_POOL } from "./support/database";
 
@@ -67,6 +67,7 @@ let runId = crypto.randomUUID();
 describe("source-proven, server-derived customer value", () => {
   test("excludes declarations and derives savings only after signed evidence and approval", async () => {
     await factory.benchmark({
+      source: "measured",
       model: "worker",
       task: "ci-repair",
       quality: 0.9,
@@ -119,7 +120,7 @@ describe("source-proven, server-derived customer value", () => {
         },
       ],
     });
-    await runtime.approve(run.id, "human-admin");
+    await runtime.approve(run.id, { id: "human-admin", role: "admin" });
 
     const body = JSON.stringify({
       eventId: `source-${crypto.randomUUID()}`,

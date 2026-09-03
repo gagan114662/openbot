@@ -25,6 +25,37 @@ describe("managed workflow plans", () => {
     ]);
   });
 
+  test("refuses caller-supplied benchmark quality and outcomes", async () => {
+    let stored = false;
+    const routes = createSoftwareFactoryRoutes(
+      { benchmark: async () => (stored = true) } as never,
+      {} as never,
+      "tenant-1",
+      async (context, next) => {
+        context.set("actor", {
+          id: "admin-1",
+          email: "admin@example.test",
+          role: "admin",
+        });
+        await next();
+      },
+    );
+    const response = await routes.request("/benchmarks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "fake-perfect",
+        task: "ci-repair",
+        quality: 1,
+        successfulOutcomes: 100,
+        attemptedOutcomes: 100,
+        totalCostMicros: 0,
+      }),
+    });
+    expect(response.status).toBe(400);
+    expect(stored).toBe(false);
+  });
+
   test.each([
     ["pull-request-review", ["inspect", "review"]],
     ["ci-repair", ["diagnose", "repair", "verify"]],
@@ -276,6 +307,52 @@ describe("workflow control audit", () => {
 });
 
 describe("workflow live control surface", () => {
+  test("exports live worktree gauges and retrievable artifact bytes", async () => {
+    const artifact = {
+      id: "artifact-1",
+      runId: "run-live",
+      stageId: "verify",
+      kind: "runtime-check",
+      uri: "workflow-check://proof",
+      content: "real check output",
+      checksum: "a".repeat(64),
+      revision: "deadbeef",
+      producerSessionId: "worker-1",
+      command: "git diff --check",
+      exitCode: 0,
+    };
+    const routes = createSoftwareFactoryRoutes(
+      {} as never,
+      {} as never,
+      "tenant-1",
+      async (context, next) => {
+        context.set("actor", {
+          id: "admin-1",
+          email: "admin@example.test",
+          role: "admin",
+        });
+        await next();
+      },
+      undefined,
+      undefined,
+      { snapshot: async () => ({ artifacts: [artifact] }) } as never,
+      undefined,
+      undefined,
+      async () => ({ active: 2, diskBytes: 4096 }),
+    );
+    const metrics = await routes.request("/metrics");
+    expect(await metrics.text()).toContain("factory_worktrees_active 2");
+    const response = await routes.request(
+      "/workflows/run-live/artifacts/artifact-1",
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      id: "artifact-1",
+      content: "real check output",
+      checksum: "a".repeat(64),
+    });
+  });
+
   test("streams a terminal workflow snapshot over authenticated SSE", async () => {
     const routes = createSoftwareFactoryRoutes(
       {} as never,
@@ -334,7 +411,7 @@ describe("workflow live control surface", () => {
       } as never,
     );
     const response = await routes.request(
-      "/workflows/run-1/stages/release/gate",
+      "/workflows/run-1/stages/release/decision",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -343,7 +420,48 @@ describe("workflow live control surface", () => {
     );
     expect(response.status).toBe(200);
     expect(calls).toEqual([
-      ["run-1", "release", "admin-1", "reject", "repair this"],
+      [
+        "run-1",
+        "release",
+        {
+          actorId: "admin-1",
+          actorRole: "admin",
+          decision: "reject",
+          feedback: "repair this",
+          producerStageId: undefined,
+          revision: "runtime-control",
+        },
+      ],
     ]);
+  });
+
+  test("returns 403 when the durable gate rejects the actor role", async () => {
+    const routes = createSoftwareFactoryRoutes(
+      {} as never,
+      {} as never,
+      "tenant-1",
+      async (context, next) => {
+        context.set("actor", {
+          id: "admin-1",
+          email: "admin@example.test",
+          role: "admin",
+        });
+        await next();
+      },
+      undefined,
+      undefined,
+      {
+        decideStageGate: async () => ({ status: "forbidden" }),
+      } as never,
+    );
+    const response = await routes.request(
+      "/workflows/run-1/stages/release/decision",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ decision: "approve" }),
+      },
+    );
+    expect(response.status).toBe(403);
   });
 });

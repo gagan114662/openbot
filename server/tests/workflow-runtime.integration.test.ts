@@ -13,6 +13,7 @@ import {
   factoryWorkflowStages,
 } from "../src/db/schema";
 import { createClaudeWorkflowExecutor } from "../src/software-factory/codex-workflow-executor";
+import { createSoftwareFactoryRoutes } from "../src/software-factory/routes";
 import { createSoftwareFactoryStore } from "../src/software-factory/store";
 import {
   artifactChecksum,
@@ -57,6 +58,7 @@ let runId = crypto.randomUUID();
 describe("durable workflow runtime", () => {
   test("commits exactly one privacy-safe audit row with each durable control transition", async () => {
     await store.benchmark({
+      source: "measured",
       model: "audit-model",
       task: "ci-repair",
       quality: 0.9,
@@ -130,9 +132,13 @@ describe("durable workflow runtime", () => {
       .update(factoryWorkflowRuns)
       .set({ status: "awaiting_approval" })
       .where(eq(factoryWorkflowRuns.id, approval.id));
-    await runtime.approve(approval.id, "audit-admin", {
-      fromStatus: "awaiting_approval",
-    });
+    await runtime.approve(
+      approval.id,
+      { id: "audit-admin", role: "admin" },
+      {
+        fromStatus: "awaiting_approval",
+      },
+    );
 
     const events = await database
       .select()
@@ -231,6 +237,7 @@ describe("durable workflow runtime", () => {
 
   test("repairs within budget, enforces dependencies, pauses, resumes, and requires approval", async () => {
     await store.benchmark({
+      source: "measured",
       model: "worker-small",
       task: "ci-repair",
       quality: 0.9,
@@ -365,11 +372,20 @@ describe("durable workflow runtime", () => {
     expect((await runtime.snapshot(run.id))?.run.status).toBe(
       "awaiting_approval",
     );
-    expect(await runtime.approve(run.id, "admin")).not.toBeNull();
+    expect(
+      await runtime.approve(run.id, "benchmark-runner" as never),
+    ).toBeNull();
+    expect(
+      (await runtime.snapshot(run.id))?.evidence.checks.humanApproval,
+    ).toBe(false);
+    expect(
+      await runtime.approve(run.id, { id: "admin", role: "admin" }),
+    ).not.toBeNull();
     const completed = await runtime.snapshot(run.id);
     expect(completed?.run).toMatchObject({
       status: "succeeded",
       approvedBy: "admin",
+      completedBy: null,
     });
     expect(completed?.artifacts).toHaveLength(2);
     expect(completed?.stages.map((stage) => stage.sessionId)).toEqual([
@@ -540,7 +556,7 @@ describe("durable workflow runtime", () => {
     );
   });
 
-  test("a real Claude CLI contract retries malformed reviewer output while retaining attempt-one artifacts", async () => {
+  test("a spawned Claude CLI contract retries malformed reviewer output while retaining attempt-one artifacts", async () => {
     const repository = await mkdtemp(join(tmpdir(), "openbot-claude-retry-"));
     const workspaceRoot = await mkdtemp(
       join(tmpdir(), "openbot-claude-retry-workspaces-"),
@@ -577,6 +593,7 @@ if (!prompt.includes("Independently review")) {
       );
       await chmod(script, 0o700);
       await store.benchmark({
+        source: "measured",
         harness: "claude",
         model: "claude-contract",
         task: "ci-repair",
@@ -637,6 +654,7 @@ if (!prompt.includes("Independently review")) {
       expect(snapshot?.artifacts.map((artifact) => artifact.kind)).toEqual([
         "codex-stage-result",
         "runtime-check",
+        "runtime-check",
       ]);
       expect(snapshot?.events).toEqual(
         expect.arrayContaining([
@@ -667,8 +685,14 @@ if (!prompt.includes("Independently review")) {
       concurrencyLimit: 2,
       stages: [
         {
-          id: "produce",
-          objective: "produce",
+          id: "produce-a",
+          objective: "produce A",
+          requiredContext: [],
+          dependsOn: [],
+        },
+        {
+          id: "produce-b",
+          objective: "produce B",
           requiredContext: [],
           dependsOn: [],
         },
@@ -676,7 +700,7 @@ if (!prompt.includes("Independently review")) {
           id: "release",
           objective: "release",
           requiredContext: [],
-          dependsOn: ["produce"],
+          dependsOn: ["produce-a", "produce-b"],
           gate: {
             kind: "human",
             prompt: "Approve the produced change",
@@ -718,7 +742,20 @@ if (!prompt.includes("Independently review")) {
     };
 
     expect((await runtime.claim("gate-worker"))?.id).toBe(run.id);
-    await complete("produce", "producer-1", "first candidate");
+    await complete("produce-a", "producer-a-1", "first candidate A");
+    expect(
+      (await runtime.snapshot(run.id))?.stages.find(
+        (stage) => stage.stageId === "release",
+      )?.status,
+    ).toBe("pending");
+    expect(
+      (await runtime.snapshot(run.id))?.events.some(
+        (event) =>
+          event.entity === "human_gate" &&
+          event.toStatus === "awaiting_approval",
+      ),
+    ).toBe(false);
+    await complete("produce-b", "producer-b-1", "first candidate B");
     expect(await runtime.readyStages(run.id)).toEqual([]);
     expect(
       (await runtime.snapshot(run.id))?.stages.find(
@@ -726,20 +763,85 @@ if (!prompt.includes("Independently review")) {
       )?.status,
     ).toBe("awaiting_approval");
 
-    await runtime.decideStageGate(
-      run.id,
-      "release",
-      "admin-1",
-      "reject",
-      "Add the missing rollback proof",
+    expect(
+      await runtime.decideStageGate(run.id, "release", {
+        actorId: "viewer-1",
+        actorRole: "member",
+        decision: "approve",
+        revision: "deadbeef",
+      }),
+    ).toEqual({ status: "forbidden" });
+    expect(
+      (await runtime.snapshot(run.id))?.stages.find(
+        (stage) => stage.stageId === "release",
+      )?.status,
+    ).toBe("awaiting_approval");
+
+    const routes = createSoftwareFactoryRoutes(
+      store,
+      {} as never,
+      tenantId,
+      async (context, next) => {
+        context.set("actor", {
+          id: "admin-1",
+          email: "admin@example.test",
+          role: "admin",
+        });
+        await next();
+      },
+      undefined,
+      undefined,
+      runtime,
+      { revision: "deadbeef", branch: "test", dirty: false },
     );
+    const rejected = await routes.request(
+      `/workflows/${run.id}/stages/release/decision`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          decision: "reject",
+          feedback: "Add the missing rollback proof",
+          producerStageId: "produce-a",
+        }),
+      },
+    );
+    expect(rejected.status).toBe(200);
     expect((await runtime.claim("gate-worker"))?.id).toBe(run.id);
     expect(
       (await runtime.readyStages(run.id)).map((stage) => stage.stageId),
-    ).toEqual(["produce"]);
-    await complete("produce", "producer-2", "candidate with rollback proof");
+    ).toEqual(["produce-a"]);
+    expect(
+      (await runtime.snapshot(run.id))?.stages.find(
+        (stage) => stage.stageId === "produce-b",
+      )?.status,
+    ).toBe("succeeded");
+    await complete(
+      "produce-a",
+      "producer-a-2",
+      "candidate A with rollback proof",
+    );
     expect(await runtime.readyStages(run.id)).toEqual([]);
-    await runtime.decideStageGate(run.id, "release", "admin-1", "approve");
+    await database
+      .update(factoryWorkflowRuns)
+      .set({ leaseExpiresAt: new Date(Date.now() - 60_000) })
+      .where(eq(factoryWorkflowRuns.id, run.id));
+    const attemptsBeforeGateApproval = (
+      await runtime.snapshot(run.id)
+    )?.stages.map(({ stageId, attempts }) => [stageId, attempts]);
+    expect(await runtime.claim("gate-thief")).toBeNull();
+    expect(
+      (await runtime.snapshot(run.id))?.stages.map(({ stageId, attempts }) => [
+        stageId,
+        attempts,
+      ]),
+    ).toEqual(attemptsBeforeGateApproval);
+    await runtime.decideStageGate(run.id, "release", {
+      actorId: "admin-1",
+      actorRole: "admin",
+      decision: "approve",
+      revision: "deadbeef",
+    });
     expect((await runtime.claim("gate-worker"))?.id).toBe(run.id);
     expect(
       (await runtime.readyStages(run.id)).map((stage) => stage.stageId),
@@ -747,7 +849,7 @@ if (!prompt.includes("Independently review")) {
     await complete("release", "release-1", "released");
     const snapshot = await runtime.snapshot(run.id);
     expect(
-      snapshot?.stages.find((stage) => stage.stageId === "produce")?.attempts,
+      snapshot?.stages.find((stage) => stage.stageId === "produce-a")?.attempts,
     ).toBe(2);
     expect(
       snapshot?.events
@@ -760,6 +862,22 @@ if (!prompt.includes("Independently review")) {
       "approved",
     ]);
     expect(snapshot?.run.status).toBe("awaiting_approval");
+    expect(
+      snapshot?.artifacts.filter(
+        (artifact) => artifact.kind === "human-decision",
+      ),
+    ).toHaveLength(2);
+    expect(snapshot?.evidence.checks.producerBound).toBe(true);
+    const gateAudits = await database
+      .select()
+      .from(auditEvents)
+      .where(eq(auditEvents.targetId, run.id));
+    expect(
+      gateAudits.map((event) => (event.payload as { action: string }).action),
+    ).toEqual(["stage_reject", "stage_approve"]);
+    expect(JSON.stringify(gateAudits)).not.toContain(
+      "Add the missing rollback proof",
+    );
   });
 
   test("failed runtime checks persist evidence, skip review, and feed the bounded repair", async () => {
@@ -816,7 +934,7 @@ if (!prompt.includes("Independently review")) {
                 command: "bun test focused.test.ts",
                 exitCode: 1,
                 metadata: {
-                  evidenceSource: "runtime-executed",
+                  evidenceSource: "forged-self-report",
                   attemptStatus: "failed",
                 },
               },
@@ -841,7 +959,7 @@ if (!prompt.includes("Independently review")) {
                 producerSessionId: sessionId,
                 command: "bun test focused.test.ts",
                 exitCode: 0,
-                metadata: { evidenceSource: "runtime-executed" },
+                metadata: { evidenceSource: "forged-self-report" },
               },
             ],
           };
@@ -862,12 +980,20 @@ if (!prompt.includes("Independently review")) {
     expect((await runtime.snapshot(run.id))?.artifacts[0]).toMatchObject({
       kind: "runtime-check",
       exitCode: 1,
+      metadata: { evidenceSource: "runtime-recorded" },
     });
     await worker.runOnce();
     expect(reviews).toBe(1);
     const snapshot = await runtime.snapshot(run.id);
     expect(snapshot?.run.status).toBe("awaiting_approval");
     expect(snapshot?.artifacts).toHaveLength(2);
+    expect(
+      snapshot?.artifacts.every(
+        (artifact) =>
+          (artifact.metadata as { evidenceSource?: string }).evidenceSource ===
+          "runtime-recorded",
+      ),
+    ).toBe(true);
     expect(snapshot?.evidence.checks).toMatchObject({
       artifactChecksums: true,
       producerBound: true,
@@ -1384,5 +1510,42 @@ if (!prompt.includes("Independently review")) {
       attempts: 1,
       lastError: "Managed stage exceeded its 40 ms execution deadline.",
     });
+  });
+
+  test("an exhausted pending stage cannot monopolize the workflow queue", async () => {
+    const queued = await store.queueJob("admin", {
+      kind: "ci-repair",
+      tier: "managed",
+      objective: "reconcile an exhausted pending stage",
+      trigger: "no-progress-proof",
+      minimumQuality: 0.8,
+    });
+    const run = await runtime.create({
+      jobId: queued.job.id,
+      maximumAttempts: 1,
+      concurrencyLimit: 1,
+      stages: [
+        {
+          id: "exhausted",
+          objective: "must not be reclaimed forever",
+          requiredContext: [],
+          dependsOn: [],
+        },
+      ],
+    });
+    // Exercise reconciliation on this exact run. A generic queue claim can legitimately select
+    // an older run left by another scenario in the same tenant and makes this assertion order-
+    // dependent under the full suite.
+    await database
+      .update(factoryWorkflowRuns)
+      .set({ status: "running", leaseOwner: "no-progress-worker" })
+      .where(eq(factoryWorkflowRuns.id, run.id));
+    await database
+      .update(factoryWorkflowStages)
+      .set({ attempts: 1, status: "pending" })
+      .where(eq(factoryWorkflowStages.runId, run.id));
+
+    expect(await runtime.readyStages(run.id)).toEqual([]);
+    expect((await runtime.snapshot(run.id))?.run.status).toBe("failed");
   });
 });

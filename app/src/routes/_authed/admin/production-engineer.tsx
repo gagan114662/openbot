@@ -20,6 +20,7 @@ import {
   type ProductionEngineerDashboard,
   recordProductionInvestigation,
   rejectProductionMonitorTuning,
+  runFactoryBenchmark,
   tuneProductionMonitor,
   tuningProposalFrom,
   updateProductionIssueStatus,
@@ -36,6 +37,7 @@ function ProductionEngineerPage() {
   const [investigationApproved, setInvestigationApproved] = useState(false);
   const [workflowSteering, setWorkflowSteering] = useState("");
   const [gateFeedback, setGateFeedback] = useState<Record<string, string>>({});
+  const [gateProducer, setGateProducer] = useState<Record<string, string>>({});
   const [streamState, setStreamState] = useState("connecting");
   const [jobObjective, setJobObjective] = useState("");
   const [jobContextKeys, setJobContextKeys] = useState("");
@@ -99,6 +101,11 @@ function ProductionEngineerPage() {
       setJobExpectedContent("");
       return queryClient.invalidateQueries({ queryKey: ["software-factory"] });
     },
+  });
+  const runBenchmark = useMutation({
+    mutationFn: () => runFactoryBenchmark(),
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["software-factory"] }),
   });
   const refresh = () =>
     queryClient.invalidateQueries({ queryKey: ["production-engineer"] });
@@ -174,9 +181,11 @@ function ProductionEngineerPage() {
           </p>
         </div>
         <p className="mb-3 text-muted-foreground text-sm">
-          Benchmark-routed managed agents use a judging orchestrator, bounded
-          workers, and tenant-isolated graph context. Outcome cost feeds the
-          next routing decision.
+          {(factory.data?.benchmarks ?? []).some(
+            (benchmark) => benchmark.source === "measured",
+          )
+            ? "Measured benchmark routes use executed checks, a judging orchestrator, bounded workers, and tenant-isolated graph context."
+            : "Only seeded bootstrap routes exist. They are excluded from routing unless the explicit seeded-route override is enabled."}
         </p>
         <div className="grid gap-3 md:grid-cols-3">
           <FactoryCard
@@ -196,7 +205,13 @@ function ProductionEngineerPage() {
             }
           />
           <FactoryCard
-            label="Benchmarked routes"
+            label={
+              (factory.data?.benchmarks ?? []).some(
+                (benchmark) => benchmark.source === "measured",
+              )
+                ? "Measured routes"
+                : "Seeded routes"
+            }
             value={`${factory.data?.benchmarks.length ?? 0} model/job configurations`}
           />
           <FactoryCard
@@ -235,6 +250,61 @@ function ProductionEngineerPage() {
                 : "Loading…"
             }
           />
+        </div>
+        <div className="mt-3 rounded-md border p-3">
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h3 className="font-medium">Executed model benchmarks</h3>
+              <p className="text-muted-foreground text-xs">
+                Fixed revision, real harnesses, five deterministic outcomes per
+                pair. Quality cannot be submitted by this page.
+              </p>
+            </div>
+            <Button
+              disabled={runBenchmark.isPending}
+              onClick={() => runBenchmark.mutate()}
+              variant="outline"
+            >
+              Run Codex vs Claude benchmark
+            </Button>
+          </div>
+          <div className="mt-2 overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead>
+                <tr>
+                  <th>Source</th>
+                  <th>Harness/model</th>
+                  <th>Task</th>
+                  <th>Checks</th>
+                  <th>Quality</th>
+                  <th>Cost/outcome</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(factory.data?.benchmarks ?? []).map((benchmark) => (
+                  <tr
+                    key={`${benchmark.harness}:${benchmark.model}:${benchmark.task}`}
+                  >
+                    <td>{benchmark.source}</td>
+                    <td>
+                      {benchmark.harness}/{benchmark.model}
+                    </td>
+                    <td>{benchmark.task}</td>
+                    <td>
+                      {benchmark.successfulOutcomes}/
+                      {benchmark.attemptedOutcomes}
+                    </td>
+                    <td>{Math.round(benchmark.quality * 100)}%</td>
+                    <td>
+                      {benchmark.successfulOutcomes
+                        ? `${Math.round(benchmark.totalCostMicros / benchmark.successfulOutcomes)} µ$`
+                        : "n/a"}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       </PageSection>
       <PageSection title="Shadow execution evidence">
@@ -288,9 +358,11 @@ function ProductionEngineerPage() {
       </PageSection>
       <PageSection title="Launch a managed workflow">
         <p className="mb-3 text-muted-foreground text-sm">
-          This creates a durable production run. A benchmark-routed Codex or
-          Claude worker executes it, a fresh reviewer validates revision-bound
-          artifacts, and completion waits for human approval.
+          This creates a durable production run. A measured route is used only
+          when executed benchmark evidence exists; otherwise launch fails closed
+          unless the seeded-route override is explicit. A fresh reviewer
+          validates revision-bound artifacts, and completion waits for human
+          approval.
         </p>
         <div className="grid gap-2 md:grid-cols-[220px_1fr_auto]">
           <select
@@ -437,7 +509,8 @@ function ProductionEngineerPage() {
                           Resume
                         </Button>
                       ) : null}
-                      {run.status === "awaiting_approval" ? (
+                      {run.status === "awaiting_approval" &&
+                      evidence.readyForApproval ? (
                         <Button
                           size="sm"
                           onClick={() =>
@@ -560,6 +633,33 @@ function ProductionEngineerPage() {
                                     }))
                                   }
                                 />
+                                {stage.dependsOn.ids.length > 1 ? (
+                                  <select
+                                    aria-label={`Producer to repair for ${stage.stageId}`}
+                                    className="h-9 rounded-md border bg-background px-3 text-sm"
+                                    value={
+                                      gateProducer[
+                                        `${run.id}:${stage.stageId}`
+                                      ] ?? ""
+                                    }
+                                    onChange={(event) =>
+                                      setGateProducer((current) => ({
+                                        ...current,
+                                        [`${run.id}:${stage.stageId}`]:
+                                          event.target.value,
+                                      }))
+                                    }
+                                  >
+                                    <option value="">
+                                      Select producer to repair
+                                    </option>
+                                    {stage.dependsOn.ids.map((producer) => (
+                                      <option key={producer} value={producer}>
+                                        {producer}
+                                      </option>
+                                    ))}
+                                  </select>
+                                ) : null}
                                 <Button
                                   size="sm"
                                   onClick={() =>
@@ -578,13 +678,23 @@ function ProductionEngineerPage() {
                                   disabled={
                                     !gateFeedback[
                                       `${run.id}:${stage.stageId}`
-                                    ]?.trim()
+                                    ]?.trim() ||
+                                    (stage.dependsOn.ids.length > 1 &&
+                                      !gateProducer[
+                                        `${run.id}:${stage.stageId}`
+                                      ])
                                   }
                                   onClick={() =>
                                     gateControl.mutate({
                                       runId: run.id,
                                       stageId: stage.stageId,
                                       decision: "reject",
+                                      producerStageId:
+                                        stage.dependsOn.ids.length === 1
+                                          ? stage.dependsOn.ids[0]
+                                          : gateProducer[
+                                              `${run.id}:${stage.stageId}`
+                                            ],
                                       feedback:
                                         gateFeedback[
                                           `${run.id}:${stage.stageId}`
@@ -607,6 +717,11 @@ function ProductionEngineerPage() {
                         <p className="text-muted-foreground">
                           {stage.objective}
                         </p>
+                        {stage.lastError ? (
+                          <p className="mt-1 text-destructive text-xs">
+                            {stage.lastError}
+                          </p>
+                        ) : null}
                         {stage.sessionId ? (
                           <dl className="mt-2 grid gap-x-2 text-xs md:grid-cols-[80px_1fr]">
                             <dt>Worker</dt>

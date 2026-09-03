@@ -476,7 +476,7 @@ export function createSoftwareFactoryRoutes(
     const artifact = await workflows.contextCapsule(context.req.param("id"));
     return artifact ? context.json(artifact) : context.notFound();
   });
-  routes.post("/workflows/:runId/stages/:stageId/gate", async (context) => {
+  routes.post("/workflows/:runId/stages/:stageId/decision", async (context) => {
     if (!workflows) return context.notFound();
     const body = record(await context.req.json().catch(() => null));
     const decision = nonempty(body?.decision);
@@ -488,10 +488,17 @@ export function createSoftwareFactoryRoutes(
     const result = await workflows.decideStageGate(
       context.req.param("runId"),
       context.req.param("stageId"),
-      context.var.actor.id,
-      decision,
-      nonempty(body?.feedback) ?? undefined,
+      {
+        actorId: context.var.actor.id,
+        actorRole: context.var.actor.role,
+        decision,
+        feedback: nonempty(body?.feedback) ?? undefined,
+        producerStageId: nonempty(body?.producerStageId) ?? undefined,
+        revision: provenance?.revision ?? "runtime-control",
+      },
     );
+    if (result?.status === "forbidden")
+      return context.json({ error: "This role cannot decide this gate." }, 403);
     return result
       ? context.json({ gate: result })
       : context.json({ error: "No pending human gate was found." }, 409);

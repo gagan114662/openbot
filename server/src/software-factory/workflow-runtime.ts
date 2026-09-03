@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { and, asc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Database } from "../db/client";
@@ -131,6 +131,7 @@ export function verifyWorkflowEvidence(snapshot: {
   }>;
   artifacts: Array<{
     stageId: string;
+    kind?: string;
     content: string;
     checksum: string;
     revision: string;
@@ -160,12 +161,14 @@ export function verifyWorkflowEvidence(snapshot: {
     ),
     producerBound: snapshot.artifacts.every((artifact) => {
       const metadata = artifact.metadata as
-        | { attemptStatus?: unknown }
+        | { attemptStatus?: unknown; actorId?: unknown }
         | null
         | undefined;
       return (
         successfulArtifacts.includes(artifact) ||
-        metadata?.attemptStatus === "failed"
+        metadata?.attemptStatus === "failed" ||
+        (artifact.kind === "human-decision" &&
+          metadata?.actorId === artifact.producerSessionId)
       );
     }),
     commandsSucceeded: successfulArtifacts.every(
@@ -478,9 +481,14 @@ export function createWorkflowRuntime(
     async decideStageGate(
       runId: string,
       stageId: string,
-      actorId: string,
-      decision: "approve" | "reject",
-      feedback?: string,
+      input: {
+        actorId: string;
+        actorRole: string;
+        decision: "approve" | "reject";
+        feedback?: string;
+        producerStageId?: string;
+        revision: string;
+      },
     ) {
       return database.transaction(async (tx) => {
         const [stage] = await tx
@@ -497,11 +505,26 @@ export function createWorkflowRuntime(
         if (!stage) return null;
         const control = stageControl(stage.checks);
         if (!control.gate) return null;
+        if (
+          control.gate.roles?.length &&
+          !control.gate.roles.includes(input.actorRole)
+        )
+          return { status: "forbidden" as const };
+        const producers = dependencyIds(stage.dependsOn);
+        const producerStageId =
+          input.producerStageId ??
+          (producers.length === 1 ? producers[0] : null);
+        if (
+          input.decision === "reject" &&
+          (!producerStageId || !producers.includes(producerStageId))
+        )
+          throw new Error(
+            "Gate rejection must identify one direct producer stage.",
+          );
         const now = new Date();
-        if (decision === "reject") {
-          const text = feedback?.trim();
+        if (input.decision === "reject") {
+          const text = input.feedback?.trim();
           if (!text) throw new Error("Gate rejection requires feedback.");
-          const producers = dependencyIds(stage.dependsOn);
           await tx
             .update(factoryWorkflowStages)
             .set({
@@ -515,19 +538,19 @@ export function createWorkflowRuntime(
             .where(
               and(
                 eq(factoryWorkflowStages.runId, runId),
-                inArray(factoryWorkflowStages.stageId, producers),
+                eq(factoryWorkflowStages.stageId, producerStageId as string),
                 eq(factoryWorkflowStages.status, "succeeded"),
               ),
             );
           await tx
             .update(factoryWorkflowArtifacts)
             .set({
-              metadata: sql`coalesce(${factoryWorkflowArtifacts.metadata}, '{}'::jsonb) || ${JSON.stringify({ attemptStatus: "failed", gateRejected: true })}::jsonb`,
+              metadata: sql`coalesce(${factoryWorkflowArtifacts.metadata}, '{}'::jsonb) || jsonb_build_object('attemptStatus', 'failed', 'gateRejected', true)`,
             })
             .where(
               and(
                 eq(factoryWorkflowArtifacts.runId, runId),
-                inArray(factoryWorkflowArtifacts.stageId, producers),
+                eq(factoryWorkflowArtifacts.stageId, producerStageId as string),
               ),
             );
         }
@@ -539,8 +562,8 @@ export function createWorkflowRuntime(
               ...control,
               gate: {
                 ...control.gate,
-                status: decision === "approve" ? "approved" : "pending",
-                ...(feedback ? { feedback: feedback.trim() } : {}),
+                status: input.decision === "approve" ? "approved" : "pending",
+                ...(input.feedback ? { feedback: input.feedback.trim() } : {}),
               },
             },
             updatedAt: now,
@@ -556,8 +579,50 @@ export function createWorkflowRuntime(
           stageId,
           entity: "human_gate",
           fromStatus: "awaiting_approval",
-          toStatus: decision === "approve" ? "approved" : "rejected",
-          detail: { actorId, feedback: feedback?.trim() ?? null },
+          toStatus: input.decision === "approve" ? "approved" : "rejected",
+          detail: {
+            actorId: input.actorId,
+            producerStageId,
+            feedback: input.feedback?.trim() ?? null,
+          },
+        });
+        const decisionContent = JSON.stringify({
+          actorId: input.actorId,
+          decision: input.decision,
+          feedback: input.feedback?.trim() ?? null,
+          producerStageId,
+          revision: input.revision,
+        });
+        await tx.insert(factoryWorkflowArtifacts).values({
+          runId,
+          stageId,
+          kind: "human-decision",
+          uri: `workflow://${runId}/${stageId}/human-decision/${randomUUID()}`,
+          content: decisionContent,
+          checksum: artifactChecksum(decisionContent),
+          revision: input.revision,
+          producerSessionId: input.actorId,
+          command: "human-stage-decision",
+          exitCode: 0,
+          metadata: {
+            actorId: input.actorId,
+            actorRole: input.actorRole,
+            producerStageId,
+          },
+        });
+        await tx.insert(auditEvents).values({
+          eventType: "workflow.control_applied",
+          targetType: "factory_workflow_run",
+          targetId: runId,
+          actorUserId: input.actorId,
+          payload: {
+            action: `stage_${input.decision}`,
+            stageId,
+            producerStageId,
+            feedbackHash: input.feedback
+              ? artifactChecksum(input.feedback.trim())
+              : null,
+          },
         });
         await tx
           .update(factoryWorkflowRuns)
@@ -568,7 +633,11 @@ export function createWorkflowRuntime(
             updatedAt: now,
           })
           .where(eq(factoryWorkflowRuns.id, runId));
-        return { stageId, decision };
+        return {
+          status: "applied" as const,
+          stageId,
+          decision: input.decision,
+        };
       });
     },
 

@@ -13,6 +13,7 @@ import {
   factoryWorkflowStages,
 } from "../src/db/schema";
 import { createClaudeWorkflowExecutor } from "../src/software-factory/codex-workflow-executor";
+import { createSoftwareFactoryRoutes } from "../src/software-factory/routes";
 import { createSoftwareFactoryStore } from "../src/software-factory/store";
 import {
   artifactChecksum,
@@ -667,8 +668,14 @@ if (!prompt.includes("Independently review")) {
       concurrencyLimit: 2,
       stages: [
         {
-          id: "produce",
-          objective: "produce",
+          id: "produce-a",
+          objective: "produce A",
+          requiredContext: [],
+          dependsOn: [],
+        },
+        {
+          id: "produce-b",
+          objective: "produce B",
           requiredContext: [],
           dependsOn: [],
         },
@@ -676,7 +683,7 @@ if (!prompt.includes("Independently review")) {
           id: "release",
           objective: "release",
           requiredContext: [],
-          dependsOn: ["produce"],
+          dependsOn: ["produce-a", "produce-b"],
           gate: {
             kind: "human",
             prompt: "Approve the produced change",
@@ -718,7 +725,20 @@ if (!prompt.includes("Independently review")) {
     };
 
     expect((await runtime.claim("gate-worker"))?.id).toBe(run.id);
-    await complete("produce", "producer-1", "first candidate");
+    await complete("produce-a", "producer-a-1", "first candidate A");
+    expect(
+      (await runtime.snapshot(run.id))?.stages.find(
+        (stage) => stage.stageId === "release",
+      )?.status,
+    ).toBe("pending");
+    expect(
+      (await runtime.snapshot(run.id))?.events.some(
+        (event) =>
+          event.entity === "human_gate" &&
+          event.toStatus === "awaiting_approval",
+      ),
+    ).toBe(false);
+    await complete("produce-b", "producer-b-1", "first candidate B");
     expect(await runtime.readyStages(run.id)).toEqual([]);
     expect(
       (await runtime.snapshot(run.id))?.stages.find(
@@ -726,20 +746,85 @@ if (!prompt.includes("Independently review")) {
       )?.status,
     ).toBe("awaiting_approval");
 
-    await runtime.decideStageGate(
-      run.id,
-      "release",
-      "admin-1",
-      "reject",
-      "Add the missing rollback proof",
+    expect(
+      await runtime.decideStageGate(run.id, "release", {
+        actorId: "viewer-1",
+        actorRole: "member",
+        decision: "approve",
+        revision: "deadbeef",
+      }),
+    ).toEqual({ status: "forbidden" });
+    expect(
+      (await runtime.snapshot(run.id))?.stages.find(
+        (stage) => stage.stageId === "release",
+      )?.status,
+    ).toBe("awaiting_approval");
+
+    const routes = createSoftwareFactoryRoutes(
+      store,
+      {} as never,
+      tenantId,
+      async (context, next) => {
+        context.set("actor", {
+          id: "admin-1",
+          email: "admin@example.test",
+          role: "admin",
+        });
+        await next();
+      },
+      undefined,
+      undefined,
+      runtime,
+      { revision: "deadbeef", branch: "test", dirty: false },
     );
+    const rejected = await routes.request(
+      `/workflows/${run.id}/stages/release/decision`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          decision: "reject",
+          feedback: "Add the missing rollback proof",
+          producerStageId: "produce-a",
+        }),
+      },
+    );
+    expect(rejected.status).toBe(200);
     expect((await runtime.claim("gate-worker"))?.id).toBe(run.id);
     expect(
       (await runtime.readyStages(run.id)).map((stage) => stage.stageId),
-    ).toEqual(["produce"]);
-    await complete("produce", "producer-2", "candidate with rollback proof");
+    ).toEqual(["produce-a"]);
+    expect(
+      (await runtime.snapshot(run.id))?.stages.find(
+        (stage) => stage.stageId === "produce-b",
+      )?.status,
+    ).toBe("succeeded");
+    await complete(
+      "produce-a",
+      "producer-a-2",
+      "candidate A with rollback proof",
+    );
     expect(await runtime.readyStages(run.id)).toEqual([]);
-    await runtime.decideStageGate(run.id, "release", "admin-1", "approve");
+    await database
+      .update(factoryWorkflowRuns)
+      .set({ leaseExpiresAt: new Date(Date.now() - 60_000) })
+      .where(eq(factoryWorkflowRuns.id, run.id));
+    const attemptsBeforeGateApproval = (
+      await runtime.snapshot(run.id)
+    )?.stages.map(({ stageId, attempts }) => [stageId, attempts]);
+    expect(await runtime.claim("gate-thief")).toBeNull();
+    expect(
+      (await runtime.snapshot(run.id))?.stages.map(({ stageId, attempts }) => [
+        stageId,
+        attempts,
+      ]),
+    ).toEqual(attemptsBeforeGateApproval);
+    await runtime.decideStageGate(run.id, "release", {
+      actorId: "admin-1",
+      actorRole: "admin",
+      decision: "approve",
+      revision: "deadbeef",
+    });
     expect((await runtime.claim("gate-worker"))?.id).toBe(run.id);
     expect(
       (await runtime.readyStages(run.id)).map((stage) => stage.stageId),
@@ -747,7 +832,7 @@ if (!prompt.includes("Independently review")) {
     await complete("release", "release-1", "released");
     const snapshot = await runtime.snapshot(run.id);
     expect(
-      snapshot?.stages.find((stage) => stage.stageId === "produce")?.attempts,
+      snapshot?.stages.find((stage) => stage.stageId === "produce-a")?.attempts,
     ).toBe(2);
     expect(
       snapshot?.events
@@ -760,6 +845,22 @@ if (!prompt.includes("Independently review")) {
       "approved",
     ]);
     expect(snapshot?.run.status).toBe("awaiting_approval");
+    expect(
+      snapshot?.artifacts.filter(
+        (artifact) => artifact.kind === "human-decision",
+      ),
+    ).toHaveLength(2);
+    expect(snapshot?.evidence.checks.producerBound).toBe(true);
+    const gateAudits = await database
+      .select()
+      .from(auditEvents)
+      .where(eq(auditEvents.targetId, run.id));
+    expect(
+      gateAudits.map((event) => (event.payload as { action: string }).action),
+    ).toEqual(["stage_reject", "stage_approve"]);
+    expect(JSON.stringify(gateAudits)).not.toContain(
+      "Add the missing rollback proof",
+    );
   });
 
   test("failed runtime checks persist evidence, skip review, and feed the bounded repair", async () => {

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { and, desc, eq, gte, inArray, or, sql } from "drizzle-orm";
-import { type AuditStore, recordAuditEvent } from "../audit";
 import { evaluatorRuntimeMetrics } from "../analytics/store";
+import { type AuditStore, recordAuditEvent } from "../audit";
 import type { Database } from "../db/client";
 import {
   analyticsSessions,
@@ -11,8 +11,8 @@ import {
   productionMonitors,
 } from "../db/schema";
 import type { ContextGraph } from "../software-factory/context-graph";
-import { executionTiers } from "../software-factory/model-router";
 import { inferenceShadowMetrics } from "../software-factory/inference-shadow";
+import { executionTiers } from "../software-factory/model-router";
 import { managedJobKinds } from "../software-factory/orchestrator";
 
 const fingerprint = (value: unknown) =>
@@ -204,6 +204,18 @@ export function createProductionEngineerStore(
   return {
     claimFix,
     runClaimedFix,
+    async failFixFromCi(pullRequestUrl: string) {
+      return database
+        .update(productionIssues)
+        .set({ fixStatus: "failed", updatedAt: new Date() })
+        .where(
+          and(
+            eq(productionIssues.pullRequestUrl, pullRequestUrl),
+            eq(productionIssues.fixStatus, "pull_request_open"),
+          ),
+        )
+        .returning();
+    },
     async prometheusMetrics() {
       const evaluator = evaluatorRuntimeMetrics();
       const shadow = inferenceShadowMetrics();

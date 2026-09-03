@@ -40,6 +40,31 @@ afterAll(async () => {
 });
 
 describe("persistent production engineer", () => {
+  test("a red CI reconciliation fails the matching open fix in one mutation", async () => {
+    const pullRequestUrl = `https://github.com/gagan114662/openbot/pull/${Date.now()}`;
+    const [issue] = await database
+      .insert(productionIssues)
+      .values({
+        fingerprint: `red-ci-${crypto.randomUUID()}`,
+        title: "Autonomous fix with red CI",
+        severity: "high",
+        rootCause: "The generated change failed its required checks.",
+        fixStatus: "pull_request_open",
+        pullRequestUrl,
+      })
+      .returning();
+    if (!issue) throw new Error("Red-CI proof issue was not created");
+    issueIds.push(issue.id);
+
+    const reconciled = await store.failFixFromCi(pullRequestUrl);
+    expect(reconciled).toHaveLength(1);
+    const [persisted] = await database
+      .select()
+      .from(productionIssues)
+      .where(eq(productionIssues.id, issue.id));
+    expect(persisted?.fixStatus).toBe("failed");
+  });
+
   test("concurrent fix requests atomically claim one drafter", async () => {
     const [issue] = await database
       .insert(productionIssues)

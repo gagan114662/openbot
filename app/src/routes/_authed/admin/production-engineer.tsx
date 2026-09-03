@@ -62,11 +62,7 @@ function ProductionEngineerPage() {
     queryFn: fetchSoftwareFactory,
   });
   const liveRuns = (factory.data?.workflows ?? [])
-    .filter(({ run }) =>
-      ["queued", "running", "pausing", "paused", "awaiting_approval"].includes(
-        run.status,
-      ),
-    )
+    .filter(({ run }) => ["running", "pausing"].includes(run.status))
     .map(({ run }) => run.id)
     .sort();
   const liveRunKey = liveRuns.join(",");
@@ -112,7 +108,10 @@ function ProductionEngineerPage() {
       events.addEventListener("error", () => setStreamState("reconnecting"));
       return events;
     });
-    return () => streams.forEach((events) => events.close());
+    return () =>
+      streams.forEach((events) => {
+        events.close();
+      });
   }, [liveRunKey, queryClient]);
   const workflowControl = useMutation({
     mutationFn: controlWorkflow,

@@ -56,6 +56,8 @@ const payload = review
   : { summary: "fake worker result", checks: ["model reported"] };
 if (${JSON.stringify(harness)} === "codex") {
   if (!args.includes("--sandbox")) process.exit(43);
+  if (!args.includes("sandbox_workspace_write.exclude_tmpdir_env_var=true")) process.exit(44);
+  if (!args.includes("sandbox_workspace_write.exclude_slash_tmp=true")) process.exit(45);
   const output = args[args.indexOf("--output-last-message") + 1];
   await Bun.write(output, JSON.stringify(payload));
 } else {

@@ -120,7 +120,7 @@ describe("source-proven, server-derived customer value", () => {
         },
       ],
     });
-    await runtime.approve(run.id, "human-admin");
+    await runtime.approve(run.id, { id: "human-admin", role: "admin" });
 
     const body = JSON.stringify({
       eventId: `source-${crypto.randomUUID()}`,

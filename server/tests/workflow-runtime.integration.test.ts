@@ -130,9 +130,13 @@ describe("durable workflow runtime", () => {
       .update(factoryWorkflowRuns)
       .set({ status: "awaiting_approval" })
       .where(eq(factoryWorkflowRuns.id, approval.id));
-    await runtime.approve(approval.id, "audit-admin", {
-      fromStatus: "awaiting_approval",
-    });
+    await runtime.approve(
+      approval.id,
+      { id: "audit-admin", role: "admin" },
+      {
+        fromStatus: "awaiting_approval",
+      },
+    );
 
     const events = await database
       .select()
@@ -366,11 +370,20 @@ describe("durable workflow runtime", () => {
     expect((await runtime.snapshot(run.id))?.run.status).toBe(
       "awaiting_approval",
     );
-    expect(await runtime.approve(run.id, "admin")).not.toBeNull();
+    expect(
+      await runtime.approve(run.id, "benchmark-runner" as never),
+    ).toBeNull();
+    expect(
+      (await runtime.snapshot(run.id))?.evidence.checks.humanApproval,
+    ).toBe(false);
+    expect(
+      await runtime.approve(run.id, { id: "admin", role: "admin" }),
+    ).not.toBeNull();
     const completed = await runtime.snapshot(run.id);
     expect(completed?.run).toMatchObject({
       status: "succeeded",
       approvedBy: "admin",
+      completedBy: null,
     });
     expect(completed?.artifacts).toHaveLength(2);
     expect(completed?.stages.map((stage) => stage.sessionId)).toEqual([
@@ -639,6 +652,7 @@ if (!prompt.includes("Independently review")) {
       expect(snapshot?.artifacts.map((artifact) => artifact.kind)).toEqual([
         "codex-stage-result",
         "runtime-check",
+        "runtime-check",
       ]);
       expect(snapshot?.events).toEqual(
         expect.arrayContaining([
@@ -818,7 +832,7 @@ if (!prompt.includes("Independently review")) {
                 command: "bun test focused.test.ts",
                 exitCode: 1,
                 metadata: {
-                  evidenceSource: "runtime-executed",
+                  evidenceSource: "forged-self-report",
                   attemptStatus: "failed",
                 },
               },
@@ -843,7 +857,7 @@ if (!prompt.includes("Independently review")) {
                 producerSessionId: sessionId,
                 command: "bun test focused.test.ts",
                 exitCode: 0,
-                metadata: { evidenceSource: "runtime-executed" },
+                metadata: { evidenceSource: "forged-self-report" },
               },
             ],
           };
@@ -864,12 +878,20 @@ if (!prompt.includes("Independently review")) {
     expect((await runtime.snapshot(run.id))?.artifacts[0]).toMatchObject({
       kind: "runtime-check",
       exitCode: 1,
+      metadata: { evidenceSource: "runtime-recorded" },
     });
     await worker.runOnce();
     expect(reviews).toBe(1);
     const snapshot = await runtime.snapshot(run.id);
     expect(snapshot?.run.status).toBe("awaiting_approval");
     expect(snapshot?.artifacts).toHaveLength(2);
+    expect(
+      snapshot?.artifacts.every(
+        (artifact) =>
+          (artifact.metadata as { evidenceSource?: string }).evidenceSource ===
+          "runtime-recorded",
+      ),
+    ).toBe(true);
     expect(snapshot?.evidence.checks).toMatchObject({
       artifactChecksums: true,
       producerBound: true,

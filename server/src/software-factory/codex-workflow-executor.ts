@@ -19,8 +19,24 @@ import {
   type WorkflowHarnessExecutor,
 } from "./workflow-worker";
 
-async function command(args: string[], cwd: string, signal?: AbortSignal) {
-  const child = spawn(args, { cwd, stdout: "pipe", stderr: "pipe" });
+async function command(
+  args: string[],
+  cwd: string,
+  signal?: AbortSignal,
+  options: { stdin?: string; env?: Record<string, string> } = {},
+) {
+  const child = spawn(args, {
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+    stdin: options.stdin === undefined ? "ignore" : "pipe",
+    env: options.env ? { ...process.env, ...options.env } : undefined,
+  });
+  if (options.stdin !== undefined) {
+    if (!child.stdin) throw new Error("Command stdin pipe was not created.");
+    child.stdin.write(options.stdin);
+    child.stdin.end();
+  }
   const abort = () => child.kill("SIGTERM");
   signal?.addEventListener("abort", abort, { once: true });
   const [stdout, stderr, exitCode] = await Promise.all([
@@ -35,7 +51,97 @@ async function command(args: string[], cwd: string, signal?: AbortSignal) {
     throw new Error(
       `${args[0]} failed (${exitCode}): ${(stderr || stdout).slice(-4_000)}`,
     );
-  return { stdout, exitCode };
+  return { stdout, stderr, exitCode };
+}
+
+type HarnessUsage = {
+  inputTokens: number;
+  outputTokens: number;
+  cachedInputTokens: number;
+  totalTokens: number;
+  costMicros: number | null;
+  costBasis: "provider-reported" | "configured-token-chargeback" | "unpriced";
+};
+
+const integer = (value: unknown) =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0
+    ? value
+    : 0;
+
+function pricedUsage(
+  harness: "codex" | "claude",
+  inputTokens: number,
+  outputTokens: number,
+  cachedInputTokens: number,
+  providerCostUsd?: unknown,
+): HarnessUsage {
+  if (
+    typeof providerCostUsd === "number" &&
+    Number.isFinite(providerCostUsd) &&
+    providerCostUsd > 0
+  ) {
+    return {
+      inputTokens,
+      outputTokens,
+      cachedInputTokens,
+      totalTokens: inputTokens + outputTokens,
+      costMicros: Math.round(providerCostUsd * 1_000_000),
+      costBasis: "provider-reported",
+    };
+  }
+  const prefix = `SOFTWARE_FACTORY_${harness.toUpperCase()}`;
+  const inputRate = Number(
+    process.env[`${prefix}_INPUT_MICROS_PER_MILLION_TOKENS`],
+  );
+  const outputRate = Number(
+    process.env[`${prefix}_OUTPUT_MICROS_PER_MILLION_TOKENS`],
+  );
+  const cachedRate = Number(
+    process.env[`${prefix}_CACHED_INPUT_MICROS_PER_MILLION_TOKENS`] ??
+      inputRate,
+  );
+  const rates = [inputRate, outputRate, cachedRate];
+  const costMicros = rates.every(
+    (rate) => Number.isSafeInteger(rate) && rate >= 0,
+  )
+    ? Math.max(
+        1,
+        Math.round(
+          ((inputTokens - cachedInputTokens) * inputRate +
+            cachedInputTokens * cachedRate +
+            outputTokens * outputRate) /
+            1_000_000,
+        ),
+      )
+    : null;
+  return {
+    inputTokens,
+    outputTokens,
+    cachedInputTokens,
+    totalTokens: inputTokens + outputTokens,
+    costMicros,
+    costBasis: costMicros === null ? "unpriced" : "configured-token-chargeback",
+  };
+}
+
+function codexUsage(stdout: string): HarnessUsage {
+  let raw: Record<string, unknown> = {};
+  for (const line of stdout.split("\n")) {
+    try {
+      const event = JSON.parse(line) as Record<string, unknown>;
+      const usage = event.usage;
+      if (usage && typeof usage === "object")
+        raw = usage as Record<string, unknown>;
+    } catch {
+      // Non-JSON status output carries no authoritative usage data.
+    }
+  }
+  return pricedUsage(
+    "codex",
+    integer(raw.input_tokens),
+    integer(raw.output_tokens),
+    integer(raw.cached_input_tokens),
+  );
 }
 
 const retentionMs = (
@@ -122,6 +228,11 @@ export function focusedTestsFromChangedPaths(
   return [...results].sort();
 }
 
+const protectedGatePath = (path: string) =>
+  /^(?:biome\.json|bunfig\.toml|package\.json|\.github\/|scripts\/verify-)/.test(
+    path,
+  ) || /(?:^|\/)tsconfig[^/]*\.json$/.test(path);
+
 export async function persistReviewMaterial(
   directory: string,
   sessionId: string,
@@ -167,15 +278,23 @@ export function createCodexWorkflowExecutor(
   );
   const worktreeRoot = join(workspaces, "worktrees");
   const evidenceRoot = join(workspaces, "evidence");
+  const verificationRoot = join(workspaces, "verification");
 
-  async function workspace(runId: string) {
+  async function workspace(runId: string, baseRevision?: string | null) {
     const directory = join(worktreeRoot, runId);
     await mkdir(worktreeRoot, { recursive: true });
     try {
       await readFile(join(directory, ".git"));
     } catch {
       await command(
-        ["git", "worktree", "add", "--detach", directory, "HEAD"],
+        [
+          "git",
+          "worktree",
+          "add",
+          "--detach",
+          directory,
+          baseRevision?.trim() || "HEAD",
+        ],
         root,
       );
     }
@@ -249,10 +368,29 @@ export function createCodexWorkflowExecutor(
         controller.abort(`Check ${check.id} exceeded ${check.timeoutMs} ms.`),
       check.timeoutMs,
     );
-    const child = spawn(check.command, {
+    const program = check.command[0];
+    if (!program) throw new Error(`Declared check ${check.id} has no command.`);
+    const executable = Bun.which(program);
+    if (!executable)
+      throw new Error(`Declared check ${check.id} executable is unavailable.`);
+    const args = [executable, ...check.command.slice(1)];
+    if (check.command[0] === "bun") args.splice(1, 0, "--no-install");
+    const resolvedGit = Bun.which("git");
+    const minimalPath = [
+      ...new Set(
+        [
+          dirname(executable),
+          resolvedGit ? dirname(resolvedGit) : null,
+          "/usr/bin",
+          "/bin",
+        ].filter(Boolean),
+      ),
+    ].join(":");
+    const child = spawn(args, {
       cwd: checkCwd,
       stdout: "pipe",
       stderr: "pipe",
+      env: { ...process.env, PATH: minimalPath },
     });
     const cancel = () => child.kill("SIGTERM");
     controller.signal.addEventListener("abort", cancel, { once: true });
@@ -295,9 +433,70 @@ export function createCodexWorkflowExecutor(
           required: check.required,
           evidenceSource: "runtime-executed",
           reviewMaterialPath: material.path,
+          modifiedByCandidate: false,
+          resolvedExecutablePaths: {
+            command: executable,
+            bun: Bun.which("bun") ?? null,
+            git: resolvedGit ?? null,
+          },
         },
       },
     };
+  }
+
+  async function verificationWorkspace(
+    runId: string,
+    sessionId: string,
+    revision: string,
+    diff: string,
+  ) {
+    const directory = join(verificationRoot, `${runId}-${sessionId}`);
+    await mkdir(verificationRoot, { recursive: true });
+    await command(
+      ["git", "worktree", "add", "--detach", directory, revision],
+      root,
+    );
+    try {
+      if (diff.trim())
+        await command(["git", "apply", "--binary", "-"], directory, undefined, {
+          stdin: diff,
+        });
+      try {
+        await access(join(root, "node_modules"));
+        await symlink(
+          join(root, "node_modules"),
+          join(directory, "node_modules"),
+          "dir",
+        );
+      } catch {
+        // Dependency-free repositories remain valid; their checks produce the real failure.
+      }
+      for (const entry of await readdir(root, { withFileTypes: true })) {
+        if (!entry.isDirectory() || entry.name.startsWith(".")) continue;
+        try {
+          await access(join(root, entry.name, "node_modules"));
+          await symlink(
+            join(root, entry.name, "node_modules"),
+            join(directory, entry.name, "node_modules"),
+            "dir",
+          );
+        } catch {
+          // This repository child has no installed workspace dependency tree.
+        }
+      }
+      return directory;
+    } catch (error) {
+      await command(
+        ["git", "worktree", "remove", "--force", directory],
+        root,
+      ).catch(() => undefined);
+      throw error;
+    }
+  }
+
+  async function removeVerificationWorkspace(directory: string) {
+    await command(["git", "worktree", "remove", "--force", directory], root);
+    await command(["git", "worktree", "prune"], root);
   }
 
   async function codexJson(
@@ -319,11 +518,12 @@ export function createCodexWorkflowExecutor(
         sandbox === "workspace-write"
           ? ["--sandbox", "workspace-write"]
           : ["--sandbox", "read-only"];
-      await command(
+      const response = await command(
         [
           options.binary ?? "codex",
           "exec",
           "--ephemeral",
+          "--json",
           "--config",
           "sandbox_workspace_write.exclude_tmpdir_env_var=true",
           "--config",
@@ -340,7 +540,10 @@ export function createCodexWorkflowExecutor(
         cwd,
         signal,
       );
-      return parseJsonPayload(await readFile(outputPath, "utf8"));
+      return {
+        payload: parseJsonPayload(await readFile(outputPath, "utf8")),
+        usage: codexUsage(response.stdout),
+      };
     }
     const response = await command(
       [
@@ -371,13 +574,33 @@ export function createCodexWorkflowExecutor(
     const envelope = JSON.parse(response.stdout) as {
       result?: unknown;
       structured_output?: unknown;
+      usage?: unknown;
+      total_cost_usd?: unknown;
     };
     if (
       envelope.structured_output &&
       typeof envelope.structured_output === "object" &&
       !Array.isArray(envelope.structured_output)
     )
-      return envelope.structured_output as Record<string, unknown>;
+      return {
+        payload: envelope.structured_output as Record<string, unknown>,
+        usage: pricedUsage(
+          "claude",
+          integer(
+            (envelope.usage as Record<string, unknown> | undefined)
+              ?.input_tokens,
+          ),
+          integer(
+            (envelope.usage as Record<string, unknown> | undefined)
+              ?.output_tokens,
+          ),
+          integer(
+            (envelope.usage as Record<string, unknown> | undefined)
+              ?.cache_read_input_tokens,
+          ),
+          envelope.total_cost_usd,
+        ),
+      };
     throw new Error(
       "Claude did not return CLI-validated structured_output; unvalidated result text is refused.",
     );
@@ -386,7 +609,10 @@ export function createCodexWorkflowExecutor(
   return {
     harness,
     async run({ runId, stage, snapshot, sessionId, signal }) {
-      const cwd = await workspace(runId);
+      const cwd = await workspace(
+        runId,
+        (snapshot.run as { baseRevision?: string | null }).baseRevision,
+      );
       const evidenceDirectory = durableEvidence(runId);
       const model = stage.selectedModel;
       if (!model || stage.selectedHarness !== harness)
@@ -417,7 +643,7 @@ export function createCodexWorkflowExecutor(
         checksum: artifact.checksum,
         revision: artifact.revision,
       }));
-      const result = await codexJson(
+      const response = await codexJson(
         cwd,
         sessionId,
         RESULT_SCHEMA,
@@ -445,6 +671,7 @@ export function createCodexWorkflowExecutor(
         signal,
         model,
       );
+      const result = response.payload;
       const [revision, diff] = await Promise.all([
         command(["git", "rev-parse", "HEAD"], cwd),
         command(
@@ -487,6 +714,45 @@ export function createCodexWorkflowExecutor(
         changedPaths,
         repositoryPaths,
       );
+      const protectedPaths = changedPaths.filter(protectedGatePath);
+      const gateContent = JSON.stringify({
+        kind: "gate-integrity",
+        protectedPaths,
+        modifiedTests: changedPaths.filter((path) =>
+          /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(path),
+        ),
+        passed: protectedPaths.length === 0,
+      });
+      const gateMaterial = await persistReviewMaterial(
+        evidenceDirectory,
+        `${sessionId}.gate-integrity`,
+        gateContent,
+      );
+      const gateArtifact = {
+        kind: "runtime-check",
+        uri: `workflow-check://${sessionId}/gate-integrity`,
+        content: gateContent,
+        checksum: gateMaterial.checksum,
+        revision: revision.stdout.trim(),
+        producerSessionId: sessionId,
+        command: "openbot gate-integrity",
+        exitCode: protectedPaths.length === 0 ? 0 : 1,
+        metadata: {
+          checkId: "gate-integrity",
+          required: true,
+          evidenceSource: "runtime-executed",
+          reviewMaterialPath: gateMaterial.path,
+          protectedPaths,
+          modifiedTests: changedPaths.filter((path) =>
+            /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(path),
+          ),
+        },
+      };
+      if (protectedPaths.length > 0)
+        throw new StageExecutionFailure(
+          `Gate integrity rejected candidate changes to protected paths: ${protectedPaths.join(", ")}`,
+          [gateArtifact],
+        );
       const checks = stageCheckSchema
         .array()
         .parse((stage.checks as { items?: unknown }).items ?? [])
@@ -503,28 +769,52 @@ export function createCodexWorkflowExecutor(
               check.id === "factory-focused-tests" && focusedTests.length === 0
             ),
         );
+      const verificationCwd = await verificationWorkspace(
+        runId,
+        sessionId,
+        revision.stdout.trim(),
+        diff.stdout,
+      );
+      const modifiedTests = new Set(
+        changedPaths.filter((path) =>
+          /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(path),
+        ),
+      );
       const executedChecks = [];
-      for (const check of checks) {
-        const executed = await runCheck(
-          cwd,
-          evidenceDirectory,
-          check,
-          sessionId,
-          signal,
-        );
-        executedChecks.push(executed);
-        if (check.required && executed.result.exitCode !== 0) {
-          const failedArtifacts = executedChecks.map(({ artifact }) => ({
-            ...artifact,
-            revision: revision.stdout.trim(),
-            producerSessionId: sessionId,
-            metadata: { ...artifact.metadata, attemptStatus: "failed" },
-          }));
-          throw new StageExecutionFailure(
-            `Required runtime check ${check.id} failed (${executed.result.exitCode}): ${(executed.result.stderr || executed.result.stdout).slice(-4_000)}`,
-            failedArtifacts,
+      try {
+        for (const check of checks) {
+          const executed = await runCheck(
+            verificationCwd,
+            evidenceDirectory,
+            check,
+            sessionId,
+            signal,
           );
+          executed.artifact.metadata = {
+            ...executed.artifact.metadata,
+            modifiedByCandidate: check.command.some((argument) =>
+              modifiedTests.has(argument),
+            ),
+          };
+          executedChecks.push(executed);
+          if (check.required && executed.result.exitCode !== 0) {
+            const failedArtifacts = [
+              gateArtifact,
+              ...executedChecks.map(({ artifact }) => ({
+                ...artifact,
+                revision: revision.stdout.trim(),
+                producerSessionId: sessionId,
+                metadata: { ...artifact.metadata, attemptStatus: "failed" },
+              })),
+            ];
+            throw new StageExecutionFailure(
+              `Required runtime check ${check.id} failed (${executed.result.exitCode}): ${(executed.result.stderr || executed.result.stdout).slice(-4_000)}`,
+              failedArtifacts,
+            );
+          }
         }
+      } finally {
+        await removeVerificationWorkspace(verificationCwd);
       }
       const content = JSON.stringify({ result, diff: diff.stdout });
       const reviewMaterial = await persistReviewMaterial(
@@ -571,9 +861,11 @@ export function createCodexWorkflowExecutor(
                 checksum: node.checksum,
               })),
               debt,
+              usage: response.usage,
               reviewMaterialPath: reviewMaterial.path,
             },
           },
+          gateArtifact,
           ...executedChecks.map(({ artifact }) => ({
             ...artifact,
             revision: revision.stdout.trim(),
@@ -583,8 +875,11 @@ export function createCodexWorkflowExecutor(
       };
     },
 
-    async review({ runId, stage, candidate, sessionId, signal }) {
-      const cwd = await workspace(runId);
+    async review({ runId, stage, snapshot, candidate, sessionId, signal }) {
+      const cwd = await workspace(
+        runId,
+        (snapshot.run as { baseRevision?: string | null }).baseRevision,
+      );
       const model = stage.selectedModel;
       if (!model || stage.selectedHarness !== harness)
         throw new Error("Reviewer harness does not match the persisted route.");
@@ -593,7 +888,7 @@ export function createCodexWorkflowExecutor(
         cwd,
         signal,
       );
-      const result = await codexJson(
+      const response = await codexJson(
         cwd,
         sessionId,
         REVIEW_SCHEMA,
@@ -621,6 +916,9 @@ export function createCodexWorkflowExecutor(
                   command,
                   exitCode,
                   reviewMaterialPath: metadata?.reviewMaterialPath,
+                  modifiedByCandidate: metadata?.modifiedByCandidate,
+                  modifiedTests: metadata?.modifiedTests,
+                  resolvedExecutablePaths: metadata?.resolvedExecutablePaths,
                 }),
               ),
           )}`,
@@ -634,6 +932,7 @@ export function createCodexWorkflowExecutor(
         signal,
         model,
       );
+      const result = response.payload;
       return {
         accepted: result.accepted === true,
         summary: String(result.summary ?? "Reviewer returned no summary."),

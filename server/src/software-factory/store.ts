@@ -68,7 +68,10 @@ export function createSoftwareFactoryStore(
           source: input.source ?? "seeded",
           benchmarkRunId: input.benchmarkRunId ?? null,
           seedReason:
-            input.seedReason ?? "Explicit administrative seed for bootstrap",
+            (input.source ?? "seeded") === "seeded"
+              ? (input.seedReason ??
+                "Explicit administrative seed for bootstrap")
+              : null,
         })
         .onConflictDoUpdate({
           target: [
@@ -86,7 +89,10 @@ export function createSoftwareFactoryStore(
             source: input.source ?? "seeded",
             benchmarkRunId: input.benchmarkRunId ?? null,
             seedReason:
-              input.seedReason ?? "Explicit administrative seed for bootstrap",
+              (input.source ?? "seeded") === "seeded"
+                ? (input.seedReason ??
+                  "Explicit administrative seed for bootstrap")
+                : null,
             updatedAt: new Date(),
           },
         });

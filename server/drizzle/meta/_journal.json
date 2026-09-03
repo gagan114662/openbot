@@ -337,6 +337,27 @@
       "when": 1788450525841,
       "tag": "0047_elite_mac_gargan",
       "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1788466093471,
+      "tag": "0048_amazing_talkback",
+      "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1788466314803,
+      "tag": "0049_smiling_leech",
+      "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1788466422336,
+      "tag": "0050_mean_jack_murdock",
+      "breakpoints": true
     }
   ]
 }

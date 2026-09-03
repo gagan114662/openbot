@@ -509,7 +509,11 @@ export function createSoftwareFactoryRoutes(
       ? createHash("sha256").update(instruction).digest("hex")
       : undefined;
     const approve = async () => {
-      const approved = await workflows.approve(runId, actorId, { fromStatus });
+      const approved = await workflows.approve(
+        runId,
+        { id: actorId, role: "admin" },
+        { fromStatus },
+      );
       const afterApproval = approved ? null : await workflows.snapshot(runId);
       const run =
         approved ??

@@ -69,6 +69,7 @@ export function createFactoryBenchmarkRunner(options: {
           jobId: job.id,
           maximumAttempts: 2,
           concurrencyLimit: 1,
+          baseRevision: options.revision,
           stages: [
             {
               id: "benchmark",
@@ -142,7 +143,37 @@ export function createFactoryBenchmarkRunner(options: {
             artifact,
           ]),
       );
-      for (const check of task.checks) {
+      const stageResult = snapshot.artifacts.find(
+        (artifact) =>
+          artifact.stageId === "benchmark" &&
+          artifact.kind === "codex-stage-result",
+      );
+      const usage = (
+        stageResult?.metadata as {
+          usage?: {
+            totalTokens?: unknown;
+            costMicros?: unknown;
+            costBasis?: unknown;
+          };
+        } | null
+      )?.usage;
+      const totalTokens = Number(usage?.totalTokens);
+      const costMicros = Number(usage?.costMicros);
+      const costBasis = String(usage?.costBasis ?? "unpriced");
+      if (
+        !Number.isSafeInteger(totalTokens) ||
+        totalTokens <= 0 ||
+        !Number.isSafeInteger(costMicros) ||
+        costMicros <= 0 ||
+        !["provider-reported", "configured-token-chargeback"].includes(
+          costBasis,
+        )
+      ) {
+        throw new Error(
+          `Benchmark ${snapshot.run.id} cannot be measured without positive CLI-reported token usage and provider cost or configured token chargeback.`,
+        );
+      }
+      for (const [index, check] of task.checks.entries()) {
         const artifact = checks.get(check.id);
         await options.database
           .insert(factoryBenchmarkOutcomes)
@@ -158,8 +189,9 @@ export function createFactoryBenchmarkRunner(options: {
                 ?.durationMs ?? 0,
             ),
             repairAttempts: stage.attempts,
-            tokens: null,
-            costMicros: 0,
+            tokens: index === 0 ? totalTokens : 0,
+            costMicros: index === 0 ? costMicros : 0,
+            costBasis,
           })
           .onConflictDoNothing();
       }
@@ -195,10 +227,13 @@ export function createFactoryBenchmarkRunner(options: {
           .update(factoryBenchmarkRuns)
           .set({ status: "completed", completedAt: new Date() })
           .where(eq(factoryBenchmarkRuns.id, benchmarkRunId));
-      // Benchmarks have no human deliverable to approve. Their gate is the runtime checks and
-      // independent reviewer above, so settle the workflow after those outcomes are durable.
+      // Benchmarks have no human deliverable. System completion is recorded separately and can
+      // never satisfy the human-approval evidence bit or verified-value admission.
       if (snapshot.run.status === "awaiting_approval")
-        await options.runtime.approve(snapshot.run.id, "benchmark-runner");
+        await options.runtime.completeSystem(
+          snapshot.run.id,
+          "benchmark-runner",
+        );
       return true;
     },
   };

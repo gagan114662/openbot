@@ -276,6 +276,52 @@ describe("workflow control audit", () => {
 });
 
 describe("workflow live control surface", () => {
+  test("exports live worktree gauges and retrievable artifact bytes", async () => {
+    const artifact = {
+      id: "artifact-1",
+      runId: "run-live",
+      stageId: "verify",
+      kind: "runtime-check",
+      uri: "workflow-check://proof",
+      content: "real check output",
+      checksum: "a".repeat(64),
+      revision: "deadbeef",
+      producerSessionId: "worker-1",
+      command: "git diff --check",
+      exitCode: 0,
+    };
+    const routes = createSoftwareFactoryRoutes(
+      {} as never,
+      {} as never,
+      "tenant-1",
+      async (context, next) => {
+        context.set("actor", {
+          id: "admin-1",
+          email: "admin@example.test",
+          role: "admin",
+        });
+        await next();
+      },
+      undefined,
+      undefined,
+      { snapshot: async () => ({ artifacts: [artifact] }) } as never,
+      undefined,
+      undefined,
+      async () => ({ active: 2, diskBytes: 4096 }),
+    );
+    const metrics = await routes.request("/metrics");
+    expect(await metrics.text()).toContain("factory_worktrees_active 2");
+    const response = await routes.request(
+      "/workflows/run-live/artifacts/artifact-1",
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      id: "artifact-1",
+      content: "real check output",
+      checksum: "a".repeat(64),
+    });
+  });
+
   test("streams a terminal workflow snapshot over authenticated SSE", async () => {
     const routes = createSoftwareFactoryRoutes(
       {} as never,

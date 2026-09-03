@@ -180,6 +180,7 @@ jobs:
   test:
     name: tests
     runs-on: ubuntu-latest
+    if: false # ISSUE-83 NEGATIVE CONTROL: removed after verify proves this skip is rejected.
     # The suite includes a real database integration test. Without a database it fails on every run,
     # including on main, which trains everyone to read a red CI as normal. pgvector rather than plain
     # postgres because the knowledge schema uses the extension.
@@ -402,13 +403,27 @@ jobs:
     steps:
       - name: Require every check
         env:
-          RESULTS: ${{ join(needs.*.result, ' ') }}
+          STATIC_RESULT: ${{ needs.static.result }}
+          DEPLOYABLES_RESULT: ${{ needs.deployables.result }}
+          CHART_RESULT: ${{ needs.chart.result }}
+          TEST_RESULT: ${{ needs.test.result }}
+          REPLICA_DRILL_RESULT: ${{ needs.replica-drill.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          MIGRATIONS_RESULT: ${{ needs.migrations.result }}
+          IMAGE_RESULT: ${{ needs.image.result }}
+          IMAGE_SKIP_ALLOWED: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'full-ci') }}
         run: |
           set -euo pipefail
-          echo "$RESULTS"
-          for result in $RESULTS; do
+          for name in STATIC DEPLOYABLES CHART TEST REPLICA_DRILL BUILD MIGRATIONS IMAGE; do
+            result_variable="${name}_RESULT"
+            result="${!result_variable}"
+            display_name="$(printf '%s' "$name" | tr '[:upper:]_' '[:lower:]-')"
+            if [ "$display_name" = image ] && [ "$result" = skipped ] && [ "$IMAGE_SKIP_ALLOWED" = true ]; then
+              echo "image reported skipped (allowlisted for an unlabelled pull_request only)"
+              continue
+            fi
             case "$result" in
-              success|skipped) ;;
-              *) echo "::error::A required check reported $result"; exit 1 ;;
+              success) ;;
+              *) echo "::error::${display_name} reported ${result}"; exit 1 ;;
             esac
           done

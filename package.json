@@ -27,6 +27,7 @@
     "backup:create": "bun --env-file=.env server/scripts/database-backup.ts create",
     "backup:drill": "bun --env-file=.env server/scripts/database-backup.ts drill",
     "eval:golden": "bun scripts/run-golden-evals.ts",
+    "factory:live-run": "bun --env-file=.env scripts/factory-live-run.ts",
     "check:frontend-bundles": "bun scripts/check-frontend-bundles.ts",
     "identity:configure": "bun scripts/configure-identity.ts",
     "drill:replicas": "bun --env-file=.env server/scripts/multi-replica-drill.ts",

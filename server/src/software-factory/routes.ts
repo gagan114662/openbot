@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import type { MiddlewareHandler } from "hono";
 import { Hono } from "hono";
+import { type AuditStore, recordAuditEvent } from "../audit";
 import { type AppVariables, requireAdmin } from "../auth/guards";
 import type { WebhookReconciler } from "../webhooks/reconciler";
 import type { ContextGraph, ContextNodeInput } from "./context-graph";
@@ -24,6 +26,7 @@ export function managedWorkflowStages(
   kind: ManagedJobKind,
   objective: string,
   requiredContext: string[],
+  observableChange?: { path: string; sha256: string },
 ) {
   const diffCheck = {
     id: "diff-integrity",
@@ -35,13 +38,7 @@ export function managedWorkflowStages(
     diffCheck,
     {
       id: "factory-focused-tests",
-      command: [
-        "bun",
-        "test",
-        "server/src/software-factory/orchestrator.test.ts",
-        "server/src/software-factory/routes.test.ts",
-        "server/src/software-factory/workflow-evidence.test.ts",
-      ],
+      command: ["bun", "test", "__OPENBOT_CHANGED_TESTS__"],
       timeoutMs: 120_000,
       required: true,
     },
@@ -63,26 +60,38 @@ export function managedWorkflowStages(
     purpose: string,
     dependsOn: string[] = [],
     checks = [diffCheck],
+    gate?: { kind: "human"; prompt: string; roles: string[] },
   ) => ({
     id,
-    objective: `${purpose}. Overall objective: ${objective}`,
+    objective: purpose,
     requiredContext,
     dependsOn,
-    checks,
+    checks: checks.map((check) => ({ ...check, command: [...check.command] })),
+    ...(gate ? { gate } : {}),
   });
+  let stages: ReturnType<typeof stage>[];
   switch (kind) {
     case "pull-request-review":
-      return [
+      stages = [
         stage(
           "inspect",
           "Inspect the change and establish revision-bound evidence",
         ),
-        stage("review", "Independently review correctness and risk", [
-          "inspect",
-        ]),
+        stage(
+          "review",
+          "Independently review correctness and risk",
+          ["inspect"],
+          [diffCheck],
+          {
+            kind: "human",
+            prompt: "Approve the inspected revision before final review",
+            roles: ["admin"],
+          },
+        ),
       ];
+      break;
     case "ci-repair":
-      return [
+      stages = [
         stage(
           "diagnose",
           "Reproduce the reported CI state and diagnose any failing checks",
@@ -93,6 +102,12 @@ export function managedWorkflowStages(
           "repair",
           "Implement the smallest evidence-backed repair, or preserve the clean tree when no repair is required",
           ["diagnose"],
+          [diffCheck],
+          {
+            kind: "human",
+            prompt: "Approve diagnosis before the repair changes the candidate",
+            roles: ["admin"],
+          },
         ),
         stage(
           "verify",
@@ -101,8 +116,9 @@ export function managedWorkflowStages(
           focusedFactoryChecks,
         ),
       ];
+      break;
     case "bug-triage":
-      return [
+      stages = [
         stage("reproduce", "Reproduce the reported behavior"),
         stage("diagnose", "Identify the causal root issue", ["reproduce"]),
         stage(
@@ -112,8 +128,9 @@ export function managedWorkflowStages(
           focusedFactoryChecks,
         ),
       ];
+      break;
     case "visual-delivery":
-      return [
+      stages = [
         stage("implement", "Implement the requested user-visible change"),
         stage(
           "visual-verify",
@@ -122,7 +139,34 @@ export function managedWorkflowStages(
           focusedFactoryChecks,
         ),
       ];
+      break;
   }
+  const terminalIndex = stages.length - 1;
+  stages.forEach((plannedStage, index) => {
+    plannedStage.objective +=
+      index === terminalIndex
+        ? `. This is the terminal stage: satisfy the overall objective now: ${objective}`
+        : `. This is a nonterminal stage: use the overall objective only as context and do not require its final deliverable yet: ${objective}`;
+  });
+  if (observableChange) {
+    const terminal = stages.at(-1);
+    if (!terminal) throw new Error("Managed workflow has no terminal stage.");
+    terminal.objective += ` Produce the objective-driven observable change in ${observableChange.path}. The runtime validates the expected artifact independently; its expected bytes and digest are intentionally withheld from every model prompt.`;
+    terminal.checks.push({
+      id: "observable-change",
+      command: [
+        "bun",
+        "scripts/verify-observable-change.ts",
+        "--path",
+        observableChange.path,
+        "--sha256",
+        observableChange.sha256,
+      ],
+      timeoutMs: 30_000,
+      required: true,
+    });
+  }
+  return stages;
 }
 
 export function createSoftwareFactoryRoutes(
@@ -139,6 +183,9 @@ export function createSoftwareFactoryRoutes(
     dirty: boolean;
     workerId?: string;
   },
+  auditStore?: AuditStore,
+  worktreeStats?: () => Promise<{ active: number; diskBytes: number }>,
+  cleanupWorktree?: (runId: string) => Promise<void>,
 ) {
   const routes = new Hono<{ Variables: AppVariables }>();
   routes.use("*", requireUser, async (context, next) => {
@@ -157,6 +204,9 @@ export function createSoftwareFactoryRoutes(
       workflows: workflows ? await workflows.list() : [],
       contextCapsules: workflows ? await workflows.listContextCapsules() : [],
       provenance: provenance ?? null,
+      worktrees: worktreeStats
+        ? await worktreeStats()
+        : { active: 0, diskBytes: 0 },
     }),
   );
   routes.post("/benchmarks", async (context) => {
@@ -187,6 +237,12 @@ export function createSoftwareFactoryRoutes(
     const tier = nonempty(body?.tier);
     const objective = nonempty(body?.objective);
     const trigger = nonempty(body?.trigger);
+    const observable = record(body?.observableChange);
+    const observablePath = nonempty(observable?.path);
+    const observableContent =
+      typeof observable?.expectedContent === "string"
+        ? observable.expectedContent
+        : null;
     const requiredContext = Array.isArray(body?.requiredContext)
       ? [
           ...new Set(
@@ -203,18 +259,52 @@ export function createSoftwareFactoryRoutes(
       !tier ||
       !executionTiers.includes(tier as ExecutionTier) ||
       !objective ||
-      !trigger
+      !trigger ||
+      !observablePath ||
+      observableContent === null ||
+      observableContent.length > 10_000 ||
+      observablePath.length > 240 ||
+      observablePath.startsWith("/") ||
+      observablePath.includes("\\") ||
+      observablePath.split("/").some((part) => part === ".." || !part)
     )
       return context.json(
-        { error: "A valid kind, tier, objective, and trigger are required." },
+        {
+          error:
+            "A valid kind, tier, objective, trigger, and safe observable file change are required.",
+        },
         400,
       );
+    const observableChange = {
+      path: observablePath,
+      sha256: createHash("sha256").update(observableContent).digest("hex"),
+      expectedContent: observableContent,
+    };
     const queued = await store.queueJob(context.var.actor.id, {
       kind: kind as ManagedJobKind,
       tier: tier as ExecutionTier,
       objective,
       trigger,
       minimumQuality: Number(body?.minimumQuality ?? 0.8),
+      launchMetadata: {
+        launcher:
+          trigger === "factory-live-run"
+            ? "scripts/factory-live-run.ts"
+            : "operator-ui",
+        actorId: context.var.actor.id,
+        arguments: {
+          kind,
+          tier,
+          objective,
+          maximumAttempts: Number(body?.maximumAttempts ?? 3),
+          concurrencyLimit: Number(body?.concurrencyLimit ?? 1),
+          requiredContext,
+          observableChange: {
+            path: observableChange.path,
+            sha256: observableChange.sha256,
+          },
+        },
+      },
     });
     const workflow = workflows
       ? await workflows.create({
@@ -225,6 +315,7 @@ export function createSoftwareFactoryRoutes(
             kind as ManagedJobKind,
             objective,
             requiredContext,
+            observableChange,
           ),
         })
       : null;
@@ -323,6 +414,49 @@ export function createSoftwareFactoryRoutes(
     const snapshot = await workflows.snapshot(context.req.param("runId"));
     return snapshot ? context.json(snapshot) : context.notFound();
   });
+  routes.get("/workflows/:runId/events", async (context) => {
+    if (!workflows) return context.notFound();
+    const runId = context.req.param("runId");
+    const encoder = new TextEncoder();
+    let last = "";
+    const stream = new ReadableStream({
+      async start(controller) {
+        const send = (event: string, value: unknown) =>
+          controller.enqueue(
+            encoder.encode(
+              `event: ${event}\ndata: ${JSON.stringify(value)}\n\n`,
+            ),
+          );
+        while (!context.req.raw.signal.aborted) {
+          const snapshot = await workflows.snapshot(runId);
+          if (!snapshot) {
+            send("error", { error: "Workflow not found." });
+            break;
+          }
+          const signature = JSON.stringify({
+            run: snapshot.run,
+            stages: snapshot.stages,
+            events: snapshot.events,
+          });
+          if (signature !== last) {
+            send("snapshot", snapshot);
+            last = signature;
+          } else send("heartbeat", { at: new Date().toISOString() });
+          if (["succeeded", "failed", "aborted"].includes(snapshot.run.status))
+            break;
+          await new Promise((resolve) => setTimeout(resolve, 1_500));
+        }
+        controller.close();
+      },
+    });
+    return new Response(stream, {
+      headers: {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+      },
+    });
+  });
   routes.get("/workflows/:runId/evidence", async (context) => {
     if (!workflows) return context.notFound();
     const snapshot = await workflows.snapshot(context.req.param("runId"));
@@ -342,18 +476,47 @@ export function createSoftwareFactoryRoutes(
     const artifact = await workflows.contextCapsule(context.req.param("id"));
     return artifact ? context.json(artifact) : context.notFound();
   });
+  routes.post("/workflows/:runId/stages/:stageId/gate", async (context) => {
+    if (!workflows) return context.notFound();
+    const body = record(await context.req.json().catch(() => null));
+    const decision = nonempty(body?.decision);
+    if (decision !== "approve" && decision !== "reject")
+      return context.json(
+        { error: "Decision must be approve or reject." },
+        400,
+      );
+    const result = await workflows.decideStageGate(
+      context.req.param("runId"),
+      context.req.param("stageId"),
+      context.var.actor.id,
+      decision,
+      nonempty(body?.feedback) ?? undefined,
+    );
+    return result
+      ? context.json({ gate: result })
+      : context.json({ error: "No pending human gate was found." }, 409);
+  });
   routes.post("/workflows/:runId/:action", async (context) => {
     if (!workflows) return context.notFound();
     const runId = context.req.param("runId");
     const action = context.req.param("action");
     const body = record(await context.req.json().catch(() => null));
+    const before = await workflows.snapshot(runId);
+    const actorId = context.var.actor.id;
+    const fromStatus = before?.run.status ?? "unknown";
+    const instruction = nonempty(body?.instruction);
+    const instructionHash = instruction
+      ? createHash("sha256").update(instruction).digest("hex")
+      : undefined;
     const approve = async () => {
-      const actorId = context.var.actor.id;
-      const approved = await workflows.approve(runId, actorId);
+      const approved = await workflows.approve(runId, actorId, { fromStatus });
+      const afterApproval = approved ? null : await workflows.snapshot(runId);
       const run =
         approved ??
-        ((await workflows.snapshot(runId))?.run.status === "succeeded"
-          ? (await workflows.snapshot(runId))?.run
+        (afterApproval?.run.status === "succeeded"
+          ? Object.assign(afterApproval.run, {
+              controlAuditPersisted: true,
+            })
           : null);
       if (!run) return null;
       await store.completeJob(run.jobId, {
@@ -370,25 +533,44 @@ export function createSoftwareFactoryRoutes(
     };
     const result =
       action === "pause"
-        ? await workflows.requestPause(runId)
+        ? await workflows.requestPause(runId, { actorId, fromStatus })
         : action === "resume"
-          ? await workflows.resume(runId)
+          ? await workflows.resume(runId, { actorId, fromStatus })
           : action === "abort"
-            ? await workflows.requestAbort(runId)
+            ? await workflows.requestAbort(runId, { actorId, fromStatus })
             : action === "approve"
               ? await approve()
-              : action === "steer" && nonempty(body?.instruction)
-                ? await workflows.steer(
-                    runId,
-                    context.var.actor.id,
-                    nonempty(body?.instruction) as string,
-                  )
+              : action === "steer" && instruction && instructionHash
+                ? await workflows.steer(runId, actorId, instruction, {
+                    fromStatus,
+                    instructionHash,
+                  })
                 : null;
     if (!result)
       return context.json(
         { error: "The workflow action is invalid for its current state." },
         409,
       );
+    if (action === "abort") await cleanupWorktree?.(runId);
+    if (auditStore && !("controlAuditPersisted" in result)) {
+      await recordAuditEvent(auditStore, {
+        eventType: "workflow.control_applied",
+        targetType: "factory_workflow_run",
+        targetId: runId,
+        actorUserId: context.var.actor.id,
+        payload: {
+          action,
+          jobId: result.jobId,
+          fromStatus: before?.run.status ?? null,
+          toStatus: result.status,
+          ...(action === "steer"
+            ? {
+                instructionHash,
+              }
+            : {}),
+        },
+      });
+    }
     return context.json({ run: result });
   });
   return routes;

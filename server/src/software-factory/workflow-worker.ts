@@ -55,6 +55,9 @@ export type WorkflowExecutor = {
     checks: string[];
   }>;
   interrupt(): Promise<void>;
+  cleanup?(runId: string): Promise<void>;
+  sweep?(protectedRunIds: Set<string>): Promise<void>;
+  worktreeStats?(): Promise<{ active: number; diskBytes: number }>;
 };
 
 export type WorkflowHarnessExecutor = WorkflowExecutor & {
@@ -83,6 +86,7 @@ export function createWorkflowWorker(options: {
   leaseMs?: number;
   heartbeatMs?: number;
   stageTimeoutMs?: number;
+  reviewAttempts?: number;
   onTerminalFailure?: (input: {
     runId: string;
     error: string;
@@ -93,6 +97,7 @@ export function createWorkflowWorker(options: {
   const heartbeatMs = options.heartbeatMs ?? Math.max(250, leaseMs / 3);
   const stageTimeoutMs = options.stageTimeoutMs ?? 10 * 60_000;
   let draining = false;
+  let swept = false;
   const active = new Set<Promise<void>>();
   const controllers = new Map<string, Set<AbortController>>();
 
@@ -121,21 +126,22 @@ export function createWorkflowWorker(options: {
       (initialSnapshot?.run.steering as { events?: unknown[] } | undefined)
         ?.events?.length ?? 0;
     const controlWatcher = setInterval(() => {
-      void options.runtime.snapshot(runId).then((current) => {
+      // One narrow control-row read replaces the old four-query snapshot poll.
+      void options.runtime.control(runId).then((current) => {
         const steering =
-          (current?.run.steering as { events?: unknown[] } | undefined)?.events
+          (current?.steering as { events?: unknown[] } | undefined)?.events
             ?.length ?? 0;
         if (
           !current ||
-          current.run.abortRequested ||
-          current.run.pauseRequested ||
+          current.abortRequested ||
+          current.pauseRequested ||
           steering > initialSteering
         )
           controller.abort(
             "Workflow control changed while the stage was running.",
           );
       });
-    }, 250);
+    }, 1_250);
     controlWatcher.unref?.();
     try {
       const snapshot = await options.runtime.snapshot(runId);
@@ -156,17 +162,38 @@ export function createWorkflowWorker(options: {
         throw new Error(
           "Worker result was not produced by the claimed session.",
         );
-      const reviewerSessionId = sessionId();
-      if (reviewerSessionId === workerSessionId)
-        throw new Error("Reviewer session id was not fresh.");
-      const verification = await options.executor.review({
-        runId,
-        stage: started,
-        snapshot,
-        candidate,
-        sessionId: reviewerSessionId,
-        signal: controller.signal,
-      });
+      const reviewAttempts = Math.max(1, options.reviewAttempts ?? 2);
+      let reviewerSessionId = "";
+      let verification:
+        | Awaited<ReturnType<WorkflowExecutor["review"]>>
+        | undefined;
+      let reviewError: unknown;
+      for (let attempt = 0; attempt < reviewAttempts; attempt += 1) {
+        reviewerSessionId = sessionId();
+        if (reviewerSessionId === workerSessionId)
+          throw new Error("Reviewer session id was not fresh.");
+        try {
+          verification = await options.executor.review({
+            runId,
+            stage: started,
+            snapshot,
+            candidate,
+            sessionId: reviewerSessionId,
+            signal: controller.signal,
+          });
+          break;
+        } catch (error) {
+          reviewError = error;
+          if (attempt + 1 < reviewAttempts)
+            await options.runtime.recordReviewRetry(
+              runId,
+              stage.stageId,
+              reviewerSessionId,
+              error,
+            );
+        }
+      }
+      if (!verification) throw reviewError;
       if (!verification.accepted)
         throw new Error(
           `Independent verification rejected the candidate: ${verification.summary}`,
@@ -219,6 +246,12 @@ export function createWorkflowWorker(options: {
   return {
     async runOnce() {
       if (draining) return { claimed: false, stages: 0 };
+      if (!swept && "sweep" in options.executor && options.executor.sweep) {
+        await options.executor.sweep(
+          new Set(await options.runtime.activeRunIds()),
+        );
+        swept = true;
+      }
       const run = await options.runtime.claim(options.workerId, leaseMs);
       if (!run) return { claimed: false, stages: 0 };
       let renewing = false;
@@ -250,12 +283,32 @@ export function createWorkflowWorker(options: {
         return task;
       });
       await Promise.all(tasks).finally(() => clearInterval(heartbeat));
+      const completed = await options.runtime.snapshot(run.id);
+      if (
+        completed &&
+        ["awaiting_approval", "succeeded", "failed", "aborted"].includes(
+          completed.run.status,
+        )
+      ) {
+        if ("cleanup" in options.executor)
+          await options.executor.cleanup?.(run.id);
+      }
       return { claimed: true, stages: tasks.length, runId: run.id };
     },
     async drain() {
       draining = true;
       if ("interrupt" in options.executor) await options.executor.interrupt();
       await Promise.allSettled(active);
+    },
+    async worktreeStats() {
+      return "worktreeStats" in options.executor &&
+        options.executor.worktreeStats
+        ? options.executor.worktreeStats()
+        : { active: 0, diskBytes: 0 };
+    },
+    async cleanup(runId: string) {
+      if ("cleanup" in options.executor)
+        await options.executor.cleanup?.(runId);
     },
   };
 }

@@ -89,6 +89,7 @@ export function createSoftwareFactoryStore(
         objective: string;
         trigger: string;
         minimumQuality: number;
+        launchMetadata?: Record<string, unknown>;
       },
     ) {
       const candidates = await database
@@ -114,6 +115,7 @@ export function createSoftwareFactoryStore(
           tier: input.tier,
           objective: input.objective,
           trigger: input.trigger,
+          launchMetadata: input.launchMetadata ?? {},
           selectedModel: decision.model,
           selectedHarness: decision.harness,
           createdBy: actorId,

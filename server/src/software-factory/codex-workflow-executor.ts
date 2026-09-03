@@ -3,6 +3,7 @@ import {
   mkdir,
   readdir,
   readFile,
+  stat,
   symlink,
   writeFile,
 } from "node:fs/promises";
@@ -37,6 +38,35 @@ async function command(args: string[], cwd: string, signal?: AbortSignal) {
   return { stdout, exitCode };
 }
 
+const retentionMs = (
+  value = process.env.SOFTWARE_FACTORY_WORKTREE_RETENTION,
+) => {
+  if (!value) return 24 * 60 * 60 * 1_000;
+  const match = value.trim().match(/^(\d+)(ms|s|m|h|d)?$/);
+  if (!match) throw new Error("Invalid SOFTWARE_FACTORY_WORKTREE_RETENTION.");
+  const unit = match[2] ?? "ms";
+  const multiplier = {
+    ms: 1,
+    s: 1_000,
+    m: 60_000,
+    h: 3_600_000,
+    d: 86_400_000,
+  }[unit];
+  return Number(match[1]) * (multiplier ?? 1);
+};
+
+async function directoryBytes(directory: string): Promise<number> {
+  let total = 0;
+  for (const entry of await readdir(directory, { withFileTypes: true }).catch(
+    () => [],
+  )) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) total += await directoryBytes(path);
+    else if (entry.isFile()) total += (await stat(path)).size;
+  }
+  return total;
+}
+
 const RESULT_SCHEMA = {
   type: "object",
   properties: {
@@ -62,6 +92,34 @@ function parseJsonPayload(value: string): Record<string, unknown> {
   const trimmed = value.trim();
   const unfenced = trimmed.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i)?.[1];
   return JSON.parse(unfenced ?? trimmed) as Record<string, unknown>;
+}
+
+export function focusedTestsFromChangedPaths(
+  changedPaths: string[],
+  repositoryPaths: string[],
+) {
+  const available = new Set(repositoryPaths);
+  const results = new Set<string>();
+  for (const path of changedPaths) {
+    if (/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(path) && available.has(path)) {
+      results.add(path);
+      continue;
+    }
+    const match = path.match(/^(.*)\.([cm]?[jt]sx?)$/);
+    if (!match) continue;
+    const stem = match[1] ?? "";
+    const extension = match[2] ?? "ts";
+    for (const candidate of [
+      `${stem}.test.${extension}`,
+      `${stem}.spec.${extension}`,
+      path.startsWith("server/src/")
+        ? `server/tests/${stem.slice("server/src/".length)}.test.${extension}`
+        : "",
+    ]) {
+      if (candidate && available.has(candidate)) results.add(candidate);
+    }
+  }
+  return [...results].sort();
 }
 
 export async function persistReviewMaterial(
@@ -107,10 +165,12 @@ export function createCodexWorkflowExecutor(
     options.workspaceRoot ??
       join(dirname(root), ".openbot-workflows", basename(root)),
   );
+  const worktreeRoot = join(workspaces, "worktrees");
+  const evidenceRoot = join(workspaces, "evidence");
 
   async function workspace(runId: string) {
-    const directory = join(workspaces, runId);
-    await mkdir(workspaces, { recursive: true });
+    const directory = join(worktreeRoot, runId);
+    await mkdir(worktreeRoot, { recursive: true });
     try {
       await readFile(join(directory, ".git"));
     } catch {
@@ -153,8 +213,24 @@ export function createCodexWorkflowExecutor(
     return directory;
   }
 
+  const durableEvidence = (runId: string) => join(evidenceRoot, runId);
+
+  async function removeWorktree(runId: string) {
+    const directory = join(worktreeRoot, runId);
+    if (!directory.startsWith(`${worktreeRoot}/`))
+      throw new Error("Refusing to remove an unresolved workflow worktree.");
+    try {
+      await access(directory);
+    } catch {
+      return;
+    }
+    await command(["git", "worktree", "remove", "--force", directory], root);
+    await command(["git", "worktree", "prune"], root);
+  }
+
   async function runCheck(
     cwd: string,
+    evidenceDirectory: string,
     check: ReturnType<typeof stageCheckSchema.parse>,
     sessionId: string,
     signal: AbortSignal,
@@ -200,7 +276,7 @@ export function createCodexWorkflowExecutor(
     };
     const content = JSON.stringify({ kind: "runtime-check", ...result });
     const material = await persistReviewMaterial(
-      cwd,
+      evidenceDirectory,
       `${sessionId}.check`,
       content,
     );
@@ -241,13 +317,17 @@ export function createCodexWorkflowExecutor(
     if (harness === "codex") {
       const permissionArgs =
         sandbox === "workspace-write"
-          ? ["--approve-for-me"]
+          ? ["--sandbox", "workspace-write"]
           : ["--sandbox", "read-only"];
       await command(
         [
           options.binary ?? "codex",
           "exec",
           "--ephemeral",
+          "--config",
+          "sandbox_workspace_write.exclude_tmpdir_env_var=true",
+          "--config",
+          "sandbox_workspace_write.exclude_slash_tmp=true",
           ...permissionArgs,
           "--model",
           model,
@@ -265,28 +345,49 @@ export function createCodexWorkflowExecutor(
     const response = await command(
       [
         options.binary ?? "claude",
+        "--restricted",
         "-p",
         `${prompt}\nReturn only JSON matching this schema: ${JSON.stringify(schema)}`,
         "--output-format",
         "json",
+        "--json-schema",
+        JSON.stringify(schema),
         "--model",
         model,
         "--permission-mode",
         sandbox === "workspace-write" ? "acceptEdits" : "plan",
+        "--permission-prompts",
+        "none",
+        "--allowedTools",
+        sandbox === "workspace-write"
+          ? "Read,Edit,Write,Glob,Grep"
+          : "Read,Glob,Grep",
+        "--disallowedTools",
+        "Bash,WebFetch,WebSearch",
       ],
       cwd,
       signal,
     );
-    const envelope = JSON.parse(response.stdout) as { result?: unknown };
-    const payload =
-      typeof envelope.result === "string" ? envelope.result : response.stdout;
-    return parseJsonPayload(payload);
+    const envelope = JSON.parse(response.stdout) as {
+      result?: unknown;
+      structured_output?: unknown;
+    };
+    if (
+      envelope.structured_output &&
+      typeof envelope.structured_output === "object" &&
+      !Array.isArray(envelope.structured_output)
+    )
+      return envelope.structured_output as Record<string, unknown>;
+    throw new Error(
+      "Claude did not return CLI-validated structured_output; unvalidated result text is refused.",
+    );
   }
 
   return {
     harness,
     async run({ runId, stage, snapshot, sessionId, signal }) {
       const cwd = await workspace(runId);
+      const evidenceDirectory = durableEvidence(runId);
       const model = stage.selectedModel;
       if (!model || stage.selectedHarness !== harness)
         throw new Error(
@@ -369,12 +470,48 @@ export function createCodexWorkflowExecutor(
             command(["git", "diff", "--binary", "--no-ext-diff"], cwd),
           ),
       ]);
+      const changedPaths = (
+        await command(["git", "diff", "--name-only", "HEAD"], cwd)
+      ).stdout
+        .split("\n")
+        .filter(Boolean);
+      const repositoryPaths = (
+        await command(
+          ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+          cwd,
+        )
+      ).stdout
+        .split("\n")
+        .filter(Boolean);
+      const focusedTests = focusedTestsFromChangedPaths(
+        changedPaths,
+        repositoryPaths,
+      );
       const checks = stageCheckSchema
         .array()
-        .parse((stage.checks as { items?: unknown }).items ?? []);
+        .parse((stage.checks as { items?: unknown }).items ?? [])
+        .map((check) => ({
+          ...check,
+          command: check.command.flatMap((argument) =>
+            argument === "__OPENBOT_CHANGED_TESTS__" ? focusedTests : argument,
+          ),
+        }))
+        .filter(
+          (check) =>
+            !check.command.includes("__OPENBOT_CHANGED_TESTS__") &&
+            !(
+              check.id === "factory-focused-tests" && focusedTests.length === 0
+            ),
+        );
       const executedChecks = [];
       for (const check of checks) {
-        const executed = await runCheck(cwd, check, sessionId, signal);
+        const executed = await runCheck(
+          cwd,
+          evidenceDirectory,
+          check,
+          sessionId,
+          signal,
+        );
         executedChecks.push(executed);
         if (check.required && executed.result.exitCode !== 0) {
           const failedArtifacts = executedChecks.map(({ artifact }) => ({
@@ -391,7 +528,7 @@ export function createCodexWorkflowExecutor(
       }
       const content = JSON.stringify({ result, diff: diff.stdout });
       const reviewMaterial = await persistReviewMaterial(
-        cwd,
+        evidenceDirectory,
         sessionId,
         content,
       );
@@ -463,32 +600,33 @@ export function createCodexWorkflowExecutor(
         [
           "Independently review this managed-agent stage from fresh context.",
           `Objective: ${stage.objective}`,
-          `Candidate summary: ${candidate.summary}`,
           `Runtime-scoped candidate diff (runtime dependency/evidence paths excluded): ${scopedDiff.stdout || "empty"}`,
           `Artifacts: ${JSON.stringify(
-            candidate.artifacts.map(
-              ({
-                kind,
-                uri,
-                checksum,
-                revision,
-                command,
-                exitCode,
-                metadata,
-              }) => ({
-                kind,
-                uri,
-                checksum,
-                revision,
-                command,
-                exitCode,
-                reviewMaterialPath: metadata?.reviewMaterialPath,
-              }),
-            ),
+            candidate.artifacts
+              .filter(({ kind }) => kind === "runtime-check")
+              .map(
+                ({
+                  kind,
+                  uri,
+                  checksum,
+                  revision,
+                  command,
+                  exitCode,
+                  metadata,
+                }) => ({
+                  kind,
+                  uri,
+                  checksum,
+                  revision,
+                  command,
+                  exitCode,
+                  reviewMaterialPath: metadata?.reviewMaterialPath,
+                }),
+              ),
           )}`,
           "Before accepting, run `shasum -a 256` on each exact reviewMaterialPath and require it to equal the supplied checksum. The durable workflow URI is committed only after your verdict.",
           "Ignore the runtime-only node_modules symlink and .openbot-evidence directory when assessing the candidate diff.",
-          "Only artifacts with kind runtime-check are authoritative executed gates. Checks named inside the model result are explicitly model-reported and must not be treated as required runtime evidence.",
+          "Only the supplied runtime-check artifacts are authoritative executed gates. The worker's summary and model-reported checks are deliberately withheld and must not influence this review.",
           "Inspect the supplied runtime-scoped diff and independently validate the runtime-check artifacts. Do not rerun commands that require writes from this read-only reviewer. Reject on missing evidence, weakened tests, unverifiable runtime-check artifacts, or unmet stage objective.",
           "Return JSON with accepted, summary, and exact checks you independently ran.",
         ].join("\n"),
@@ -508,6 +646,23 @@ export function createCodexWorkflowExecutor(
     },
     async interrupt() {
       // Active subprocesses are bound to the worker-owned AbortSignal and receive SIGTERM there.
+    },
+    cleanup: removeWorktree,
+    async sweep(protectedRunIds) {
+      const cutoff = Date.now() - retentionMs();
+      for (const entry of await readdir(worktreeRoot, {
+        withFileTypes: true,
+      }).catch(() => [])) {
+        if (!entry.isDirectory() || protectedRunIds.has(entry.name)) continue;
+        const details = await stat(join(worktreeRoot, entry.name));
+        if (details.mtimeMs <= cutoff) await removeWorktree(entry.name);
+      }
+    },
+    async worktreeStats() {
+      const active = (
+        await readdir(worktreeRoot, { withFileTypes: true }).catch(() => [])
+      ).filter((entry) => entry.isDirectory()).length;
+      return { active, diskBytes: await directoryBytes(worktreeRoot) };
     },
   };
 }

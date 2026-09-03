@@ -408,6 +408,8 @@ export const auditEventTypes = [
   "production.deployment_observed",
   /** An administrator resolved, dismissed, or reopened a production issue. */
   "production.issue_status_changed",
+  /** A human operator changed a durable software-factory workflow. */
+  "workflow.control_applied",
 ] as const;
 
 export type AuditEventType = (typeof auditEventTypes)[number];

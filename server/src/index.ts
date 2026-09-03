@@ -1469,6 +1469,9 @@ const app = createApp(
     webhooks: webhookReconciler,
     shadows: shadowEvaluator,
     workflows: workflowRuntime,
+    auditStore: bootAuditStore,
+    worktreeStats: () => workflowWorker.worktreeStats(),
+    cleanupWorktree: (runId) => workflowWorker.cleanup(runId),
     provenance: { ...runtimeProvenance, workerId: workflowWorkerId },
   },
 );

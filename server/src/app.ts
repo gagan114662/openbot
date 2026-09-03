@@ -51,8 +51,8 @@ import { createProductionEngineerRoutes } from "./production-engineer/routes";
 import type { ProductionEngineerStore } from "./production-engineer/store";
 import type { ContextGraph } from "./software-factory/context-graph";
 import { createSoftwareFactoryRoutes } from "./software-factory/routes";
-import type { SoftwareFactoryStore } from "./software-factory/store";
 import type { ShadowEvaluator } from "./software-factory/shadow-evaluator";
+import type { SoftwareFactoryStore } from "./software-factory/store";
 import type { WorkflowRuntime } from "./software-factory/workflow-runtime";
 import type { WebhookReconciler } from "./webhooks/reconciler";
 
@@ -250,6 +250,9 @@ export function createApp(
     webhooks?: WebhookReconciler;
     shadows?: ShadowEvaluator;
     workflows?: WorkflowRuntime;
+    auditStore?: AuditStore;
+    worktreeStats?: () => Promise<{ active: number; diskBytes: number }>;
+    cleanupWorktree?: (runId: string) => Promise<void>;
     provenance?: {
       revision: string;
       branch: string;
@@ -995,6 +998,9 @@ export function createApp(
         softwareFactory.shadows,
         softwareFactory.workflows,
         softwareFactory.provenance,
+        softwareFactory.auditStore,
+        softwareFactory.worktreeStats,
+        softwareFactory.cleanupWorktree,
       ),
     );
   }

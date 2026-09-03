@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   PageEmpty,
   PageSection,
@@ -12,6 +12,7 @@ import {
   applyProductionMonitorTuning,
   controlWorkflow,
   createManagedJob,
+  decideWorkflowGate,
   draftProductionFix,
   fetchProductionEngineer,
   fetchSoftwareFactory,
@@ -34,8 +35,13 @@ function ProductionEngineerPage() {
   const [investigationOutcome, setInvestigationOutcome] = useState("");
   const [investigationApproved, setInvestigationApproved] = useState(false);
   const [workflowSteering, setWorkflowSteering] = useState("");
+  const [gateFeedback, setGateFeedback] = useState<Record<string, string>>({});
+  const [streamState, setStreamState] = useState("connecting");
   const [jobObjective, setJobObjective] = useState("");
   const [jobContextKeys, setJobContextKeys] = useState("");
+  const [jobObservablePath, setJobObservablePath] = useState("");
+  const [jobExpectedContent, setJobExpectedContent] = useState("");
+  const [jobMaximumAttempts, setJobMaximumAttempts] = useState(3);
   const [jobKind, setJobKind] = useState<
     "pull-request-review" | "ci-repair" | "bug-triage" | "visual-delivery"
   >("pull-request-review");
@@ -50,8 +56,28 @@ function ProductionEngineerPage() {
   const factory = useQuery({
     queryKey: ["software-factory"],
     queryFn: fetchSoftwareFactory,
-    refetchInterval: 5_000,
   });
+  const liveRun = factory.data?.workflows.find(({ run }) =>
+    ["queued", "running", "pausing", "paused", "awaiting_approval"].includes(
+      run.status,
+    ),
+  )?.run.id;
+  useEffect(() => {
+    if (!liveRun) {
+      setStreamState("idle");
+      return;
+    }
+    const events = new EventSource(
+      `/api/software-factory/workflows/${encodeURIComponent(liveRun)}/events`,
+    );
+    events.addEventListener("open", () => setStreamState("live"));
+    events.addEventListener("snapshot", () => {
+      setStreamState("live");
+      void queryClient.invalidateQueries({ queryKey: ["software-factory"] });
+    });
+    events.addEventListener("error", () => setStreamState("reconnecting"));
+    return () => events.close();
+  }, [liveRun, queryClient]);
   const workflowControl = useMutation({
     mutationFn: controlWorkflow,
     onSuccess: () => {
@@ -59,11 +85,18 @@ function ProductionEngineerPage() {
       return queryClient.invalidateQueries({ queryKey: ["software-factory"] });
     },
   });
+  const gateControl = useMutation({
+    mutationFn: decideWorkflowGate,
+    onSuccess: () =>
+      queryClient.invalidateQueries({ queryKey: ["software-factory"] }),
+  });
   const createJob = useMutation({
     mutationFn: createManagedJob,
     onSuccess: () => {
       setJobObjective("");
       setJobContextKeys("");
+      setJobObservablePath("");
+      setJobExpectedContent("");
       return queryClient.invalidateQueries({ queryKey: ["software-factory"] });
     },
   });
@@ -131,6 +164,14 @@ function ProductionEngineerPage() {
               Worker {factory.data.provenance.workerId}
             </p>
           ) : null}
+          <p
+            className="text-muted-foreground text-sm"
+            data-testid="worktree-usage"
+          >
+            Active worktrees {factory.data?.worktrees.active ?? 0} · disk{" "}
+            {Math.ceil((factory.data?.worktrees.diskBytes ?? 0) / 1024 / 1024)}{" "}
+            MiB
+          </p>
         </div>
         <p className="mb-3 text-muted-foreground text-sm">
           Benchmark-routed managed agents use a judging orchestrator, bounded
@@ -278,19 +319,54 @@ function ProductionEngineerPage() {
             value={jobContextKeys}
             onChange={(event) => setJobContextKeys(event.target.value)}
           />
+          <Input
+            aria-label="Observable output path"
+            className="md:col-start-2"
+            placeholder="Observable output path (for example PROOF.md)"
+            value={jobObservablePath}
+            onChange={(event) => setJobObservablePath(event.target.value)}
+          />
+          <Input
+            aria-label="Expected exact output"
+            className="md:col-start-2"
+            placeholder="Expected exact file content"
+            value={jobExpectedContent}
+            onChange={(event) => setJobExpectedContent(event.target.value)}
+          />
+          <Input
+            aria-label="Maximum repair attempts"
+            className="md:col-start-2"
+            max={10}
+            min={1}
+            type="number"
+            value={jobMaximumAttempts}
+            onChange={(event) =>
+              setJobMaximumAttempts(
+                Math.max(1, Math.min(10, Number(event.target.value) || 1)),
+              )
+            }
+          />
           <Button
             className="md:col-start-3 md:row-start-1"
-            disabled={!jobObjective.trim() || createJob.isPending}
+            disabled={
+              !jobObjective.trim() ||
+              !jobObservablePath.trim() ||
+              createJob.isPending
+            }
             onClick={() =>
               createJob.mutate({
                 kind: jobKind,
                 objective: jobObjective,
-                maximumAttempts: 3,
+                maximumAttempts: jobMaximumAttempts,
                 concurrencyLimit: 1,
                 requiredContext: jobContextKeys
                   .split(",")
                   .map((key) => key.trim())
                   .filter(Boolean),
+                observableChange: {
+                  path: jobObservablePath,
+                  expectedContent: jobExpectedContent,
+                },
               })
             }
           >
@@ -304,6 +380,13 @@ function ProductionEngineerPage() {
         ) : null}
       </PageSection>
       <PageSection title="Inspectable workflow runs">
+        <p
+          className="mb-2 text-muted-foreground text-xs"
+          data-testid="workflow-stream-state"
+        >
+          Durable event stream: {streamState}. Steering is delivered by an
+          explicit interrupt and restart at the next model turn.
+        </p>
         {(factory.data?.workflows.length ?? 0) === 0 ? (
           <PageEmpty>No durable workflow runs exist yet.</PageEmpty>
         ) : (
@@ -394,9 +477,11 @@ function ProductionEngineerPage() {
                         Causal evidence integrity:{" "}
                         {evidence.verified
                           ? "VERIFIED"
-                          : evidence.terminal
-                            ? "FAILED"
-                            : "PENDING"}
+                          : evidence.readyForApproval
+                            ? "READY FOR APPROVAL"
+                            : evidence.terminal
+                              ? "FAILED"
+                              : "PENDING"}
                       </span>
                       <a
                         className="underline"
@@ -408,13 +493,19 @@ function ProductionEngineerPage() {
                       </a>
                     </div>
                     <ul className="mt-1 grid gap-x-3 text-xs md:grid-cols-2">
-                      {Object.entries(evidence.checks).map(
-                        ([check, passed]) => (
+                      {Object.entries(evidence.checks)
+                        .filter(
+                          ([check, passed]) =>
+                            check !== "humanApproval" || passed,
+                        )
+                        .map(([check, passed]) => (
                           <li key={check}>
                             {passed ? "✓" : "✗"} {check}
                           </li>
-                        ),
-                      )}
+                        ))}
+                      {evidence.readyForApproval ? (
+                        <li>○ human approval pending</li>
+                      ) : null}
                     </ul>
                   </div>
                   <details className="mt-3 text-sm">
@@ -440,6 +531,73 @@ function ProductionEngineerPage() {
                         className="rounded-md bg-muted p-2 text-sm"
                         key={stage.stageId}
                       >
+                        {stage.checks?.gate ? (
+                          <div
+                            className="mb-2 rounded border border-amber-500/40 p-2"
+                            data-testid={`stage-gate-${run.id}-${stage.stageId}`}
+                          >
+                            <p className="font-medium">
+                              Human gate: {stage.checks.gate.prompt}
+                            </p>
+                            <p className="text-xs text-muted-foreground">
+                              Status: {stage.checks.gate.status}
+                            </p>
+                            {stage.status === "awaiting_approval" ? (
+                              <div className="mt-2 flex flex-wrap gap-2">
+                                <Input
+                                  aria-label={`Gate feedback for ${stage.stageId}`}
+                                  placeholder="Required feedback when rejecting"
+                                  value={
+                                    gateFeedback[
+                                      `${run.id}:${stage.stageId}`
+                                    ] ?? ""
+                                  }
+                                  onChange={(event) =>
+                                    setGateFeedback((current) => ({
+                                      ...current,
+                                      [`${run.id}:${stage.stageId}`]:
+                                        event.target.value,
+                                    }))
+                                  }
+                                />
+                                <Button
+                                  size="sm"
+                                  onClick={() =>
+                                    gateControl.mutate({
+                                      runId: run.id,
+                                      stageId: stage.stageId,
+                                      decision: "approve",
+                                    })
+                                  }
+                                >
+                                  Approve stage
+                                </Button>
+                                <Button
+                                  size="sm"
+                                  variant="destructive"
+                                  disabled={
+                                    !gateFeedback[
+                                      `${run.id}:${stage.stageId}`
+                                    ]?.trim()
+                                  }
+                                  onClick={() =>
+                                    gateControl.mutate({
+                                      runId: run.id,
+                                      stageId: stage.stageId,
+                                      decision: "reject",
+                                      feedback:
+                                        gateFeedback[
+                                          `${run.id}:${stage.stageId}`
+                                        ],
+                                    })
+                                  }
+                                >
+                                  Reject with feedback
+                                </Button>
+                              </div>
+                            ) : null}
+                          </div>
+                        ) : null}
                         <span className="font-medium">{stage.stageId}</span> ·{" "}
                         {stage.status} · attempt {stage.attempts}/
                         {run.maximumAttempts}

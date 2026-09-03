@@ -86,6 +86,7 @@ export async function fetchProductionEngineer() {
 }
 
 export type SoftwareFactoryDashboard = {
+  worktrees: { active: number; diskBytes: number };
   provenance: null | {
     revision: string;
     branch: string;
@@ -151,6 +152,7 @@ export type SoftwareFactoryDashboard = {
   workflows: Array<{
     evidence: {
       terminal: boolean;
+      readyForApproval: boolean;
       verified: boolean;
       checks: Record<string, boolean>;
     };
@@ -180,6 +182,16 @@ export type SoftwareFactoryDashboard = {
         accepted?: boolean;
         summary?: string;
         checks?: string[];
+      };
+      checks: {
+        items?: unknown[];
+        gate?: {
+          kind: "human";
+          prompt: string;
+          roles?: string[];
+          status: "pending" | "approved";
+          feedback?: string;
+        };
       };
       lastError: string | null;
     }>;
@@ -247,6 +259,7 @@ export async function createManagedJob(input: {
   maximumAttempts: number;
   concurrencyLimit: number;
   requiredContext: string[];
+  observableChange: { path: string; expectedContent: string };
 }) {
   const response = await client("/api/software-factory/jobs", {
     method: "POST",
@@ -272,6 +285,20 @@ export async function controlWorkflow(input: {
       body: input.instruction ? { instruction: input.instruction } : {},
     },
   );
+  return response.json();
+}
+
+export async function decideWorkflowGate(input: {
+  runId: string;
+  stageId: string;
+  decision: "approve" | "reject";
+  feedback?: string;
+}) {
+  const response = await client(
+    `/api/software-factory/workflows/${encodeURIComponent(input.runId)}/stages/${encodeURIComponent(input.stageId)}/gate`,
+    { method: "POST", body: input },
+  );
+  if (!response.ok) throw new Error(await response.text());
   return response.json();
 }
 

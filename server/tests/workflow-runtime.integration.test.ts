@@ -1,13 +1,18 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { eq } from "drizzle-orm";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { eq, inArray } from "drizzle-orm";
 import { createDatabase } from "../src/db/client";
 import {
+  auditEvents,
   factoryManagedJobs,
   factoryModelBenchmarks,
   factoryWorkflowArtifacts,
   factoryWorkflowRuns,
   factoryWorkflowStages,
 } from "../src/db/schema";
+import { createClaudeWorkflowExecutor } from "../src/software-factory/codex-workflow-executor";
 import { createSoftwareFactoryStore } from "../src/software-factory/store";
 import {
   artifactChecksum,
@@ -49,6 +54,180 @@ afterAll(async () => {
 let runId = crypto.randomUUID();
 
 describe("durable workflow runtime", () => {
+  test("commits exactly one privacy-safe audit row with each durable control transition", async () => {
+    await store.benchmark({
+      model: "audit-model",
+      task: "ci-repair",
+      quality: 0.9,
+      successfulOutcomes: 1,
+      attemptedOutcomes: 1,
+      totalCostMicros: 0,
+      enabled: true,
+    });
+    const queued = await store.queueJob("audit-admin", {
+      kind: "ci-repair",
+      tier: "managed",
+      objective: "audit every control transition",
+      trigger: "control-audit-proof",
+      minimumQuality: 0.8,
+    });
+    const controlled = await runtime.create({
+      jobId: queued.job.id,
+      maximumAttempts: 1,
+      concurrencyLimit: 1,
+      stages: [
+        {
+          id: "control",
+          objective: "remain controllable",
+          requiredContext: [],
+          dependsOn: [],
+        },
+      ],
+    });
+    await runtime.requestPause(controlled.id, {
+      actorId: "audit-admin",
+      fromStatus: "queued",
+    });
+    await runtime.resume(controlled.id, {
+      actorId: "audit-admin",
+      fromStatus: "pausing",
+    });
+    const instruction = "Use the bounded repair path";
+    const instructionHash = new Bun.CryptoHasher("sha256")
+      .update(instruction)
+      .digest("hex");
+    await runtime.steer(controlled.id, "audit-admin", instruction, {
+      fromStatus: "queued",
+      instructionHash,
+    });
+    await runtime.requestAbort(controlled.id, {
+      actorId: "audit-admin",
+      fromStatus: "queued",
+    });
+
+    const approvalJob = await store.queueJob("audit-admin", {
+      kind: "ci-repair",
+      tier: "managed",
+      objective: "audit approval",
+      trigger: "control-audit-proof",
+      minimumQuality: 0.8,
+    });
+    const approval = await runtime.create({
+      jobId: approvalJob.job.id,
+      maximumAttempts: 1,
+      concurrencyLimit: 1,
+      stages: [
+        {
+          id: "approved",
+          objective: "be approved",
+          requiredContext: [],
+          dependsOn: [],
+        },
+      ],
+    });
+    await database
+      .update(factoryWorkflowRuns)
+      .set({ status: "awaiting_approval" })
+      .where(eq(factoryWorkflowRuns.id, approval.id));
+    await runtime.approve(approval.id, "audit-admin", {
+      fromStatus: "awaiting_approval",
+    });
+
+    const events = await database
+      .select()
+      .from(auditEvents)
+      .where(inArray(auditEvents.targetId, [controlled.id, approval.id]));
+    expect(events).toHaveLength(5);
+    expect(
+      events.map((event) => ({
+        actor: event.actorUserId,
+        runId: event.targetId,
+        action: (event.payload as { action: string }).action,
+        from: (event.payload as { fromStatus: string }).fromStatus,
+        to: (event.payload as { toStatus: string }).toStatus,
+      })),
+    ).toEqual(
+      expect.arrayContaining([
+        {
+          actor: "audit-admin",
+          runId: controlled.id,
+          action: "pause",
+          from: "queued",
+          to: "pausing",
+        },
+        {
+          actor: "audit-admin",
+          runId: controlled.id,
+          action: "resume",
+          from: "pausing",
+          to: "queued",
+        },
+        {
+          actor: "audit-admin",
+          runId: controlled.id,
+          action: "steer",
+          from: "queued",
+          to: "queued",
+        },
+        {
+          actor: "audit-admin",
+          runId: controlled.id,
+          action: "abort",
+          from: "queued",
+          to: "aborted",
+        },
+        {
+          actor: "audit-admin",
+          runId: approval.id,
+          action: "approve",
+          from: "awaiting_approval",
+          to: "succeeded",
+        },
+      ]),
+    );
+    const steer = events.find(
+      (event) => (event.payload as { action?: string }).action === "steer",
+    );
+    expect(steer?.payload).toMatchObject({ instructionHash });
+    expect(JSON.stringify(steer?.payload)).not.toContain(instruction);
+
+    const rollbackJob = await store.queueJob("audit-admin", {
+      kind: "ci-repair",
+      tier: "managed",
+      objective: "prove audit and control are atomic",
+      trigger: "control-audit-rollback-proof",
+      minimumQuality: 0.8,
+    });
+    const rollbackRuntime = createWorkflowRuntime(database, tenantId, {
+      failControlAudit: async () => {
+        throw new Error("injected audit failure");
+      },
+    });
+    const rollbackRun = await rollbackRuntime.create({
+      jobId: rollbackJob.job.id,
+      maximumAttempts: 1,
+      concurrencyLimit: 1,
+      stages: [
+        {
+          id: "atomic",
+          objective: "remain queued when audit fails",
+          requiredContext: [],
+          dependsOn: [],
+        },
+      ],
+    });
+    await expect(
+      rollbackRuntime.requestPause(rollbackRun.id, {
+        actorId: "audit-admin",
+        fromStatus: "queued",
+      }),
+    ).rejects.toThrow("injected audit failure");
+    expect((await rollbackRuntime.snapshot(rollbackRun.id))?.run.status).toBe(
+      "queued",
+    );
+    await runtime.requestAbort(rollbackRun.id);
+  });
+
   test("repairs within budget, enforces dependencies, pauses, resumes, and requires approval", async () => {
     await store.benchmark({
       model: "worker-small",
@@ -270,6 +449,316 @@ describe("durable workflow runtime", () => {
     });
     expect(finished?.artifacts[0]?.content).toBe("candidate two");
     await worker.drain();
+  });
+
+  test("a malformed reviewer reply is retried without burning the worker attempt", async () => {
+    const queued = await store.queueJob("admin", {
+      kind: "ci-repair",
+      tier: "managed",
+      objective: "keep a valid candidate while retrying its reviewer",
+      trigger: "review-schema-retry",
+      minimumQuality: 0.8,
+    });
+    const run = await runtime.create({
+      jobId: queued.job.id,
+      maximumAttempts: 1,
+      concurrencyLimit: 1,
+      stages: [
+        {
+          id: "repair",
+          objective: "produce one candidate",
+          requiredContext: [],
+          dependsOn: [],
+        },
+      ],
+    });
+    let nextSession = 0;
+    let executions = 0;
+    let reviews = 0;
+    const reviewerSessions: string[] = [];
+    const worker = createWorkflowWorker({
+      runtime,
+      workerId: "review-schema-worker",
+      sessionId: () => `schema-session-${++nextSession}`,
+      executor: {
+        async execute({ sessionId }) {
+          executions += 1;
+          const content = "candidate retained across reviewer retry";
+          return {
+            sessionId,
+            summary: content,
+            artifacts: [
+              {
+                kind: "patch",
+                uri: `artifact://${run.id}/candidate`,
+                content,
+                checksum: artifactChecksum(content),
+                revision: "deadbeef",
+                producerSessionId: sessionId,
+              },
+            ],
+          };
+        },
+        async review({ sessionId }) {
+          reviewerSessions.push(sessionId);
+          reviews += 1;
+          if (reviews === 1)
+            throw new SyntaxError("Unexpected identifier Confirmed");
+          return {
+            accepted: true,
+            summary: "structured reviewer reply",
+            checks: ["schema"],
+          };
+        },
+      },
+    });
+
+    expect(await worker.runOnce()).toMatchObject({ claimed: true, stages: 1 });
+    const finished = await runtime.snapshot(run.id);
+    expect(executions).toBe(1);
+    expect(reviewerSessions).toEqual(["schema-session-2", "schema-session-3"]);
+    expect(finished?.stages[0]).toMatchObject({
+      status: "succeeded",
+      attempts: 1,
+      sessionId: "schema-session-1",
+      reviewerSessionId: "schema-session-3",
+    });
+    expect(finished?.artifacts).toHaveLength(1);
+    expect(finished?.events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          entity: "reviewer",
+          fromStatus: "malformed_output",
+          toStatus: "retrying",
+          detail: expect.objectContaining({
+            reviewerSessionId: "schema-session-2",
+            errorName: "SyntaxError",
+          }),
+        }),
+      ]),
+    );
+  });
+
+  test("a real Claude CLI contract retries malformed reviewer output while retaining attempt-one artifacts", async () => {
+    const repository = await mkdtemp(join(tmpdir(), "openbot-claude-retry-"));
+    const workspaceRoot = await mkdtemp(
+      join(tmpdir(), "openbot-claude-retry-workspaces-"),
+    );
+    const script = join(repository, "fake-claude");
+    const counter = join(repository, "review-count");
+    try {
+      const git = (...args: string[]) => {
+        const result = Bun.spawnSync(["git", ...args], { cwd: repository });
+        if (result.exitCode !== 0) throw new Error("git fixture failed");
+      };
+      git("init", "-q");
+      git("config", "user.email", "claude-proof@openbot.test");
+      git("config", "user.name", "Claude proof");
+      await writeFile(join(repository, "README.md"), "proof\n");
+      git("add", "README.md");
+      git("commit", "-qm", "fixture");
+      await writeFile(
+        script,
+        `#!/usr/bin/env bun
+const args = process.argv.slice(2);
+const prompt = args[args.indexOf("-p") + 1] ?? "";
+if (!args.includes("--json-schema")) process.exit(42);
+if (!prompt.includes("Independently review")) {
+  console.log(JSON.stringify({ structured_output: { summary: "attempt-one candidate", checks: ["self report"] } }));
+} else {
+  const count = Number(await Bun.file(${JSON.stringify(counter)}).text().catch(() => "0")) + 1;
+  await Bun.write(${JSON.stringify(counter)}, String(count));
+  console.log(JSON.stringify(count === 1
+    ? { result: "Confirmed without JSON" }
+    : { structured_output: { accepted: true, summary: "fresh review", checks: ["runtime evidence"] } }));
+}
+`,
+      );
+      await chmod(script, 0o700);
+      await store.benchmark({
+        harness: "claude",
+        model: "claude-contract",
+        task: "ci-repair",
+        quality: 1,
+        successfulOutcomes: 1,
+        attemptedOutcomes: 1,
+        totalCostMicros: 0,
+        enabled: true,
+      });
+      const queued = await store.queueJob("admin", {
+        kind: "ci-repair",
+        tier: "managed",
+        objective: "exercise the Claude structured-output retry",
+        trigger: "claude-cli-retry-proof",
+        minimumQuality: 0.8,
+      });
+      const run = await runtime.create({
+        jobId: queued.job.id,
+        maximumAttempts: 1,
+        concurrencyLimit: 1,
+        stages: [
+          {
+            id: "repair",
+            objective: "retain the first candidate",
+            requiredContext: [],
+            dependsOn: [],
+            checks: [
+              {
+                id: "diff-integrity",
+                command: ["git", "diff", "--check"],
+                timeoutMs: 10_000,
+                required: true,
+              },
+            ],
+          },
+        ],
+      });
+      const worker = createWorkflowWorker({
+        runtime,
+        workerId: "claude-cli-retry-worker",
+        sessionId: (() => {
+          let id = 0;
+          return () => `claude-cli-session-${++id}`;
+        })(),
+        executor: createClaudeWorkflowExecutor(repository, {
+          binary: script,
+          workspaceRoot,
+        }),
+      });
+      await worker.runOnce();
+      const snapshot = await runtime.snapshot(run.id);
+      expect(snapshot?.stages[0]).toMatchObject({
+        status: "succeeded",
+        attempts: 1,
+        sessionId: "claude-cli-session-1",
+        reviewerSessionId: "claude-cli-session-3",
+      });
+      expect(snapshot?.artifacts.map((artifact) => artifact.kind)).toEqual([
+        "codex-stage-result",
+        "runtime-check",
+      ]);
+      expect(snapshot?.events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            entity: "reviewer",
+            fromStatus: "malformed_output",
+            toStatus: "retrying",
+          }),
+        ]),
+      );
+    } finally {
+      await rm(repository, { recursive: true, force: true });
+      await rm(workspaceRoot, { recursive: true, force: true });
+    }
+  });
+
+  test("a human gate rejects its producer with feedback, then approves the repaired path", async () => {
+    const queued = await store.queueJob("admin", {
+      kind: "ci-repair",
+      tier: "managed",
+      objective: "prove stage-level human control",
+      trigger: "human-gate-proof",
+      minimumQuality: 0.8,
+    });
+    const run = await runtime.create({
+      jobId: queued.job.id,
+      maximumAttempts: 3,
+      concurrencyLimit: 2,
+      stages: [
+        {
+          id: "produce",
+          objective: "produce",
+          requiredContext: [],
+          dependsOn: [],
+        },
+        {
+          id: "release",
+          objective: "release",
+          requiredContext: [],
+          dependsOn: ["produce"],
+          gate: {
+            kind: "human",
+            prompt: "Approve the produced change",
+            roles: ["admin"],
+          },
+        },
+      ],
+    });
+    const complete = async (
+      stageId: string,
+      sessionId: string,
+      content: string,
+    ) => {
+      expect(
+        await runtime.startStage(run.id, stageId, sessionId),
+      ).not.toBeNull();
+      await runtime.completeStage(run.id, stageId, {
+        summary: content,
+        sessionId,
+        reviewerSessionId: `${sessionId}-reviewer`,
+        verification: {
+          accepted: true,
+          summary: "independently verified",
+          checks: ["checksum"],
+        },
+        artifacts: [
+          {
+            kind: "proof",
+            uri: `artifact://${stageId}/${sessionId}`,
+            content,
+            checksum: artifactChecksum(content),
+            revision: "deadbeef",
+            producerSessionId: sessionId,
+            exitCode: 0,
+            metadata: {},
+          },
+        ],
+      });
+    };
+
+    expect((await runtime.claim("gate-worker"))?.id).toBe(run.id);
+    await complete("produce", "producer-1", "first candidate");
+    expect(await runtime.readyStages(run.id)).toEqual([]);
+    expect(
+      (await runtime.snapshot(run.id))?.stages.find(
+        (stage) => stage.stageId === "release",
+      )?.status,
+    ).toBe("awaiting_approval");
+
+    await runtime.decideStageGate(
+      run.id,
+      "release",
+      "admin-1",
+      "reject",
+      "Add the missing rollback proof",
+    );
+    expect((await runtime.claim("gate-worker"))?.id).toBe(run.id);
+    expect(
+      (await runtime.readyStages(run.id)).map((stage) => stage.stageId),
+    ).toEqual(["produce"]);
+    await complete("produce", "producer-2", "candidate with rollback proof");
+    expect(await runtime.readyStages(run.id)).toEqual([]);
+    await runtime.decideStageGate(run.id, "release", "admin-1", "approve");
+    expect((await runtime.claim("gate-worker"))?.id).toBe(run.id);
+    expect(
+      (await runtime.readyStages(run.id)).map((stage) => stage.stageId),
+    ).toEqual(["release"]);
+    await complete("release", "release-1", "released");
+    const snapshot = await runtime.snapshot(run.id);
+    expect(
+      snapshot?.stages.find((stage) => stage.stageId === "produce")?.attempts,
+    ).toBe(2);
+    expect(
+      snapshot?.events
+        .filter((event) => event.entity === "human_gate")
+        .map((event) => event.toStatus),
+    ).toEqual([
+      "awaiting_approval",
+      "rejected",
+      "awaiting_approval",
+      "approved",
+    ]);
+    expect(snapshot?.run.status).toBe("awaiting_approval");
   });
 
   test("failed runtime checks persist evidence, skip review, and feed the bounded repair", async () => {

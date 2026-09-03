@@ -3,6 +3,7 @@ import { and, asc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Database } from "../db/client";
 import {
+  auditEvents,
   contextCompactionArtifacts,
   factoryManagedJobs,
   factoryWorkflowArtifacts,
@@ -31,6 +32,13 @@ export const stagePlanSchema = z
       requiredContext: z.array(z.string().trim().min(1).max(500)).max(50),
       dependsOn: z.array(z.string().trim().min(1).max(200)).max(50),
       checks: z.array(stageCheckSchema).max(20).default([]),
+      gate: z
+        .object({
+          kind: z.literal("human"),
+          prompt: z.string().trim().min(1).max(4_000),
+          roles: z.array(z.string().trim().min(1).max(100)).max(20).optional(),
+        })
+        .optional(),
     }),
   )
   .min(1)
@@ -65,6 +73,22 @@ export const stageResultSchema = z.object({
 
 const dependencyIds = (value: unknown) =>
   z.object({ ids: z.array(z.string()) }).parse(value).ids;
+
+const stageControl = (value: unknown) =>
+  z
+    .object({
+      items: z.array(stageCheckSchema).default([]),
+      gate: z
+        .object({
+          kind: z.literal("human"),
+          prompt: z.string(),
+          roles: z.array(z.string()).optional(),
+          status: z.enum(["pending", "approved"]).default("pending"),
+          feedback: z.string().optional(),
+        })
+        .optional(),
+    })
+    .parse(value);
 
 const assertDag = (stages: z.infer<typeof stagePlanSchema>) => {
   const ids = new Set(stages.map((stage) => stage.id));
@@ -160,21 +184,77 @@ export function verifyWorkflowEvidence(snapshot: {
     artifactsForSucceededStages: succeeded.every((stage) =>
       snapshot.artifacts.some((artifact) => artifact.stageId === stage.stageId),
     ),
-    humanApproval:
-      snapshot.run.status !== "succeeded" || Boolean(snapshot.run.approvedBy),
+    humanApproval: Boolean(snapshot.run.approvedBy),
   };
-  const terminal = ["awaiting_approval", "succeeded"].includes(
-    snapshot.run.status,
+  const terminal =
+    snapshot.run.status === "succeeded" ||
+    (snapshot.run.status === "awaiting_approval" && checks.allStagesSucceeded);
+  const machineChecksPassed = Object.entries(checks).every(
+    ([check, passed]) => check === "humanApproval" || passed,
   );
   return {
     terminal,
+    readyForApproval:
+      terminal &&
+      snapshot.run.status === "awaiting_approval" &&
+      machineChecksPassed,
     verified: terminal && Object.values(checks).every(Boolean),
     checks,
   };
 }
 
-export function createWorkflowRuntime(database: Database, tenantId: string) {
+export function createWorkflowRuntime(
+  database: Database,
+  tenantId: string,
+  options: { failControlAudit?: () => Promise<never> } = {},
+) {
+  const controlAudit = async (
+    tx: Parameters<Parameters<typeof database.transaction>[0]>[0],
+    run: typeof factoryWorkflowRuns.$inferSelect,
+    input?: {
+      actorId: string;
+      action: "approve" | "abort" | "pause" | "resume" | "steer";
+      fromStatus: string;
+      instructionHash?: string;
+    },
+  ) => {
+    if (!input) return;
+    if (options.failControlAudit) await options.failControlAudit();
+    await tx.insert(auditEvents).values({
+      eventType: "workflow.control_applied",
+      targetType: "factory_workflow_run",
+      targetId: run.id,
+      actorUserId: input.actorId,
+      payload: {
+        action: input.action,
+        jobId: run.jobId,
+        fromStatus: input.fromStatus,
+        toStatus: run.status,
+        ...(input.instructionHash
+          ? { instructionHash: input.instructionHash }
+          : {}),
+      },
+    });
+  };
   return {
+    async activeRunIds() {
+      const rows = await database
+        .select({ id: factoryWorkflowRuns.id })
+        .from(factoryWorkflowRuns)
+        .where(
+          and(
+            eq(factoryWorkflowRuns.tenantId, tenantId),
+            inArray(factoryWorkflowRuns.status, [
+              "queued",
+              "running",
+              "paused",
+              "pausing",
+              "aborting",
+            ]),
+          ),
+        );
+      return rows.map((row) => row.id);
+    },
     async listContextCapsules(limit = 50) {
       return database
         .select({
@@ -304,6 +384,14 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
             requiredContext: { keys: stage.requiredContext },
             dependsOn: { ids: stage.dependsOn },
             checks: { items: stage.checks },
+            ...(stage.gate
+              ? {
+                  checks: {
+                    items: stage.checks,
+                    gate: { ...stage.gate, status: "pending" as const },
+                  },
+                }
+              : {}),
             selectedModel: job.selectedModel,
             selectedHarness: job.selectedHarness,
           })),
@@ -344,47 +432,211 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
       return { ...snapshot, evidence: verifyWorkflowEvidence(snapshot) };
     },
 
-    async requestPause(runId: string) {
+    async control(runId: string) {
       const [run] = await database
-        .update(factoryWorkflowRuns)
-        .set({
-          pauseRequested: true,
-          status: "pausing",
-          updatedAt: new Date(),
+        .select({
+          status: factoryWorkflowRuns.status,
+          pauseRequested: factoryWorkflowRuns.pauseRequested,
+          abortRequested: factoryWorkflowRuns.abortRequested,
+          steering: factoryWorkflowRuns.steering,
         })
+        .from(factoryWorkflowRuns)
         .where(
           and(
             eq(factoryWorkflowRuns.id, runId),
             eq(factoryWorkflowRuns.tenantId, tenantId),
-            inArray(factoryWorkflowRuns.status, ["queued", "running"]),
           ),
-        )
-        .returning();
+        );
       return run ?? null;
     },
 
-    async resume(runId: string) {
-      const [run] = await database
-        .update(factoryWorkflowRuns)
-        .set({
-          pauseRequested: false,
-          status: "queued",
-          leaseOwner: null,
-          leaseExpiresAt: null,
-          updatedAt: new Date(),
+    async recordReviewRetry(
+      runId: string,
+      stageId: string,
+      reviewerSessionId: string,
+      error: unknown,
+    ) {
+      const message = error instanceof Error ? error.message : String(error);
+      const [event] = await database
+        .insert(factoryWorkflowEvents)
+        .values({
+          runId,
+          stageId,
+          entity: "reviewer",
+          fromStatus: "malformed_output",
+          toStatus: "retrying",
+          detail: {
+            reviewerSessionId,
+            errorName: error instanceof Error ? error.name : "Error",
+            error: message.slice(0, 2_000),
+          },
         })
-        .where(
-          and(
-            eq(factoryWorkflowRuns.id, runId),
-            eq(factoryWorkflowRuns.tenantId, tenantId),
-            inArray(factoryWorkflowRuns.status, ["paused", "pausing"]),
-          ),
-        )
         .returning();
-      return run ?? null;
+      return event;
     },
 
-    async requestAbort(runId: string) {
+    async decideStageGate(
+      runId: string,
+      stageId: string,
+      actorId: string,
+      decision: "approve" | "reject",
+      feedback?: string,
+    ) {
+      return database.transaction(async (tx) => {
+        const [stage] = await tx
+          .select()
+          .from(factoryWorkflowStages)
+          .where(
+            and(
+              eq(factoryWorkflowStages.runId, runId),
+              eq(factoryWorkflowStages.stageId, stageId),
+              eq(factoryWorkflowStages.status, "awaiting_approval"),
+            ),
+          )
+          .for("update");
+        if (!stage) return null;
+        const control = stageControl(stage.checks);
+        if (!control.gate) return null;
+        const now = new Date();
+        if (decision === "reject") {
+          const text = feedback?.trim();
+          if (!text) throw new Error("Gate rejection requires feedback.");
+          const producers = dependencyIds(stage.dependsOn);
+          await tx
+            .update(factoryWorkflowStages)
+            .set({
+              status: "pending",
+              completedAt: null,
+              reviewerSessionId: null,
+              verification: {},
+              lastError: `Human gate feedback: ${text}`,
+              updatedAt: now,
+            })
+            .where(
+              and(
+                eq(factoryWorkflowStages.runId, runId),
+                inArray(factoryWorkflowStages.stageId, producers),
+                eq(factoryWorkflowStages.status, "succeeded"),
+              ),
+            );
+          await tx
+            .update(factoryWorkflowArtifacts)
+            .set({
+              metadata: sql`coalesce(${factoryWorkflowArtifacts.metadata}, '{}'::jsonb) || ${JSON.stringify({ attemptStatus: "failed", gateRejected: true })}::jsonb`,
+            })
+            .where(
+              and(
+                eq(factoryWorkflowArtifacts.runId, runId),
+                inArray(factoryWorkflowArtifacts.stageId, producers),
+              ),
+            );
+        }
+        await tx
+          .update(factoryWorkflowStages)
+          .set({
+            status: "pending",
+            checks: {
+              ...control,
+              gate: {
+                ...control.gate,
+                status: decision === "approve" ? "approved" : "pending",
+                ...(feedback ? { feedback: feedback.trim() } : {}),
+              },
+            },
+            updatedAt: now,
+          })
+          .where(
+            and(
+              eq(factoryWorkflowStages.runId, runId),
+              eq(factoryWorkflowStages.stageId, stageId),
+            ),
+          );
+        await tx.insert(factoryWorkflowEvents).values({
+          runId,
+          stageId,
+          entity: "human_gate",
+          fromStatus: "awaiting_approval",
+          toStatus: decision === "approve" ? "approved" : "rejected",
+          detail: { actorId, feedback: feedback?.trim() ?? null },
+        });
+        await tx
+          .update(factoryWorkflowRuns)
+          .set({
+            status: "queued",
+            leaseOwner: null,
+            leaseExpiresAt: null,
+            updatedAt: now,
+          })
+          .where(eq(factoryWorkflowRuns.id, runId));
+        return { stageId, decision };
+      });
+    },
+
+    async requestPause(
+      runId: string,
+      audit?: { actorId: string; fromStatus: string },
+    ) {
+      return database.transaction(async (tx) => {
+        const [run] = await tx
+          .update(factoryWorkflowRuns)
+          .set({
+            pauseRequested: true,
+            status: "pausing",
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(factoryWorkflowRuns.id, runId),
+              eq(factoryWorkflowRuns.tenantId, tenantId),
+              inArray(factoryWorkflowRuns.status, ["queued", "running"]),
+            ),
+          )
+          .returning();
+        if (run && audit)
+          await controlAudit(tx, run, {
+            ...audit,
+            action: "pause",
+          });
+        return run
+          ? Object.assign(run, audit ? { controlAuditPersisted: true } : {})
+          : null;
+      });
+    },
+
+    async resume(
+      runId: string,
+      audit?: { actorId: string; fromStatus: string },
+    ) {
+      return database.transaction(async (tx) => {
+        const [run] = await tx
+          .update(factoryWorkflowRuns)
+          .set({
+            pauseRequested: false,
+            status: "queued",
+            leaseOwner: null,
+            leaseExpiresAt: null,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(factoryWorkflowRuns.id, runId),
+              eq(factoryWorkflowRuns.tenantId, tenantId),
+              inArray(factoryWorkflowRuns.status, ["paused", "pausing"]),
+            ),
+          )
+          .returning();
+        if (run && audit)
+          await controlAudit(tx, run, { ...audit, action: "resume" });
+        return run
+          ? Object.assign(run, audit ? { controlAuditPersisted: true } : {})
+          : null;
+      });
+    },
+
+    async requestAbort(
+      runId: string,
+      audit?: { actorId: string; fromStatus: string },
+    ) {
       const now = new Date();
       return database.transaction(async (tx) => {
         const [run] = await tx
@@ -411,7 +663,7 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
             ),
           )
           .returning();
-        if (run)
+        if (run && audit)
           await tx
             .update(factoryWorkflowStages)
             .set({ status: "aborted", updatedAt: now })
@@ -421,56 +673,89 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
                 inArray(factoryWorkflowStages.status, ["pending", "running"]),
               ),
             );
-        return run ?? null;
+        if (run && audit)
+          await controlAudit(tx, run, { ...audit, action: "abort" });
+        return run
+          ? Object.assign(run, audit ? { controlAuditPersisted: true } : {})
+          : null;
       });
     },
 
-    async steer(runId: string, actorId: string, instruction: string) {
+    async steer(
+      runId: string,
+      actorId: string,
+      instruction: string,
+      audit?: { fromStatus: string; instructionHash: string },
+    ) {
       const text = instruction.trim();
       if (!text || text.length > 4_000)
         throw new Error(
           "Steering instruction must contain 1-4,000 characters.",
         );
-      const [run] = await database
-        .update(factoryWorkflowRuns)
-        .set({
-          steering: sql`jsonb_set(coalesce(${factoryWorkflowRuns.steering}, '{"events":[]}'::jsonb), '{events}', coalesce(${factoryWorkflowRuns.steering}->'events', '[]'::jsonb) || ${JSON.stringify([{ actorId, instruction: text, at: new Date().toISOString() }])}::jsonb)`,
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(factoryWorkflowRuns.id, runId),
-            eq(factoryWorkflowRuns.tenantId, tenantId),
-            inArray(factoryWorkflowRuns.status, [
-              "queued",
-              "running",
-              "paused",
-              "pausing",
-            ]),
-          ),
-        )
-        .returning();
-      return run ?? null;
+      return database.transaction(async (tx) => {
+        const [run] = await tx
+          .update(factoryWorkflowRuns)
+          .set({
+            steering: sql`jsonb_set(coalesce(${factoryWorkflowRuns.steering}, '{"events":[]}'::jsonb), '{events}', coalesce(${factoryWorkflowRuns.steering}->'events', '[]'::jsonb) || ${JSON.stringify([{ actorId, instruction: text, at: new Date().toISOString() }])}::jsonb)`,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(factoryWorkflowRuns.id, runId),
+              eq(factoryWorkflowRuns.tenantId, tenantId),
+              inArray(factoryWorkflowRuns.status, [
+                "queued",
+                "running",
+                "paused",
+                "pausing",
+              ]),
+            ),
+          )
+          .returning();
+        if (run && audit)
+          await controlAudit(tx, run, {
+            actorId,
+            action: "steer",
+            ...audit,
+          });
+        return run
+          ? Object.assign(run, audit ? { controlAuditPersisted: true } : {})
+          : null;
+      });
     },
 
-    async approve(runId: string, actorId: string) {
-      const [run] = await database
-        .update(factoryWorkflowRuns)
-        .set({
-          approvedBy: actorId,
-          status: "succeeded",
-          completedAt: new Date(),
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(factoryWorkflowRuns.id, runId),
-            eq(factoryWorkflowRuns.tenantId, tenantId),
-            eq(factoryWorkflowRuns.status, "awaiting_approval"),
-          ),
-        )
-        .returning();
-      return run ?? null;
+    async approve(
+      runId: string,
+      actorId: string,
+      audit?: { fromStatus: string },
+    ) {
+      return database.transaction(async (tx) => {
+        const [run] = await tx
+          .update(factoryWorkflowRuns)
+          .set({
+            approvedBy: actorId,
+            status: "succeeded",
+            completedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(factoryWorkflowRuns.id, runId),
+              eq(factoryWorkflowRuns.tenantId, tenantId),
+              eq(factoryWorkflowRuns.status, "awaiting_approval"),
+            ),
+          )
+          .returning();
+        if (run && audit)
+          await controlAudit(tx, run, {
+            actorId,
+            action: "approve",
+            ...audit,
+          });
+        return run
+          ? Object.assign(run, audit ? { controlAuditPersisted: true } : {})
+          : null;
+      });
     },
 
     async claim(workerId: string, leaseMs = 30_000) {
@@ -602,16 +887,66 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
         (stage) => stage.status === "running",
       ).length;
       const available = Math.max(0, snapshot.run.concurrencyLimit - running);
-      return snapshot.stages
-        .filter(
-          (stage) =>
-            stage.status === "pending" &&
-            stage.attempts < snapshot.run.maximumAttempts &&
-            dependencyIds(stage.dependsOn).every((dependency) =>
-              completed.has(dependency),
-            ),
-        )
+      const eligible = snapshot.stages.filter(
+        (stage) =>
+          stage.status === "pending" &&
+          stage.attempts < snapshot.run.maximumAttempts &&
+          dependencyIds(stage.dependsOn).every((dependency) =>
+            completed.has(dependency),
+          ),
+      );
+      const gated = eligible.filter((stage) => {
+        const gate = stageControl(stage.checks).gate;
+        return gate && gate.status !== "approved";
+      });
+      if (gated.length) {
+        await database.transaction(async (tx) => {
+          for (const stage of gated) {
+            await tx
+              .update(factoryWorkflowStages)
+              .set({ status: "awaiting_approval", updatedAt: new Date() })
+              .where(
+                and(
+                  eq(factoryWorkflowStages.runId, runId),
+                  eq(factoryWorkflowStages.stageId, stage.stageId),
+                  eq(factoryWorkflowStages.status, "pending"),
+                ),
+              );
+            await tx.insert(factoryWorkflowEvents).values({
+              runId,
+              stageId: stage.stageId,
+              entity: "human_gate",
+              fromStatus: "pending",
+              toStatus: "awaiting_approval",
+              detail: { gate: stageControl(stage.checks).gate },
+            });
+          }
+        });
+      }
+      const runnable = eligible
+        .filter((stage) => !gated.includes(stage))
         .slice(0, available);
+      if (
+        runnable.length === 0 &&
+        (gated.length > 0 ||
+          snapshot.stages.some((stage) => stage.status === "awaiting_approval"))
+      ) {
+        await database
+          .update(factoryWorkflowRuns)
+          .set({
+            status: "awaiting_approval",
+            leaseOwner: null,
+            leaseExpiresAt: null,
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(factoryWorkflowRuns.id, runId),
+              eq(factoryWorkflowRuns.status, "running"),
+            ),
+          );
+      }
+      return runnable;
     },
 
     async startStage(runId: string, stageId: string, sessionId: string) {

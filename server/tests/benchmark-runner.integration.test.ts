@@ -64,7 +64,7 @@ afterAll(async () => {
     .where(eq(factoryBenchmarkRuns.tenantId, tenantId));
 });
 
-test("two real runtime bundles derive benchmark quality from five executed checks", async () => {
+test("persists two supplied check-outcome bundles and derives positive-cost quality", async () => {
   const started = await runner.start("benchmark-admin", "ci-repair-v1");
   benchmarkRunId = started.run.id;
   workflowRunIds = started.workflows.map((workflow) => workflow.workflowRunId);
@@ -77,7 +77,7 @@ test("two real runtime bundles derive benchmark quality from five executed check
     expect(stage?.stageId).toBe("benchmark");
     const sessionId = `benchmark-session-${pairIndex}`;
     await runtime.startStage(workflow.workflowRunId, "benchmark", sessionId);
-    const artifacts = factoryBenchmarkCatalog["ci-repair-v1"].checks.map(
+    const checkArtifacts = factoryBenchmarkCatalog["ci-repair-v1"].checks.map(
       (check, checkIndex) => {
         const exitCode = pairIndex === 1 && checkIndex === 0 ? 1 : 0;
         const content = JSON.stringify({
@@ -102,6 +102,26 @@ test("two real runtime bundles derive benchmark quality from five executed check
         };
       },
     );
+    const stageResultContent = JSON.stringify({ summary: "candidate output" });
+    const artifacts = [
+      {
+        kind: "codex-stage-result",
+        uri: `benchmark://${pairIndex}/stage-result`,
+        content: stageResultContent,
+        checksum: artifactChecksum(stageResultContent),
+        revision: "fixed-benchmark-revision",
+        producerSessionId: sessionId,
+        exitCode: 0,
+        metadata: {
+          usage: {
+            totalTokens: 1_500 + pairIndex,
+            costMicros: 4_200 + pairIndex,
+            costBasis: "provider-reported",
+          },
+        },
+      },
+      ...checkArtifacts,
+    ];
     await runtime.completeStage(workflow.workflowRunId, "benchmark", {
       summary: "the model claims success",
       sessionId,
@@ -119,6 +139,9 @@ test("two real runtime bundles derive benchmark quality from five executed check
     expect((await runtime.snapshot(workflow.workflowRunId))?.run.status).toBe(
       "succeeded",
     );
+    expect((await runtime.snapshot(workflow.workflowRunId))?.run).toMatchObject(
+      { approvedBy: null, completedBy: "benchmark-runner" },
+    );
   }
 
   const dashboard = await store.dashboard();
@@ -131,10 +154,13 @@ test("two real runtime bundles derive benchmark quality from five executed check
     "measured",
   ]);
   expect(measured.map((benchmark) => benchmark.attemptedOutcomes)).toEqual([
-    5, 5,
+    6, 6,
   ]);
   expect(
     measured.find((benchmark) => benchmark.harness === "claude")?.quality,
   ).toBe(0);
-  expect((await runner.dashboard()).outcomes).toHaveLength(10);
+  expect(measured.every((benchmark) => benchmark.totalCostMicros > 0)).toBe(
+    true,
+  );
+  expect((await runner.dashboard()).outcomes).toHaveLength(12);
 });

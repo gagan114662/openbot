@@ -357,9 +357,11 @@ function ProductionEngineerPage() {
       </PageSection>
       <PageSection title="Launch a managed workflow">
         <p className="mb-3 text-muted-foreground text-sm">
-          This creates a durable production run. A benchmark-routed Codex or
-          Claude worker executes it, a fresh reviewer validates revision-bound
-          artifacts, and completion waits for human approval.
+          This creates a durable production run. A measured route is used only
+          when executed benchmark evidence exists; otherwise launch fails closed
+          unless the seeded-route override is explicit. A fresh reviewer
+          validates revision-bound artifacts, and completion waits for human
+          approval.
         </p>
         <div className="grid gap-2 md:grid-cols-[220px_1fr_auto]">
           <select

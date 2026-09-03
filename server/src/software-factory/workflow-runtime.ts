@@ -90,6 +90,19 @@ const stageControl = (value: unknown) =>
     })
     .parse(value);
 
+const durableArtifact = <T extends { kind: string; metadata?: unknown }>(
+  artifact: T,
+) => ({
+  ...artifact,
+  metadata: {
+    ...((artifact.metadata as Record<string, unknown> | undefined) ?? {}),
+    evidenceSource:
+      artifact.kind === "runtime-check"
+        ? "runtime-recorded"
+        : "executor-supplied",
+  },
+});
+
 const assertDag = (stages: z.infer<typeof stagePlanSchema>) => {
   const ids = new Set(stages.map((stage) => stage.id));
   if (ids.size !== stages.length)
@@ -335,6 +348,7 @@ export function createWorkflowRuntime(
       jobId: string;
       maximumAttempts: number;
       concurrencyLimit: number;
+      baseRevision?: string;
       stages: unknown;
     }) {
       const stages = stagePlanSchema.parse(input.stages);
@@ -375,6 +389,7 @@ export function createWorkflowRuntime(
             jobId: input.jobId,
             maximumAttempts: input.maximumAttempts,
             concurrencyLimit: input.concurrencyLimit,
+            baseRevision: input.baseRevision?.trim() || null,
           })
           .onConflictDoNothing()
           .returning();
@@ -742,9 +757,11 @@ export function createWorkflowRuntime(
 
     async approve(
       runId: string,
-      actorId: string,
+      actor: { id: string; role: "admin" },
       audit?: { fromStatus: string },
     ) {
+      if (actor?.role !== "admin" || !actor.id.trim()) return null;
+      const actorId = actor.id;
       return database.transaction(async (tx) => {
         const [run] = await tx
           .update(factoryWorkflowRuns)
@@ -772,6 +789,30 @@ export function createWorkflowRuntime(
           ? Object.assign(run, audit ? { controlAuditPersisted: true } : {})
           : null;
       });
+    },
+
+    async completeSystem(runId: string, systemId: string) {
+      const completedBy = systemId.trim();
+      if (!completedBy || completedBy.length > 200)
+        throw new Error("System completion identity is invalid.");
+      const [run] = await database
+        .update(factoryWorkflowRuns)
+        .set({
+          completedBy,
+          approvedBy: null,
+          status: "succeeded",
+          completedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(factoryWorkflowRuns.id, runId),
+            eq(factoryWorkflowRuns.tenantId, tenantId),
+            eq(factoryWorkflowRuns.status, "awaiting_approval"),
+          ),
+        )
+        .returning();
+      return run ?? null;
     },
 
     async claim(
@@ -1105,7 +1146,7 @@ export function createWorkflowRuntime(
             result.artifacts.map((artifact) => ({
               runId,
               stageId,
-              ...artifact,
+              ...durableArtifact(artifact),
             })),
           )
           .onConflictDoNothing();
@@ -1183,7 +1224,7 @@ export function createWorkflowRuntime(
               checkedArtifacts.map((artifact) => ({
                 runId,
                 stageId,
-                ...artifact,
+                ...durableArtifact(artifact),
               })),
             )
             .onConflictDoNothing();

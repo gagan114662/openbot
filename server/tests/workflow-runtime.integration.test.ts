@@ -58,6 +58,7 @@ let runId = crypto.randomUUID();
 describe("durable workflow runtime", () => {
   test("commits exactly one privacy-safe audit row with each durable control transition", async () => {
     await store.benchmark({
+      source: "measured",
       model: "audit-model",
       task: "ci-repair",
       quality: 0.9,
@@ -131,9 +132,13 @@ describe("durable workflow runtime", () => {
       .update(factoryWorkflowRuns)
       .set({ status: "awaiting_approval" })
       .where(eq(factoryWorkflowRuns.id, approval.id));
-    await runtime.approve(approval.id, "audit-admin", {
-      fromStatus: "awaiting_approval",
-    });
+    await runtime.approve(
+      approval.id,
+      { id: "audit-admin", role: "admin" },
+      {
+        fromStatus: "awaiting_approval",
+      },
+    );
 
     const events = await database
       .select()
@@ -232,6 +237,7 @@ describe("durable workflow runtime", () => {
 
   test("repairs within budget, enforces dependencies, pauses, resumes, and requires approval", async () => {
     await store.benchmark({
+      source: "measured",
       model: "worker-small",
       task: "ci-repair",
       quality: 0.9,
@@ -366,11 +372,20 @@ describe("durable workflow runtime", () => {
     expect((await runtime.snapshot(run.id))?.run.status).toBe(
       "awaiting_approval",
     );
-    expect(await runtime.approve(run.id, "admin")).not.toBeNull();
+    expect(
+      await runtime.approve(run.id, "benchmark-runner" as never),
+    ).toBeNull();
+    expect(
+      (await runtime.snapshot(run.id))?.evidence.checks.humanApproval,
+    ).toBe(false);
+    expect(
+      await runtime.approve(run.id, { id: "admin", role: "admin" }),
+    ).not.toBeNull();
     const completed = await runtime.snapshot(run.id);
     expect(completed?.run).toMatchObject({
       status: "succeeded",
       approvedBy: "admin",
+      completedBy: null,
     });
     expect(completed?.artifacts).toHaveLength(2);
     expect(completed?.stages.map((stage) => stage.sessionId)).toEqual([
@@ -541,7 +556,7 @@ describe("durable workflow runtime", () => {
     );
   });
 
-  test("a real Claude CLI contract retries malformed reviewer output while retaining attempt-one artifacts", async () => {
+  test("a spawned Claude CLI contract retries malformed reviewer output while retaining attempt-one artifacts", async () => {
     const repository = await mkdtemp(join(tmpdir(), "openbot-claude-retry-"));
     const workspaceRoot = await mkdtemp(
       join(tmpdir(), "openbot-claude-retry-workspaces-"),
@@ -578,6 +593,7 @@ if (!prompt.includes("Independently review")) {
       );
       await chmod(script, 0o700);
       await store.benchmark({
+        source: "measured",
         harness: "claude",
         model: "claude-contract",
         task: "ci-repair",
@@ -637,6 +653,7 @@ if (!prompt.includes("Independently review")) {
       });
       expect(snapshot?.artifacts.map((artifact) => artifact.kind)).toEqual([
         "codex-stage-result",
+        "runtime-check",
         "runtime-check",
       ]);
       expect(snapshot?.events).toEqual(
@@ -917,7 +934,7 @@ if (!prompt.includes("Independently review")) {
                 command: "bun test focused.test.ts",
                 exitCode: 1,
                 metadata: {
-                  evidenceSource: "runtime-executed",
+                  evidenceSource: "forged-self-report",
                   attemptStatus: "failed",
                 },
               },
@@ -942,7 +959,7 @@ if (!prompt.includes("Independently review")) {
                 producerSessionId: sessionId,
                 command: "bun test focused.test.ts",
                 exitCode: 0,
-                metadata: { evidenceSource: "runtime-executed" },
+                metadata: { evidenceSource: "forged-self-report" },
               },
             ],
           };
@@ -963,12 +980,20 @@ if (!prompt.includes("Independently review")) {
     expect((await runtime.snapshot(run.id))?.artifacts[0]).toMatchObject({
       kind: "runtime-check",
       exitCode: 1,
+      metadata: { evidenceSource: "runtime-recorded" },
     });
     await worker.runOnce();
     expect(reviews).toBe(1);
     const snapshot = await runtime.snapshot(run.id);
     expect(snapshot?.run.status).toBe("awaiting_approval");
     expect(snapshot?.artifacts).toHaveLength(2);
+    expect(
+      snapshot?.artifacts.every(
+        (artifact) =>
+          (artifact.metadata as { evidenceSource?: string }).evidenceSource ===
+          "runtime-recorded",
+      ),
+    ).toBe(true);
     expect(snapshot?.evidence.checks).toMatchObject({
       artifactChecksums: true,
       producerBound: true,
@@ -1485,5 +1510,36 @@ if (!prompt.includes("Independently review")) {
       attempts: 1,
       lastError: "Managed stage exceeded its 40 ms execution deadline.",
     });
+  });
+
+  test("an exhausted pending stage cannot monopolize the workflow queue", async () => {
+    const queued = await store.queueJob("admin", {
+      kind: "ci-repair",
+      tier: "managed",
+      objective: "reconcile an exhausted pending stage",
+      trigger: "no-progress-proof",
+      minimumQuality: 0.8,
+    });
+    const run = await runtime.create({
+      jobId: queued.job.id,
+      maximumAttempts: 1,
+      concurrencyLimit: 1,
+      stages: [
+        {
+          id: "exhausted",
+          objective: "must not be reclaimed forever",
+          requiredContext: [],
+          dependsOn: [],
+        },
+      ],
+    });
+    await runtime.claim("no-progress-worker");
+    await database
+      .update(factoryWorkflowStages)
+      .set({ attempts: 1, status: "pending" })
+      .where(eq(factoryWorkflowStages.runId, run.id));
+
+    expect(await runtime.readyStages(run.id)).toEqual([]);
+    expect((await runtime.snapshot(run.id))?.run.status).toBe("failed");
   });
 });

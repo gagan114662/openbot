@@ -4,12 +4,9 @@ import { Hono } from "hono";
 import { type AuditStore, recordAuditEvent } from "../audit";
 import { type AppVariables, requireAdmin } from "../auth/guards";
 import type { WebhookReconciler } from "../webhooks/reconciler";
+import type { FactoryBenchmarkRunner } from "./benchmark-runner";
 import type { ContextGraph, ContextNodeInput } from "./context-graph";
-import {
-  type ExecutionTier,
-  executionTiers,
-  type ModelBenchmark,
-} from "./model-router";
+import { type ExecutionTier, executionTiers } from "./model-router";
 import { type ManagedJobKind, managedJobKinds } from "./orchestrator";
 import type { ShadowEvaluator } from "./shadow-evaluator";
 import type { SoftwareFactoryStore } from "./store";
@@ -186,6 +183,7 @@ export function createSoftwareFactoryRoutes(
   auditStore?: AuditStore,
   worktreeStats?: () => Promise<{ active: number; diskBytes: number }>,
   cleanupWorktree?: (runId: string) => Promise<void>,
+  benchmarkRunner?: FactoryBenchmarkRunner,
 ) {
   const routes = new Hono<{ Variables: AppVariables }>();
   routes.use("*", requireUser, async (context, next) => {
@@ -207,6 +205,9 @@ export function createSoftwareFactoryRoutes(
       worktrees: worktreeStats
         ? await worktreeStats()
         : { active: 0, diskBytes: 0 },
+      benchmarkRuns: benchmarkRunner
+        ? await benchmarkRunner.dashboard()
+        : { runs: [], outcomes: [] },
     }),
   );
   routes.get("/metrics", async (context) => {
@@ -229,25 +230,30 @@ export function createSoftwareFactoryRoutes(
   });
   routes.post("/benchmarks", async (context) => {
     const body = record(await context.req.json().catch(() => null));
-    const model = nonempty(body?.model);
-    const task = nonempty(body?.task);
-    const harness = nonempty(body?.harness) ?? "codex";
-    if (!model || !task || !["codex", "claude"].includes(harness))
+    if (
+      body?.quality !== undefined ||
+      body?.successfulOutcomes !== undefined ||
+      body?.attemptedOutcomes !== undefined ||
+      body?.totalCostMicros !== undefined
+    )
       return context.json(
-        { error: "Model, task, and a valid harness are required." },
+        {
+          error: "Benchmark metrics must come from an executed benchmark run.",
+        },
         400,
       );
-    await store.benchmark({
-      harness: harness as "codex" | "claude",
-      model,
-      task,
-      quality: Number(body?.quality),
-      successfulOutcomes: Number(body?.successfulOutcomes),
-      attemptedOutcomes: Number(body?.attemptedOutcomes),
-      totalCostMicros: Number(body?.totalCostMicros),
-      enabled: body?.enabled !== false,
-    } satisfies ModelBenchmark);
-    return context.json({ saved: true }, 201);
+    return context.json({ error: "Use POST /benchmarks/:id/run." }, 400);
+  });
+  routes.post("/benchmarks/:id/run", async (context) => {
+    if (!benchmarkRunner) return context.notFound();
+    const benchmarkId = context.req.param("id");
+    if (!(benchmarkId in benchmarkRunner.catalog))
+      return context.json({ error: "Unknown benchmark task." }, 404);
+    const result = await benchmarkRunner.start(
+      context.var.actor.id,
+      benchmarkId as keyof typeof benchmarkRunner.catalog,
+    );
+    return context.json(result, 202);
   });
   routes.post("/jobs", async (context) => {
     const body = record(await context.req.json().catch(() => null));
@@ -340,18 +346,12 @@ export function createSoftwareFactoryRoutes(
     return context.json({ ...queued, workflow }, 201);
   });
   routes.post("/jobs/:jobId/outcome", async (context) => {
-    const body = record(await context.req.json().catch(() => null));
-    if (typeof body?.success !== "boolean")
-      return context.json(
-        { error: "A verified success verdict is required." },
-        400,
-      );
     return context.json(
-      await store.completeJob(context.req.param("jobId"), {
-        success: body.success,
-        costMicros: Number(body.costMicros),
-        outcome: record(body.outcome) ?? {},
-      }),
+      {
+        error:
+          "Manual outcomes are disabled; workflow checks, fresh review, and approval derive outcomes.",
+      },
+      410,
     );
   });
   routes.post("/context/nodes", async (context) => {
@@ -556,7 +556,11 @@ export function createSoftwareFactoryRoutes(
       ? createHash("sha256").update(instruction).digest("hex")
       : undefined;
     const approve = async () => {
-      const approved = await workflows.approve(runId, actorId, { fromStatus });
+      const approved = await workflows.approve(
+        runId,
+        { id: actorId, role: "admin" },
+        { fromStatus },
+      );
       const afterApproval = approved ? null : await workflows.snapshot(runId);
       const run =
         approved ??

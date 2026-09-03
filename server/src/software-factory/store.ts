@@ -20,6 +20,9 @@ const benchmarkFromRow = (
   attemptedOutcomes: row.attemptedOutcomes,
   totalCostMicros: row.totalCostMicros,
   enabled: row.enabled,
+  source: row.source === "measured" ? "measured" : "seeded",
+  benchmarkRunId: row.benchmarkRunId,
+  seedReason: row.seedReason,
 });
 
 export function createSoftwareFactoryStore(
@@ -62,6 +65,13 @@ export function createSoftwareFactoryStore(
           attemptedOutcomes: input.attemptedOutcomes,
           totalCostMicros: input.totalCostMicros,
           enabled: input.enabled,
+          source: input.source ?? "seeded",
+          benchmarkRunId: input.benchmarkRunId ?? null,
+          seedReason:
+            (input.source ?? "seeded") === "seeded"
+              ? (input.seedReason ??
+                "Explicit administrative seed for bootstrap")
+              : null,
         })
         .onConflictDoUpdate({
           target: [
@@ -76,9 +86,51 @@ export function createSoftwareFactoryStore(
             attemptedOutcomes: input.attemptedOutcomes,
             totalCostMicros: input.totalCostMicros,
             enabled: input.enabled,
+            source: input.source ?? "seeded",
+            benchmarkRunId: input.benchmarkRunId ?? null,
+            seedReason:
+              (input.source ?? "seeded") === "seeded"
+                ? (input.seedReason ??
+                  "Explicit administrative seed for bootstrap")
+                : null,
             updatedAt: new Date(),
           },
         });
+    },
+
+    async queueBenchmarkJob(input: {
+      actorId: string;
+      kind: ManagedJobKind;
+      objective: string;
+      benchmarkRunId: string;
+      harness: "codex" | "claude";
+      model: string;
+    }) {
+      const reason = `Measured benchmark run ${input.benchmarkRunId}; results are derived from runtime checks.`;
+      const [job] = await database
+        .insert(factoryManagedJobs)
+        .values({
+          tenantId,
+          kind: input.kind,
+          tier: "managed",
+          objective: input.objective,
+          trigger: "benchmark-runner",
+          launchMetadata: {
+            benchmarkRunId: input.benchmarkRunId,
+            benchmarkPair: {
+              harness: input.harness,
+              model: input.model,
+            },
+          },
+          selectedModel: input.model,
+          selectedHarness: input.harness,
+          routingSource: "measured",
+          routingReason: reason,
+          createdBy: input.actorId,
+        })
+        .returning();
+      if (!job) throw new Error("Could not create benchmark workflow job.");
+      return job;
     },
 
     async queueJob(
@@ -106,6 +158,8 @@ export function createSoftwareFactoryStore(
         tier: input.tier,
         minimumQuality: input.minimumQuality,
         candidates: candidates.map(benchmarkFromRow),
+        allowSeeded:
+          process.env.SOFTWARE_FACTORY_ALLOW_SEEDED_ROUTES === "true",
       });
       const [job] = await database
         .insert(factoryManagedJobs)
@@ -118,6 +172,8 @@ export function createSoftwareFactoryStore(
           launchMetadata: input.launchMetadata ?? {},
           selectedModel: decision.model,
           selectedHarness: decision.harness,
+          routingSource: decision.source,
+          routingReason: decision.reason,
           createdBy: actorId,
         })
         .returning();

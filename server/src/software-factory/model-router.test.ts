@@ -49,6 +49,28 @@ describe("benchmark-driven model routing", () => {
     expect(decision).toMatchObject({ harness: "claude", model: "sonnet" });
   });
 
+  test("excludes seeded rows whenever a measured route exists", () => {
+    const decision = chooseModel({
+      task: "ci-repair",
+      tier: "managed",
+      minimumQuality: 0.8,
+      candidates: [
+        model({
+          source: "seeded",
+          model: "operator-claimed-perfect",
+          quality: 1,
+          totalCostMicros: 0,
+        }),
+        model({ source: "measured", model: "executed-evidence" }),
+      ],
+    });
+    expect(decision).toMatchObject({
+      model: "executed-evidence",
+      source: "measured",
+    });
+    expect(decision.reason).toContain("measured benchmark");
+  });
+
   test("removes a model dominated on both quality and outcome cost", () => {
     const weak = model({
       model: "weak",

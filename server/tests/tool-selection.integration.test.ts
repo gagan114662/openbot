@@ -227,7 +227,7 @@ describe("a built-in Bot", () => {
     expect(offered).toHaveLength(8);
   });
 
-  test("pass one really happened, against the real endpoint", async () => {
+  test("pass one reached the spawned endpoint", async () => {
     answerWith(["drive-audit"]);
     const agents = await buildAgents(
       [builtIn],

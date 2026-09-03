@@ -90,6 +90,19 @@ const stageControl = (value: unknown) =>
     })
     .parse(value);
 
+const durableArtifact = <T extends { kind: string; metadata?: unknown }>(
+  artifact: T,
+) => ({
+  ...artifact,
+  metadata: {
+    ...((artifact.metadata as Record<string, unknown> | undefined) ?? {}),
+    evidenceSource:
+      artifact.kind === "runtime-check"
+        ? "runtime-recorded"
+        : "executor-supplied",
+  },
+});
+
 const assertDag = (stages: z.infer<typeof stagePlanSchema>) => {
   const ids = new Set(stages.map((stage) => stage.id));
   if (ids.size !== stages.length)
@@ -293,35 +306,52 @@ export function createWorkflowRuntime(
         .where(eq(factoryWorkflowRuns.tenantId, tenantId))
         .orderBy(asc(factoryWorkflowRuns.createdAt))
         .limit(Math.max(1, Math.min(100, limit)));
-      return Promise.all(
-        runs.map(async (run) => {
-          const [stages, artifacts, events] = await Promise.all([
-            database
-              .select()
-              .from(factoryWorkflowStages)
-              .where(eq(factoryWorkflowStages.runId, run.id))
-              .orderBy(asc(factoryWorkflowStages.stageId)),
-            database
-              .select()
-              .from(factoryWorkflowArtifacts)
-              .where(eq(factoryWorkflowArtifacts.runId, run.id))
-              .orderBy(asc(factoryWorkflowArtifacts.createdAt)),
-            database
-              .select()
-              .from(factoryWorkflowEvents)
-              .where(eq(factoryWorkflowEvents.runId, run.id))
-              .orderBy(asc(factoryWorkflowEvents.createdAt)),
-          ]);
-          const snapshot = { run, stages, artifacts, events };
-          return { ...snapshot, evidence: verifyWorkflowEvidence(snapshot) };
-        }),
-      );
+      if (runs.length === 0) return [];
+      const runIds = runs.map((run) => run.id);
+      // Keep dashboard load constant-query. The previous per-run fan-out issued as many as 301
+      // queries and crossed the HTTP idle timeout once real execution history accumulated.
+      const [stages, artifacts, events] = await Promise.all([
+        database
+          .select()
+          .from(factoryWorkflowStages)
+          .where(inArray(factoryWorkflowStages.runId, runIds))
+          .orderBy(
+            asc(factoryWorkflowStages.runId),
+            asc(factoryWorkflowStages.stageId),
+          ),
+        database
+          .select()
+          .from(factoryWorkflowArtifacts)
+          .where(inArray(factoryWorkflowArtifacts.runId, runIds))
+          .orderBy(
+            asc(factoryWorkflowArtifacts.runId),
+            asc(factoryWorkflowArtifacts.createdAt),
+          ),
+        database
+          .select()
+          .from(factoryWorkflowEvents)
+          .where(inArray(factoryWorkflowEvents.runId, runIds))
+          .orderBy(
+            asc(factoryWorkflowEvents.runId),
+            asc(factoryWorkflowEvents.createdAt),
+          ),
+      ]);
+      return runs.map((run) => {
+        const snapshot = {
+          run,
+          stages: stages.filter((stage) => stage.runId === run.id),
+          artifacts: artifacts.filter((artifact) => artifact.runId === run.id),
+          events: events.filter((event) => event.runId === run.id),
+        };
+        return { ...snapshot, evidence: verifyWorkflowEvidence(snapshot) };
+      });
     },
 
     async create(input: {
       jobId: string;
       maximumAttempts: number;
       concurrencyLimit: number;
+      baseRevision?: string;
       stages: unknown;
     }) {
       const stages = stagePlanSchema.parse(input.stages);
@@ -362,6 +392,7 @@ export function createWorkflowRuntime(
             jobId: input.jobId,
             maximumAttempts: input.maximumAttempts,
             concurrencyLimit: input.concurrencyLimit,
+            baseRevision: input.baseRevision?.trim() || null,
           })
           .onConflictDoNothing()
           .returning();
@@ -795,9 +826,11 @@ export function createWorkflowRuntime(
 
     async approve(
       runId: string,
-      actorId: string,
+      actor: { id: string; role: "admin" },
       audit?: { fromStatus: string },
     ) {
+      if (actor?.role !== "admin" || !actor.id.trim()) return null;
+      const actorId = actor.id;
       return database.transaction(async (tx) => {
         const [run] = await tx
           .update(factoryWorkflowRuns)
@@ -825,6 +858,30 @@ export function createWorkflowRuntime(
           ? Object.assign(run, audit ? { controlAuditPersisted: true } : {})
           : null;
       });
+    },
+
+    async completeSystem(runId: string, systemId: string) {
+      const completedBy = systemId.trim();
+      if (!completedBy || completedBy.length > 200)
+        throw new Error("System completion identity is invalid.");
+      const [run] = await database
+        .update(factoryWorkflowRuns)
+        .set({
+          completedBy,
+          approvedBy: null,
+          status: "succeeded",
+          completedAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(
+          and(
+            eq(factoryWorkflowRuns.id, runId),
+            eq(factoryWorkflowRuns.tenantId, tenantId),
+            eq(factoryWorkflowRuns.status, "awaiting_approval"),
+          ),
+        )
+        .returning();
+      return run ?? null;
     },
 
     async claim(
@@ -1033,6 +1090,51 @@ export function createWorkflowRuntime(
             ),
           );
       }
+      if (
+        runnable.length === 0 &&
+        gated.length === 0 &&
+        running === 0 &&
+        !snapshot.stages.some(
+          (stage) => stage.status === "awaiting_approval",
+        ) &&
+        snapshot.stages.some(
+          (stage) =>
+            stage.status === "pending" &&
+            stage.attempts >= snapshot.run.maximumAttempts,
+        )
+      ) {
+        // A rejected stage can be returned to pending at the attempt ceiling. Without this
+        // reconciliation the oldest run is reclaimable forever but can never make progress,
+        // starving every newer workflow behind it.
+        await database.transaction(async (tx) => {
+          const [failed] = await tx
+            .update(factoryWorkflowRuns)
+            .set({
+              status: "failed",
+              completedAt: new Date(),
+              leaseOwner: null,
+              leaseExpiresAt: null,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(factoryWorkflowRuns.id, runId),
+                eq(factoryWorkflowRuns.status, "running"),
+              ),
+            )
+            .returning({ id: factoryWorkflowRuns.id });
+          if (failed)
+            await tx.insert(factoryWorkflowEvents).values({
+              runId,
+              entity: "run",
+              fromStatus: "running",
+              toStatus: "failed",
+              detail: {
+                reason: "No runnable stage remains within the attempt budget.",
+              },
+            });
+        });
+      }
       return runnable;
     },
 
@@ -1113,7 +1215,7 @@ export function createWorkflowRuntime(
             result.artifacts.map((artifact) => ({
               runId,
               stageId,
-              ...artifact,
+              ...durableArtifact(artifact),
             })),
           )
           .onConflictDoNothing();
@@ -1191,7 +1293,7 @@ export function createWorkflowRuntime(
               checkedArtifacts.map((artifact) => ({
                 runId,
                 stageId,
-                ...artifact,
+                ...durableArtifact(artifact),
               })),
             )
             .onConflictDoNothing();

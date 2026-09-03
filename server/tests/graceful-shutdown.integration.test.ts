@@ -23,7 +23,7 @@ async function remaining(reader: ReadableStreamDefaultReader<Uint8Array>) {
 }
 
 describe("process shutdown", () => {
-  test("a real SIGTERM waits for in-flight work before exiting", async () => {
+  test("a spawned process receiving SIGTERM waits for in-flight work before exiting", async () => {
     const running = await child(`
       import { installGracefulShutdown } from ${JSON.stringify(moduleUrl)};
       installGracefulShutdown({ timeoutMs: 1000, drain: async () => {

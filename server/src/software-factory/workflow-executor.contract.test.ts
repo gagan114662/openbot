@@ -6,6 +6,7 @@ import {
   createClaudeWorkflowExecutor,
   createCodexWorkflowExecutor,
 } from "./codex-workflow-executor";
+import { StageExecutionFailure } from "./workflow-worker";
 
 const roots: string[] = [];
 afterAll(async () => {
@@ -51,7 +52,8 @@ const payload = review
         prompt.includes("Runtime-scoped candidate diff") &&
         prompt.includes('"kind":"runtime-check"') &&
         !prompt.includes("fake worker result") &&
-        !prompt.includes("model reported"),
+        !prompt.includes("model reported") &&
+        !prompt.includes('"modifiedByCandidate":true'),
       summary: "fresh fake review",
       checks: ["contract"],
     }
@@ -62,12 +64,13 @@ if (${JSON.stringify(harness)} === "codex") {
   if (!args.includes("sandbox_workspace_write.exclude_slash_tmp=true")) process.exit(45);
   const output = args[args.indexOf("--output-last-message") + 1];
   await Bun.write(output, JSON.stringify(payload));
+  process.stdout.write(JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1200, cached_input_tokens: 200, output_tokens: 300 } }) + "\\n");
 } else {
   if (!args.includes("--json-schema")) process.exit(42);
   if (!args.includes("--restricted")) process.exit(44);
   if (!args.includes("--permission-prompts") || !args.includes("none")) process.exit(45);
   if (!args.includes("--disallowedTools") || !args.includes("Bash,WebFetch,WebSearch")) process.exit(43);
-  process.stdout.write(JSON.stringify({ structured_output: payload, result: "fallback must not run" }));
+  process.stdout.write(JSON.stringify({ structured_output: payload, result: "fallback must not run", usage: { input_tokens: 1000, cache_read_input_tokens: 100, output_tokens: 250 }, total_cost_usd: 0.0042 }));
 }
 `,
     { mode: 0o700 },
@@ -118,25 +121,37 @@ describe.each(["codex", "claude"] as const)(
         signal: new AbortController().signal,
       } as never);
       expect(candidate.sessionId).toBe("worker-session");
-      expect(candidate.artifacts).toHaveLength(2);
+      expect(candidate.artifacts).toHaveLength(3);
       expect(candidate.artifacts[0]?.metadata).toMatchObject({
         harness,
         model: stage.selectedModel,
+        usage: expect.objectContaining({ totalTokens: expect.any(Number) }),
       });
       expect(candidate.artifacts[1]).toMatchObject({
         kind: "runtime-check",
         exitCode: 0,
+        metadata: { checkId: "gate-integrity" },
+      });
+      expect(candidate.artifacts[2]).toMatchObject({
+        kind: "runtime-check",
+        exitCode: 0,
+        metadata: {
+          resolvedExecutablePaths: {
+            command: expect.stringMatching(/^\//),
+            git: expect.stringMatching(/^\//),
+          },
+        },
       });
       const executionPrompt = await Bun.file(workerPrompt).text();
       expect(executionPrompt).toContain("prove the shared harness contract");
       expect(executionPrompt).not.toContain("with these exact UTF-8 bytes");
       expect(executionPrompt).not.toContain("OPENBOT_PRIVATE_EXPECTED_BYTES");
-      expect(JSON.parse(candidate.artifacts[1]!.content)).toMatchObject({
+      expect(JSON.parse(candidate.artifacts[2]!.content)).toMatchObject({
         kind: "runtime-check",
         exitCode: 0,
       });
       expect(
-        String(candidate.artifacts[1]?.metadata?.reviewMaterialPath),
+        String(candidate.artifacts[2]?.metadata?.reviewMaterialPath),
       ).not.toStartWith(`${root}/`);
       const review = await executor.review({
         runId,
@@ -164,6 +179,196 @@ describe.each(["codex", "claude"] as const)(
     });
   },
 );
+
+test("gate-integrity rejects a candidate that weakens repository configuration", async () => {
+  const { root, binary, workspaceRoot } = await fixture("codex");
+  await writeFile(
+    binary,
+    `#!/usr/bin/env bun
+const args = process.argv.slice(2);
+await Bun.write("biome.json", JSON.stringify({ linter: { enabled: false } }));
+const output = args[args.indexOf("--output-last-message") + 1];
+await Bun.write(output, JSON.stringify({ summary: "disabled the gate", checks: [] }));
+process.stdout.write(JSON.stringify({ usage: { input_tokens: 100, output_tokens: 20 } }) + "\\n");
+`,
+    { mode: 0o700 },
+  );
+  await chmod(binary, 0o700);
+  const executor = createCodexWorkflowExecutor(root, { binary, workspaceRoot });
+  const run = executor.run({
+    runId: crypto.randomUUID(),
+    stage: {
+      stageId: "verify",
+      objective: "introduce a lint violation without weakening the gate",
+      requiredContext: { keys: [] },
+      dependsOn: { ids: [] },
+      checks: { items: [] },
+      selectedModel: "gpt-contract",
+      selectedHarness: "codex",
+      lastError: null,
+    },
+    snapshot: { run: { steering: { events: [] } }, artifacts: [] },
+    sessionId: "hostile-worker",
+    signal: new AbortController().signal,
+  } as never);
+  await expect(run).rejects.toBeInstanceOf(StageExecutionFailure);
+  await expect(run).rejects.toMatchObject({
+    artifacts: [
+      expect.objectContaining({
+        exitCode: 1,
+        metadata: expect.objectContaining({ protectedPaths: ["biome.json"] }),
+      }),
+    ],
+  });
+});
+
+test("a candidate-modified named test is disclosed to and rejected by the fresh reviewer", async () => {
+  const { root, binary, workspaceRoot, reviewPrompt } = await fixture("codex");
+  await writeFile(
+    binary,
+    `#!/usr/bin/env bun
+const args = process.argv.slice(2);
+const prompt = args.at(-1) ?? "";
+const review = prompt.includes("Independently review");
+const payload = review
+  ? { accepted: !prompt.includes('"modifiedByCandidate":true'), summary: "fresh review", checks: ["test provenance"] }
+  : { summary: "rewrote the named test", checks: [] };
+if (!review) await Bun.write("proof.test.ts", "import {test,expect} from 'bun:test';test('weakened',()=>expect(true).toBe(true));\\n");
+else await Bun.write(${JSON.stringify(reviewPrompt)}, prompt);
+const output = args[args.indexOf("--output-last-message") + 1];
+await Bun.write(output, JSON.stringify(payload));
+process.stdout.write(JSON.stringify({ usage: { input_tokens: 100, output_tokens: 20 } }) + "\\n");
+`,
+    { mode: 0o700 },
+  );
+  await chmod(binary, 0o700);
+  const executor = createCodexWorkflowExecutor(root, { binary, workspaceRoot });
+  const runId = crypto.randomUUID();
+  const stage = {
+    stageId: "verify",
+    objective: "repair behavior without weakening its test",
+    requiredContext: { keys: [] },
+    dependsOn: { ids: [] },
+    checks: {
+      items: [
+        {
+          id: "named-test",
+          command: ["bun", "test", "proof.test.ts"],
+          timeoutMs: 10_000,
+          required: true,
+        },
+      ],
+    },
+    selectedModel: "gpt-contract",
+    selectedHarness: "codex",
+    lastError: null,
+  };
+  const snapshot = { run: { steering: { events: [] } }, artifacts: [] };
+  const candidate = await executor.run({
+    runId,
+    stage,
+    snapshot,
+    sessionId: "test-rewriter",
+    signal: new AbortController().signal,
+  } as never);
+  expect(candidate.artifacts).toContainEqual(
+    expect.objectContaining({
+      metadata: expect.objectContaining({ modifiedByCandidate: true }),
+    }),
+  );
+  const verdict = await executor.review({
+    runId,
+    stage,
+    snapshot,
+    candidate,
+    sessionId: "fresh-reviewer",
+    signal: new AbortController().signal,
+  } as never);
+  expect(verdict.accepted).toBe(false);
+  expect(await Bun.file(reviewPrompt).text()).toContain(
+    '"modifiedByCandidate":true',
+  );
+});
+
+test("a spawned Bun check supplies its own failing and repaired exit evidence", async () => {
+  const { root, binary, workspaceRoot } = await fixture("codex");
+  const counter = join(root, "attempt-count");
+  await writeFile(
+    binary,
+    `#!/usr/bin/env bun
+const args = process.argv.slice(2);
+const prompt = args.at(-1) ?? "";
+const review = prompt.includes("Independently review");
+let attempt = 0;
+try { attempt = Number(await Bun.file(${JSON.stringify(counter)}).text()); } catch {}
+if (!review) {
+  attempt += 1;
+  await Bun.write(${JSON.stringify(counter)}, String(attempt));
+  const expected = attempt === 1 ? 2 : 1;
+  await Bun.write("focused.test.ts", "import {test,expect} from 'bun:test';test('process-owned verdict',()=>expect(1).toBe(" + expected + "));\\n");
+}
+const payload = review
+  ? { accepted: true, summary: "fresh review", checks: ["spawned process evidence"] }
+  : { summary: "candidate attempt " + attempt, checks: [] };
+const output = args[args.indexOf("--output-last-message") + 1];
+await Bun.write(output, JSON.stringify(payload));
+process.stdout.write(JSON.stringify({ usage: { input_tokens: 100, output_tokens: 20 } }) + "\\n");
+`,
+    { mode: 0o700 },
+  );
+  await chmod(binary, 0o700);
+  const executor = createCodexWorkflowExecutor(root, { binary, workspaceRoot });
+  const runId = crypto.randomUUID();
+  const stage = {
+    stageId: "verify",
+    objective: "repair the failing focused test",
+    requiredContext: { keys: [] },
+    dependsOn: { ids: [] },
+    checks: {
+      items: [
+        {
+          id: "focused",
+          command: ["bun", "test", "focused.test.ts"],
+          timeoutMs: 10_000,
+          required: true,
+        },
+      ],
+    },
+    selectedModel: "gpt-contract",
+    selectedHarness: "codex",
+    lastError: null,
+  };
+  const input = {
+    runId,
+    stage,
+    snapshot: { run: { steering: { events: [] } }, artifacts: [] },
+    signal: new AbortController().signal,
+  };
+  let failure: StageExecutionFailure | undefined;
+  try {
+    await executor.run({ ...input, sessionId: "failing-attempt" } as never);
+  } catch (error) {
+    if (error instanceof StageExecutionFailure) failure = error;
+    else throw error;
+  }
+  expect(failure).toBeDefined();
+  const failedCheck = failure?.artifacts.find(
+    (artifact) => artifact.metadata?.checkId === "focused",
+  );
+  expect(failedCheck?.exitCode).not.toBe(0);
+  expect(failedCheck?.content).toContain("process-owned verdict");
+  expect(failedCheck?.content).toContain("Expected: 2");
+
+  const repaired = await executor.run({
+    ...input,
+    sessionId: "repaired-attempt",
+  } as never);
+  const repairedCheck = repaired.artifacts.find(
+    (artifact) => artifact.metadata?.checkId === "focused",
+  );
+  expect(repairedCheck?.exitCode).toBe(0);
+  expect(repairedCheck?.content).toContain("1 pass");
+});
 
 test("Claude refuses unvalidated fallback text when structured_output is absent", async () => {
   const { root, binary, workspaceRoot } = await fixture("claude");

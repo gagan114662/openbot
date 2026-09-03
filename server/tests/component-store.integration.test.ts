@@ -390,7 +390,7 @@ describe("what a component may read", () => {
     expect(left).toHaveLength(0);
   });
 
-  test("every shipped function reads real rows and bounds its own arguments", async () => {
+  test("every shipped function reads database rows and bounds its own arguments", async () => {
     for (const entry of DATA_FUNCTIONS) {
       // Run with nothing, which is what a component sends before the model has supplied anything, and
       // with a hostile number: a value from the browser is a claim, and an unbounded one is a table

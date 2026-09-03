@@ -25,6 +25,37 @@ describe("managed workflow plans", () => {
     ]);
   });
 
+  test("refuses caller-supplied benchmark quality and outcomes", async () => {
+    let stored = false;
+    const routes = createSoftwareFactoryRoutes(
+      { benchmark: async () => (stored = true) } as never,
+      {} as never,
+      "tenant-1",
+      async (context, next) => {
+        context.set("actor", {
+          id: "admin-1",
+          email: "admin@example.test",
+          role: "admin",
+        });
+        await next();
+      },
+    );
+    const response = await routes.request("/benchmarks", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "fake-perfect",
+        task: "ci-repair",
+        quality: 1,
+        successfulOutcomes: 100,
+        attemptedOutcomes: 100,
+        totalCostMicros: 0,
+      }),
+    });
+    expect(response.status).toBe(400);
+    expect(stored).toBe(false);
+  });
+
   test.each([
     ["pull-request-review", ["inspect", "review"]],
     ["ci-repair", ["diagnose", "repair", "verify"]],

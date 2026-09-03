@@ -33,6 +33,7 @@ test("a judging orchestrator grounds and runs independent cheaper workers before
       expectedQuality: 0.9,
       expectedCostPerOutcomeMicros: 10,
       reason: "benchmark",
+      source: "measured",
     }),
     ground: async (keys) =>
       keys.map((key) => ({
@@ -133,6 +134,7 @@ test("a rejected verdict drives a bounded repair with fresh workers and reviewer
       expectedQuality: 0.9,
       expectedCostPerOutcomeMicros: 10,
       reason: "benchmark",
+      source: "measured",
     }),
     ground: async () => [],
     work: async ({ unit, attempt, repairReason }) => {

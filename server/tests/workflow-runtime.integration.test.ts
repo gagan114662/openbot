@@ -13,6 +13,7 @@ import {
   factoryWorkflowStages,
 } from "../src/db/schema";
 import { createClaudeWorkflowExecutor } from "../src/software-factory/codex-workflow-executor";
+import { createSoftwareFactoryRoutes } from "../src/software-factory/routes";
 import { createSoftwareFactoryStore } from "../src/software-factory/store";
 import {
   artifactChecksum,
@@ -724,6 +725,18 @@ if (!prompt.includes("Independently review")) {
 
     expect((await runtime.claim("gate-worker"))?.id).toBe(run.id);
     await complete("produce-a", "producer-a-1", "first candidate A");
+    expect(
+      (await runtime.snapshot(run.id))?.stages.find(
+        (stage) => stage.stageId === "release",
+      )?.status,
+    ).toBe("pending");
+    expect(
+      (await runtime.snapshot(run.id))?.events.some(
+        (event) =>
+          event.entity === "human_gate" &&
+          event.toStatus === "awaiting_approval",
+      ),
+    ).toBe(false);
     await complete("produce-b", "producer-b-1", "first candidate B");
     expect(await runtime.readyStages(run.id)).toEqual([]);
     expect(
@@ -746,14 +759,36 @@ if (!prompt.includes("Independently review")) {
       )?.status,
     ).toBe("awaiting_approval");
 
-    await runtime.decideStageGate(run.id, "release", {
-      actorId: "admin-1",
-      actorRole: "admin",
-      decision: "reject",
-      feedback: "Add the missing rollback proof",
-      producerStageId: "produce-a",
-      revision: "deadbeef",
-    });
+    const routes = createSoftwareFactoryRoutes(
+      store,
+      {} as never,
+      tenantId,
+      async (context, next) => {
+        context.set("actor", {
+          id: "admin-1",
+          email: "admin@example.test",
+          role: "admin",
+        });
+        await next();
+      },
+      undefined,
+      undefined,
+      runtime,
+      { revision: "deadbeef", branch: "test", dirty: false },
+    );
+    const rejected = await routes.request(
+      `/workflows/${run.id}/stages/release/decision`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          decision: "reject",
+          feedback: "Add the missing rollback proof",
+          producerStageId: "produce-a",
+        }),
+      },
+    );
+    expect(rejected.status).toBe(200);
     expect((await runtime.claim("gate-worker"))?.id).toBe(run.id);
     expect(
       (await runtime.readyStages(run.id)).map((stage) => stage.stageId),
@@ -773,7 +808,16 @@ if (!prompt.includes("Independently review")) {
       .update(factoryWorkflowRuns)
       .set({ leaseExpiresAt: new Date(Date.now() - 60_000) })
       .where(eq(factoryWorkflowRuns.id, run.id));
+    const attemptsBeforeGateApproval = (
+      await runtime.snapshot(run.id)
+    )?.stages.map(({ stageId, attempts }) => [stageId, attempts]);
     expect(await runtime.claim("gate-thief")).toBeNull();
+    expect(
+      (await runtime.snapshot(run.id))?.stages.map(({ stageId, attempts }) => [
+        stageId,
+        attempts,
+      ]),
+    ).toEqual(attemptsBeforeGateApproval);
     await runtime.decideStageGate(run.id, "release", {
       actorId: "admin-1",
       actorRole: "admin",

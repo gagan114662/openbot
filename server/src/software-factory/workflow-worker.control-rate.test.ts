@@ -2,8 +2,9 @@ import { expect, test } from "bun:test";
 import { artifactChecksum } from "./workflow-runtime";
 import { createWorkflowWorker } from "./workflow-worker";
 
-test("a running stage performs fewer than one narrow control read per second", async () => {
+test("a 60-second running stage performs fewer than one database query per second", async () => {
   let controlReads = 0;
+  let databaseQueries = 0;
   let claimed = false;
   const stage = {
     stageId: "execute",
@@ -30,9 +31,15 @@ test("a running stage performs fewer than one narrow control read per second", a
     },
     readyStages: async () => [stage],
     startStage: async () => stage,
-    snapshot: async () => snapshot,
+    snapshot: async () => {
+      // The production snapshot projection is four SQL queries.
+      databaseQueries += 4;
+      return snapshot;
+    },
     control: async () => {
       controlReads += 1;
+      // The production control projection is exactly one SQL query.
+      databaseQueries += 1;
       return snapshot.run;
     },
     renewLease: async () => true,
@@ -47,7 +54,7 @@ test("a running stage performs fewer than one narrow control read per second", a
     executor: {
       harness: "routed",
       run: async ({ sessionId }: { sessionId: string }) => {
-        await new Promise((resolve) => setTimeout(resolve, 2_600));
+        await new Promise((resolve) => setTimeout(resolve, 60_500));
         return {
           sessionId,
           summary: content,
@@ -75,6 +82,12 @@ test("a running stage performs fewer than one narrow control read per second", a
   const startedAt = performance.now();
   await worker.runOnce();
   const seconds = (performance.now() - startedAt) / 1_000;
-  expect(controlReads / seconds).toBeLessThan(1);
-  expect(controlReads).toBe(2);
-});
+  const afterQueriesPerSecond = databaseQueries / seconds;
+  const beforeQueriesPerSecond = 4 * (1_000 / 250);
+  console.info(
+    `workflow control query rate: before=${beforeQueriesPerSecond.toFixed(2)}/s after=${afterQueriesPerSecond.toFixed(2)}/s controls=${controlReads} seconds=${seconds.toFixed(2)}`,
+  );
+  expect(afterQueriesPerSecond).toBeLessThan(1);
+  expect(controlReads).toBeGreaterThanOrEqual(47);
+  expect(controlReads).toBeLessThanOrEqual(49);
+}, 70_000);

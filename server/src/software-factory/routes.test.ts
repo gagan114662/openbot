@@ -389,6 +389,7 @@ describe("workflow live control surface", () => {
   });
 
   test("pushes only each active run's own events to simultaneous streams", async () => {
+    const snapshotReads = new Map<string, number>();
     const routes = createSoftwareFactoryRoutes(
       {} as never,
       {} as never,
@@ -404,12 +405,15 @@ describe("workflow live control surface", () => {
       undefined,
       undefined,
       {
-        snapshot: async (runId: string) => ({
-          run: { id: runId, status: "running" },
-          stages: [],
-          events: [],
-          artifacts: [],
-        }),
+        snapshot: async (runId: string) => {
+          snapshotReads.set(runId, (snapshotReads.get(runId) ?? 0) + 1);
+          return {
+            run: { id: runId, status: "running" },
+            stages: [],
+            events: [],
+            artifacts: [],
+          };
+        },
       } as never,
     );
     const abortA = new AbortController();
@@ -441,6 +445,12 @@ describe("workflow live control surface", () => {
     expect(eventA).not.toContain("only-b");
     expect(eventB).toContain("only-b");
     expect(eventB).not.toContain("only-a");
+    expect(snapshotReads).toEqual(
+      new Map([
+        ["run-a", 1],
+        ["run-b", 1],
+      ]),
+    );
     abortA.abort();
     abortB.abort();
   });

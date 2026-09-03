@@ -1010,7 +1010,17 @@ if (!prompt.includes("Independently review")) {
     await worker.drain();
   });
 
-  test("a SIGKILLed worker is recovered from its durable lease with the attempt preserved", async () => {
+  test("a SIGKILLed worker restarts on the same hostname and completes with the attempt preserved", async () => {
+    await store.benchmark({
+      source: "measured",
+      model: "restart-proof-model",
+      task: "ci-repair",
+      quality: 0.9,
+      successfulOutcomes: 1,
+      attemptedOutcomes: 1,
+      totalCostMicros: 0,
+      enabled: true,
+    });
     const queued = await store.queueJob("admin", {
       kind: "ci-repair",
       tier: "managed",
@@ -1037,8 +1047,10 @@ if (!prompt.includes("Independently review")) {
         cwd: process.cwd(),
         env: {
           ...process.env,
+          HOSTNAME: "factory-host-proof",
           WORKFLOW_TEST_TENANT: tenantId,
           WORKFLOW_TEST_RUN: run.id,
+          WORKFLOW_TEST_MODE: "crash",
         },
         stdout: "pipe",
         stderr: "pipe",
@@ -1046,17 +1058,49 @@ if (!prompt.includes("Independently review")) {
     );
     const reader = child.stdout.getReader();
     const first = await reader.read();
-    expect(new TextDecoder().decode(first.value)).toContain("STAGE_STARTED");
+    const killed = JSON.parse(new TextDecoder().decode(first.value)) as {
+      event: string;
+      workerId: string;
+    };
+    expect(killed).toMatchObject({ event: "STAGE_STARTED" });
+    expect(killed.workerId).toContain("software-factory/factory-host-proof");
     child.kill(9);
     expect(await child.exited).not.toBe(0);
     await Bun.sleep(150);
 
-    expect((await runtime.claim("replacement-worker", 1_000))?.id).toBe(run.id);
+    const restarted = Bun.spawn(
+      ["bun", "server/tests/fixtures/workflow-crash-worker.ts"],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          HOSTNAME: "factory-host-proof",
+          WORKFLOW_TEST_TENANT: tenantId,
+          WORKFLOW_TEST_RUN: run.id,
+          WORKFLOW_TEST_MODE: "recover",
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const restartedOutput = await new Response(restarted.stdout).text();
+    const restartedError = await new Response(restarted.stderr).text();
+    expect(await restarted.exited).toBe(0);
+    expect(restartedError).toBe("");
+    const recoveredBy = JSON.parse(restartedOutput) as {
+      event: string;
+      workerId: string;
+    };
+    expect(recoveredBy).toMatchObject({ event: "STAGE_COMPLETED" });
+    expect(recoveredBy.workerId).toContain(
+      "software-factory/factory-host-proof",
+    );
+    expect(recoveredBy.workerId).not.toBe(killed.workerId);
     const recovered = await runtime.snapshot(run.id);
+    expect(recovered?.run.status).toBe("awaiting_approval");
     expect(recovered?.stages[0]).toMatchObject({
-      status: "pending",
-      attempts: 1,
-      lastError: "Worker lease expired before a result was committed.",
+      status: "succeeded",
+      attempts: 2,
     });
     expect(
       recovered?.events.map((event) => [
@@ -1065,8 +1109,7 @@ if (!prompt.includes("Independently review")) {
         event.toStatus,
       ]),
     ).toContainEqual(["stage", "running", "pending"]);
-    await runtime.requestAbort(run.id);
-  });
+  }, 15_000);
 
   test("pause and steering interrupt active work, then resume from the durable stage", async () => {
     const queued = await store.queueJob("admin", {

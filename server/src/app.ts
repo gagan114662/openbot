@@ -49,6 +49,7 @@ import type { PluginStore } from "./plugins/store";
 import { REFUSAL_MARKER } from "./plugins/tools";
 import { createProductionEngineerRoutes } from "./production-engineer/routes";
 import type { ProductionEngineerStore } from "./production-engineer/store";
+import type { FactoryBenchmarkRunner } from "./software-factory/benchmark-runner";
 import type { ContextGraph } from "./software-factory/context-graph";
 import { createSoftwareFactoryRoutes } from "./software-factory/routes";
 import type { ShadowEvaluator } from "./software-factory/shadow-evaluator";
@@ -253,6 +254,7 @@ export function createApp(
     auditStore?: AuditStore;
     worktreeStats?: () => Promise<{ active: number; diskBytes: number }>;
     cleanupWorktree?: (runId: string) => Promise<void>;
+    benchmarks?: FactoryBenchmarkRunner;
     provenance?: {
       revision: string;
       branch: string;
@@ -1001,6 +1003,7 @@ export function createApp(
         softwareFactory.auditStore,
         softwareFactory.worktreeStats,
         softwareFactory.cleanupWorktree,
+        softwareFactory.benchmarks,
       ),
     );
   }

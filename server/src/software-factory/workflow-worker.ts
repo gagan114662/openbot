@@ -91,6 +91,9 @@ export function createWorkflowWorker(options: {
     runId: string;
     error: string;
   }) => Promise<void>;
+  onRunSettled?: (
+    snapshot: NonNullable<Awaited<ReturnType<WorkflowRuntime["snapshot"]>>>,
+  ) => Promise<void>;
 }) {
   const sessionId = options.sessionId ?? randomUUID;
   const leaseMs = options.leaseMs ?? 30_000;
@@ -290,6 +293,7 @@ export function createWorkflowWorker(options: {
           completed.run.status,
         )
       ) {
+        await options.onRunSettled?.(completed);
         if ("cleanup" in options.executor)
           await options.executor.cleanup?.(run.id);
       }

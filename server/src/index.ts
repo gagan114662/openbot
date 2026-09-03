@@ -98,6 +98,7 @@ import { createRoutineStore } from "./routines/store";
 import { createIntentRouter } from "./routing/classify";
 import { chatCompletionsUrl, createModelCompleter } from "./routing/model";
 import { installGracefulShutdown } from "./shutdown";
+import { createFactoryBenchmarkRunner } from "./software-factory/benchmark-runner";
 import {
   createClaudeWorkflowExecutor,
   createCodexWorkflowExecutor,
@@ -406,6 +407,13 @@ const workflowWorkerId = processOwner("software-factory");
 const softwareFactoryRepository =
   process.env.SOFTWARE_FACTORY_REPOSITORY ??
   fileURLToPath(new URL("../..", import.meta.url));
+const factoryBenchmarkRunner = createFactoryBenchmarkRunner({
+  database,
+  tenantId: tenantPackage.tenantId,
+  store: softwareFactoryStore,
+  runtime: workflowRuntime,
+  revision: runtimeProvenance.revision,
+});
 const workflowWorker = createWorkflowWorker({
   runtime: workflowRuntime,
   workerId: workflowWorkerId,
@@ -420,8 +428,13 @@ const workflowWorker = createWorkflowWorker({
     }),
   ]),
   onTerminalFailure: async ({ runId, error }) => {
-    const run = (await workflowRuntime.snapshot(runId))?.run;
-    if (!run) return;
+    const snapshot = await workflowRuntime.snapshot(runId);
+    if (!snapshot) return;
+    // Benchmark failures are evidence, not ordinary managed-job outcomes. Recording them here
+    // preserves the failed checks and avoids looking for a routing row that intentionally does
+    // not exist until the benchmark aggregate is promoted.
+    if (await factoryBenchmarkRunner.recordWorkflow(snapshot)) return;
+    const run = snapshot.run;
     await softwareFactoryStore.completeJob(run.jobId, {
       success: false,
       costMicros: 0,
@@ -432,6 +445,9 @@ const workflowWorker = createWorkflowWorker({
         costBasis: "codex-subscription",
       },
     });
+  },
+  onRunSettled: async (snapshot) => {
+    await factoryBenchmarkRunner.recordWorkflow(snapshot);
   },
 });
 const workflowLoop =
@@ -1473,6 +1489,7 @@ const app = createApp(
     worktreeStats: () => workflowWorker.worktreeStats(),
     cleanupWorktree: (runId) => workflowWorker.cleanup(runId),
     provenance: { ...runtimeProvenance, workerId: workflowWorkerId },
+    benchmarks: factoryBenchmarkRunner,
   },
 );
 

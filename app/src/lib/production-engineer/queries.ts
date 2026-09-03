@@ -105,6 +105,9 @@ export type SoftwareFactoryDashboard = {
     attemptedOutcomes: number;
     totalCostMicros: number;
     enabled: boolean;
+    source: "measured" | "seeded";
+    benchmarkRunId: string | null;
+    seedReason: string | null;
   }>;
   jobs: Array<{
     id: string;
@@ -270,6 +273,15 @@ export async function createManagedJob(input: {
       minimumQuality: 0.8,
     },
   });
+  return response.json();
+}
+
+export async function runFactoryBenchmark(id = "ci-repair-v1") {
+  const response = await client(
+    `/api/software-factory/benchmarks/${encodeURIComponent(id)}/run`,
+    { method: "POST", body: {} },
+  );
+  if (!response.ok) throw new Error(await response.text());
   return response.json();
 }
 

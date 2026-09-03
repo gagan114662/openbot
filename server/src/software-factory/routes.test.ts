@@ -80,7 +80,6 @@ describe("managed workflow plans", () => {
     const stages = managedWorkflowStages("ci-repair", "write the proof", [], {
       path: "PROOF.md",
       sha256: "a".repeat(64),
-      expectedContent: "proved\n",
     });
     expect(stages.at(-1)?.checks.at(-1)).toEqual({
       id: "observable-change",
@@ -100,6 +99,9 @@ describe("managed workflow plans", () => {
     );
     expect(stages[0]?.objective).toContain("nonterminal stage");
     expect(stages.at(-1)?.objective).toContain("terminal stage");
+    expect(stages.at(-1)?.objective).toContain("PROOF.md");
+    expect(stages.at(-1)?.objective).not.toContain("proved");
+    expect(stages.at(-1)?.objective).not.toContain("a".repeat(64));
   });
 });
 
@@ -192,6 +194,7 @@ describe("managed workflow launch provenance", () => {
         }),
       ]),
     );
+    expect(JSON.stringify(workflowInput?.stages)).not.toContain("proved");
   });
 });
 
@@ -199,6 +202,9 @@ describe("workflow control audit", () => {
   test.each([
     ["approve", "awaiting_approval", "succeeded"],
     ["abort", "running", "aborting"],
+    ["pause", "running", "pausing"],
+    ["resume", "paused", "running"],
+    ["steer", "running", "running"],
   ] as const)(
     "records %s with its state transition",
     async (action, from, to) => {
@@ -224,6 +230,9 @@ describe("workflow control audit", () => {
           snapshot: async () => ({ run: { ...run, status: from } }),
           approve: async () => (action === "approve" ? run : null),
           requestAbort: async () => (action === "abort" ? run : null),
+          requestPause: async () => (action === "pause" ? run : null),
+          resume: async () => (action === "resume" ? run : null),
+          steer: async () => (action === "steer" ? run : null),
         } as never,
         undefined,
         {
@@ -235,7 +244,9 @@ describe("workflow control audit", () => {
 
       const response = await routes.request(`/workflows/run-1/${action}`, {
         method: "POST",
-        body: "{}",
+        body: JSON.stringify(
+          action === "steer" ? { instruction: "do not expose me" } : {},
+        ),
         headers: { "content-type": "application/json" },
       });
 
@@ -253,6 +264,13 @@ describe("workflow control audit", () => {
           }),
         }),
       ]);
+      if (action === "steer") {
+        expect(events[0]?.payload).toMatchObject({
+          instructionHash:
+            "84f6f1e37610fb5f14427759dc714d16aa8159538f283bd558f348b03f328b74",
+        });
+        expect(JSON.stringify(events)).not.toContain("do not expose me");
+      }
     },
   );
 });

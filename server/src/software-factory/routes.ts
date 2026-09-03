@@ -26,7 +26,7 @@ export function managedWorkflowStages(
   kind: ManagedJobKind,
   objective: string,
   requiredContext: string[],
-  observableChange?: { path: string; sha256: string; expectedContent: string },
+  observableChange?: { path: string; sha256: string },
 ) {
   const diffCheck = {
     id: "diff-integrity",
@@ -151,7 +151,7 @@ export function managedWorkflowStages(
   if (observableChange) {
     const terminal = stages.at(-1);
     if (!terminal) throw new Error("Managed workflow has no terminal stage.");
-    terminal.objective += ` Required observable change: write ${observableChange.path} with these exact UTF-8 bytes: ${JSON.stringify(observableChange.expectedContent)}.`;
+    terminal.objective += ` Produce the objective-driven observable change in ${observableChange.path}. The runtime validates the expected artifact independently; its expected bytes and digest are intentionally withheld from every model prompt.`;
     terminal.checks.push({
       id: "observable-change",
       command: [

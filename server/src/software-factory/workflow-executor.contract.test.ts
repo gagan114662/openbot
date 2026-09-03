@@ -36,6 +36,7 @@ async function fixture(harness: "codex" | "claude") {
   run("git", "commit", "-qm", "fixture");
   const binary = join(root, `fake-${harness}`);
   const reviewPrompt = join(root, `review-${harness}.txt`);
+  const workerPrompt = join(root, `worker-${harness}.txt`);
   await writeFile(
     binary,
     `#!/usr/bin/env bun
@@ -43,6 +44,7 @@ const args = process.argv.slice(2);
 const prompt = args.includes("-p") ? args[args.indexOf("-p") + 1] : args.at(-1) ?? "";
 const review = prompt.includes("Independently review");
 if (review) await Bun.write(${JSON.stringify(reviewPrompt)}, prompt);
+else await Bun.write(${JSON.stringify(workerPrompt)}, prompt);
 const payload = review
   ? {
       accepted:
@@ -71,14 +73,14 @@ if (${JSON.stringify(harness)} === "codex") {
     { mode: 0o700 },
   );
   await chmod(binary, 0o700);
-  return { root, binary, workspaceRoot, reviewPrompt };
+  return { root, binary, workspaceRoot, reviewPrompt, workerPrompt };
 }
 
 describe.each(["codex", "claude"] as const)(
   "%s workflow harness",
   (harness) => {
     test("honours the persisted model and satisfies the shared executor contract", async () => {
-      const { root, binary, workspaceRoot, reviewPrompt } =
+      const { root, binary, workspaceRoot, reviewPrompt, workerPrompt } =
         await fixture(harness);
       const executor =
         harness === "codex"
@@ -125,6 +127,10 @@ describe.each(["codex", "claude"] as const)(
         kind: "runtime-check",
         exitCode: 0,
       });
+      const executionPrompt = await Bun.file(workerPrompt).text();
+      expect(executionPrompt).toContain("prove the shared harness contract");
+      expect(executionPrompt).not.toContain("with these exact UTF-8 bytes");
+      expect(executionPrompt).not.toContain("OPENBOT_PRIVATE_EXPECTED_BYTES");
       expect(JSON.parse(candidate.artifacts[1]!.content)).toMatchObject({
         kind: "runtime-check",
         exitCode: 0,

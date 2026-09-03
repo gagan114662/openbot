@@ -190,6 +190,42 @@ describe("durable workflow runtime", () => {
     );
     expect(steer?.payload).toMatchObject({ instructionHash });
     expect(JSON.stringify(steer?.payload)).not.toContain(instruction);
+
+    const rollbackJob = await store.queueJob("audit-admin", {
+      kind: "ci-repair",
+      tier: "managed",
+      objective: "prove audit and control are atomic",
+      trigger: "control-audit-rollback-proof",
+      minimumQuality: 0.8,
+    });
+    const rollbackRuntime = createWorkflowRuntime(database, tenantId, {
+      failControlAudit: async () => {
+        throw new Error("injected audit failure");
+      },
+    });
+    const rollbackRun = await rollbackRuntime.create({
+      jobId: rollbackJob.job.id,
+      maximumAttempts: 1,
+      concurrencyLimit: 1,
+      stages: [
+        {
+          id: "atomic",
+          objective: "remain queued when audit fails",
+          requiredContext: [],
+          dependsOn: [],
+        },
+      ],
+    });
+    await expect(
+      rollbackRuntime.requestPause(rollbackRun.id, {
+        actorId: "audit-admin",
+        fromStatus: "queued",
+      }),
+    ).rejects.toThrow("injected audit failure");
+    expect((await rollbackRuntime.snapshot(rollbackRun.id))?.run.status).toBe(
+      "queued",
+    );
+    await runtime.requestAbort(rollbackRun.id);
   });
 
   test("repairs within budget, enforces dependencies, pauses, resumes, and requires approval", async () => {

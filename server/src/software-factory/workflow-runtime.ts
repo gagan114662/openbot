@@ -203,7 +203,11 @@ export function verifyWorkflowEvidence(snapshot: {
   };
 }
 
-export function createWorkflowRuntime(database: Database, tenantId: string) {
+export function createWorkflowRuntime(
+  database: Database,
+  tenantId: string,
+  options: { failControlAudit?: () => Promise<never> } = {},
+) {
   const controlAudit = async (
     tx: Parameters<Parameters<typeof database.transaction>[0]>[0],
     run: typeof factoryWorkflowRuns.$inferSelect,
@@ -215,6 +219,7 @@ export function createWorkflowRuntime(database: Database, tenantId: string) {
     },
   ) => {
     if (!input) return;
+    if (options.failControlAudit) await options.failControlAudit();
     await tx.insert(auditEvents).values({
       eventType: "workflow.control_applied",
       targetType: "factory_workflow_run",

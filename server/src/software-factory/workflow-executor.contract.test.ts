@@ -132,18 +132,20 @@ describe.each(["codex", "claude"] as const)(
       stopStream();
       expect(streamed.join("")).toContain("check-output");
       expect(candidate.sessionId).toBe("worker-session");
-      expect(candidate.artifacts).toHaveLength(3);
-      expect(candidate.artifacts[0]?.metadata).toMatchObject({
+      expect(candidate.artifacts).toHaveLength(4);
+      expect(candidate.artifacts[0]?.kind).toBe("model-prompt");
+      expect(candidate.artifacts[0]?.content).toContain("Operator steering:");
+      expect(candidate.artifacts[1]?.metadata).toMatchObject({
         harness,
         model: stage.selectedModel,
         usage: expect.objectContaining({ totalTokens: expect.any(Number) }),
       });
-      expect(candidate.artifacts[1]).toMatchObject({
+      expect(candidate.artifacts[2]).toMatchObject({
         kind: "runtime-check",
         exitCode: 0,
         metadata: { checkId: "gate-integrity" },
       });
-      expect(candidate.artifacts[2]).toMatchObject({
+      expect(candidate.artifacts[3]).toMatchObject({
         kind: "runtime-check",
         exitCode: 0,
         metadata: {
@@ -157,12 +159,12 @@ describe.each(["codex", "claude"] as const)(
       expect(executionPrompt).toContain("prove the shared harness contract");
       expect(executionPrompt).not.toContain("with these exact UTF-8 bytes");
       expect(executionPrompt).not.toContain("OPENBOT_PRIVATE_EXPECTED_BYTES");
-      expect(JSON.parse(candidate.artifacts[2]!.content)).toMatchObject({
+      expect(JSON.parse(candidate.artifacts[3]!.content)).toMatchObject({
         kind: "runtime-check",
         exitCode: 0,
       });
       expect(
-        String(candidate.artifacts[2]?.metadata?.reviewMaterialPath),
+        String(candidate.artifacts[3]?.metadata?.reviewMaterialPath),
       ).not.toStartWith(`${root}/`);
       const review = await executor.review({
         runId,

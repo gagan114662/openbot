@@ -36,6 +36,7 @@ function ProductionEngineerPage() {
   const [investigationApproved, setInvestigationApproved] = useState(false);
   const [workflowSteering, setWorkflowSteering] = useState("");
   const [gateFeedback, setGateFeedback] = useState<Record<string, string>>({});
+  const [gateProducer, setGateProducer] = useState<Record<string, string>>({});
   const [streamState, setStreamState] = useState("connecting");
   const [jobObjective, setJobObjective] = useState("");
   const [jobContextKeys, setJobContextKeys] = useState("");
@@ -437,7 +438,8 @@ function ProductionEngineerPage() {
                           Resume
                         </Button>
                       ) : null}
-                      {run.status === "awaiting_approval" ? (
+                      {run.status === "awaiting_approval" &&
+                      evidence.readyForApproval ? (
                         <Button
                           size="sm"
                           onClick={() =>
@@ -560,6 +562,33 @@ function ProductionEngineerPage() {
                                     }))
                                   }
                                 />
+                                {stage.dependsOn.ids.length > 1 ? (
+                                  <select
+                                    aria-label={`Producer to repair for ${stage.stageId}`}
+                                    className="h-9 rounded-md border bg-background px-3 text-sm"
+                                    value={
+                                      gateProducer[
+                                        `${run.id}:${stage.stageId}`
+                                      ] ?? ""
+                                    }
+                                    onChange={(event) =>
+                                      setGateProducer((current) => ({
+                                        ...current,
+                                        [`${run.id}:${stage.stageId}`]:
+                                          event.target.value,
+                                      }))
+                                    }
+                                  >
+                                    <option value="">
+                                      Select producer to repair
+                                    </option>
+                                    {stage.dependsOn.ids.map((producer) => (
+                                      <option key={producer} value={producer}>
+                                        {producer}
+                                      </option>
+                                    ))}
+                                  </select>
+                                ) : null}
                                 <Button
                                   size="sm"
                                   onClick={() =>
@@ -578,13 +607,23 @@ function ProductionEngineerPage() {
                                   disabled={
                                     !gateFeedback[
                                       `${run.id}:${stage.stageId}`
-                                    ]?.trim()
+                                    ]?.trim() ||
+                                    (stage.dependsOn.ids.length > 1 &&
+                                      !gateProducer[
+                                        `${run.id}:${stage.stageId}`
+                                      ])
                                   }
                                   onClick={() =>
                                     gateControl.mutate({
                                       runId: run.id,
                                       stageId: stage.stageId,
                                       decision: "reject",
+                                      producerStageId:
+                                        stage.dependsOn.ids.length === 1
+                                          ? stage.dependsOn.ids[0]
+                                          : gateProducer[
+                                              `${run.id}:${stage.stageId}`
+                                            ],
                                       feedback:
                                         gateFeedback[
                                           `${run.id}:${stage.stageId}`

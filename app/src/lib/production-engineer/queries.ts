@@ -171,6 +171,7 @@ export type SoftwareFactoryDashboard = {
     };
     stages: Array<{
       stageId: string;
+      dependsOn: { ids: string[] };
       objective: string;
       status: string;
       attempts: number;
@@ -293,9 +294,10 @@ export async function decideWorkflowGate(input: {
   stageId: string;
   decision: "approve" | "reject";
   feedback?: string;
+  producerStageId?: string;
 }) {
   const response = await client(
-    `/api/software-factory/workflows/${encodeURIComponent(input.runId)}/stages/${encodeURIComponent(input.stageId)}/gate`,
+    `/api/software-factory/workflows/${encodeURIComponent(input.runId)}/stages/${encodeURIComponent(input.stageId)}/decision`,
     { method: "POST", body: input },
   );
   if (!response.ok) throw new Error(await response.text());

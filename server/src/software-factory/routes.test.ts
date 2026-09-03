@@ -334,7 +334,7 @@ describe("workflow live control surface", () => {
       } as never,
     );
     const response = await routes.request(
-      "/workflows/run-1/stages/release/gate",
+      "/workflows/run-1/stages/release/decision",
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -343,7 +343,48 @@ describe("workflow live control surface", () => {
     );
     expect(response.status).toBe(200);
     expect(calls).toEqual([
-      ["run-1", "release", "admin-1", "reject", "repair this"],
+      [
+        "run-1",
+        "release",
+        {
+          actorId: "admin-1",
+          actorRole: "admin",
+          decision: "reject",
+          feedback: "repair this",
+          producerStageId: undefined,
+          revision: "runtime-control",
+        },
+      ],
     ]);
+  });
+
+  test("returns 403 when the durable gate rejects the actor role", async () => {
+    const routes = createSoftwareFactoryRoutes(
+      {} as never,
+      {} as never,
+      "tenant-1",
+      async (context, next) => {
+        context.set("actor", {
+          id: "admin-1",
+          email: "admin@example.test",
+          role: "admin",
+        });
+        await next();
+      },
+      undefined,
+      undefined,
+      {
+        decideStageGate: async () => ({ status: "forbidden" }),
+      } as never,
+    );
+    const response = await routes.request(
+      "/workflows/run-1/stages/release/decision",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ decision: "approve" }),
+      },
+    );
+    expect(response.status).toBe(403);
   });
 });

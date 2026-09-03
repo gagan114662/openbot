@@ -30,7 +30,7 @@ describe("reviewed long-term memory", () => {
     ]);
   });
 
-  test("approved memory requires reviewer, time, source, and a real Bot", () => {
+  test("approved memory requires reviewer, time, source, and a registered Bot", () => {
     expect(() =>
       validateTenantPackage({
         ...base,

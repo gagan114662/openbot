@@ -126,7 +126,7 @@ describe("agent analytics routes", () => {
     expect(calls).toHaveLength(0);
   });
 
-  test("rejects a non-admin spoof over a real HTTP socket", async () => {
+  test("rejects a non-admin spoof over an HTTP socket", async () => {
     const { app, calls } = testApp(
       "user",
       {},

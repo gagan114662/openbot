@@ -83,7 +83,7 @@ describe("builtin Open Web tools", () => {
     expect(resolutions).toBe(1);
   });
 
-  test("the real socket dials the pinned IP while HTTP retains the checked hostname", async () => {
+  test("the socket dials the pinned IP while HTTP retains the checked hostname", async () => {
     let seenHost = "";
     const server = Bun.serve({
       hostname: "127.0.0.1",

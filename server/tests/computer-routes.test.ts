@@ -178,7 +178,7 @@ describe("human input", () => {
     return { response, calls };
   }
 
-  test("carries a real gesture through with its coordinates", async () => {
+  test("carries a gesture through with its coordinates", async () => {
     const { response, calls } = await send({ x: 10, y: 20 });
 
     expect(response.status).toBe(200);

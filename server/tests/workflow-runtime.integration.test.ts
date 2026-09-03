@@ -554,7 +554,7 @@ describe("durable workflow runtime", () => {
     );
   });
 
-  test("a real Claude CLI contract retries malformed reviewer output while retaining attempt-one artifacts", async () => {
+  test("a spawned Claude CLI contract retries malformed reviewer output while retaining attempt-one artifacts", async () => {
     const repository = await mkdtemp(join(tmpdir(), "openbot-claude-retry-"));
     const workspaceRoot = await mkdtemp(
       join(tmpdir(), "openbot-claude-retry-workspaces-"),

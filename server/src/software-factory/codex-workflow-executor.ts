@@ -529,32 +529,33 @@ export function createCodexWorkflowExecutor(
         [
           "Independently review this managed-agent stage from fresh context.",
           `Objective: ${stage.objective}`,
-          `Candidate summary: ${candidate.summary}`,
           `Runtime-scoped candidate diff (runtime dependency/evidence paths excluded): ${scopedDiff.stdout || "empty"}`,
           `Artifacts: ${JSON.stringify(
-            candidate.artifacts.map(
-              ({
-                kind,
-                uri,
-                checksum,
-                revision,
-                command,
-                exitCode,
-                metadata,
-              }) => ({
-                kind,
-                uri,
-                checksum,
-                revision,
-                command,
-                exitCode,
-                reviewMaterialPath: metadata?.reviewMaterialPath,
-              }),
-            ),
+            candidate.artifacts
+              .filter(({ kind }) => kind === "runtime-check")
+              .map(
+                ({
+                  kind,
+                  uri,
+                  checksum,
+                  revision,
+                  command,
+                  exitCode,
+                  metadata,
+                }) => ({
+                  kind,
+                  uri,
+                  checksum,
+                  revision,
+                  command,
+                  exitCode,
+                  reviewMaterialPath: metadata?.reviewMaterialPath,
+                }),
+              ),
           )}`,
           "Before accepting, run `shasum -a 256` on each exact reviewMaterialPath and require it to equal the supplied checksum. The durable workflow URI is committed only after your verdict.",
           "Ignore the runtime-only node_modules symlink and .openbot-evidence directory when assessing the candidate diff.",
-          "Only artifacts with kind runtime-check are authoritative executed gates. Checks named inside the model result are explicitly model-reported and must not be treated as required runtime evidence.",
+          "Only the supplied runtime-check artifacts are authoritative executed gates. The worker's summary and model-reported checks are deliberately withheld and must not influence this review.",
           "Inspect the supplied runtime-scoped diff and independently validate the runtime-check artifacts. Do not rerun commands that require writes from this read-only reviewer. Reject on missing evidence, weakened tests, unverifiable runtime-check artifacts, or unmet stage objective.",
           "Return JSON with accepted, summary, and exact checks you independently ran.",
         ].join("\n"),

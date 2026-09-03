@@ -35,14 +35,24 @@ async function fixture(harness: "codex" | "claude") {
   run("git", "add", "README.md");
   run("git", "commit", "-qm", "fixture");
   const binary = join(root, `fake-${harness}`);
+  const reviewPrompt = join(root, `review-${harness}.txt`);
   await writeFile(
     binary,
     `#!/usr/bin/env bun
 const args = process.argv.slice(2);
 const prompt = args.includes("-p") ? args[args.indexOf("-p") + 1] : args.at(-1) ?? "";
 const review = prompt.includes("Independently review");
+if (review) await Bun.write(${JSON.stringify(reviewPrompt)}, prompt);
 const payload = review
-  ? { accepted: true, summary: "fresh fake review", checks: ["contract"] }
+  ? {
+      accepted:
+        prompt.includes("Runtime-scoped candidate diff") &&
+        prompt.includes('"kind":"runtime-check"') &&
+        !prompt.includes("fake worker result") &&
+        !prompt.includes("model reported"),
+      summary: "fresh fake review",
+      checks: ["contract"],
+    }
   : { summary: "fake worker result", checks: ["model reported"] };
 if (${JSON.stringify(harness)} === "codex") {
   const output = args[args.indexOf("--output-last-message") + 1];
@@ -55,14 +65,15 @@ if (${JSON.stringify(harness)} === "codex") {
     { mode: 0o700 },
   );
   await chmod(binary, 0o700);
-  return { root, binary, workspaceRoot };
+  return { root, binary, workspaceRoot, reviewPrompt };
 }
 
 describe.each(["codex", "claude"] as const)(
   "%s workflow harness",
   (harness) => {
     test("honours the persisted model and satisfies the shared executor contract", async () => {
-      const { root, binary, workspaceRoot } = await fixture(harness);
+      const { root, binary, workspaceRoot, reviewPrompt } =
+        await fixture(harness);
       const executor =
         harness === "codex"
           ? createCodexWorkflowExecutor(root, { binary, workspaceRoot })
@@ -124,6 +135,11 @@ describe.each(["codex", "claude"] as const)(
         signal: new AbortController().signal,
       } as never);
       expect(review).toMatchObject({ accepted: true, checks: ["contract"] });
+      const prompt = await Bun.file(reviewPrompt).text();
+      expect(prompt).not.toContain("Candidate summary");
+      expect(prompt).not.toContain("fake worker result");
+      expect(prompt).not.toContain("model reported");
+      expect(prompt).toContain('"kind":"runtime-check"');
       const evidencePath = String(
         candidate.artifacts[1]?.metadata?.reviewMaterialPath,
       );

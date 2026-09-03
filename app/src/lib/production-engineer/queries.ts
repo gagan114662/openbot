@@ -259,6 +259,7 @@ export async function createManagedJob(input: {
   maximumAttempts: number;
   concurrencyLimit: number;
   requiredContext: string[];
+  observableChange: { path: string; expectedContent: string };
 }) {
   const response = await client("/api/software-factory/jobs", {
     method: "POST",

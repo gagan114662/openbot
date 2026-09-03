@@ -150,6 +150,7 @@ export const factoryManagedJobs = pgTable(
     tier: text("tier").notNull(),
     objective: text("objective").notNull(),
     trigger: text("trigger").notNull(),
+    launchMetadata: jsonb("launch_metadata").notNull().default({}),
     status: text("status").notNull().default("queued"),
     selectedModel: text("selected_model"),
     selectedHarness: text("selected_harness"),

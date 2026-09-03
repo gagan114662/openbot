@@ -26,6 +26,7 @@ export function managedWorkflowStages(
   kind: ManagedJobKind,
   objective: string,
   requiredContext: string[],
+  observableChange?: { path: string; sha256: string; expectedContent: string },
 ) {
   const diffCheck = {
     id: "diff-integrity",
@@ -74,9 +75,10 @@ export function managedWorkflowStages(
     checks,
     ...(gate ? { gate } : {}),
   });
+  let stages: ReturnType<typeof stage>[];
   switch (kind) {
     case "pull-request-review":
-      return [
+      stages = [
         stage(
           "inspect",
           "Inspect the change and establish revision-bound evidence",
@@ -93,8 +95,9 @@ export function managedWorkflowStages(
           },
         ),
       ];
+      break;
     case "ci-repair":
-      return [
+      stages = [
         stage(
           "diagnose",
           "Reproduce the reported CI state and diagnose any failing checks",
@@ -119,8 +122,9 @@ export function managedWorkflowStages(
           focusedFactoryChecks,
         ),
       ];
+      break;
     case "bug-triage":
-      return [
+      stages = [
         stage("reproduce", "Reproduce the reported behavior"),
         stage("diagnose", "Identify the causal root issue", ["reproduce"]),
         stage(
@@ -130,8 +134,9 @@ export function managedWorkflowStages(
           focusedFactoryChecks,
         ),
       ];
+      break;
     case "visual-delivery":
-      return [
+      stages = [
         stage("implement", "Implement the requested user-visible change"),
         stage(
           "visual-verify",
@@ -140,7 +145,27 @@ export function managedWorkflowStages(
           focusedFactoryChecks,
         ),
       ];
+      break;
   }
+  if (observableChange) {
+    const terminal = stages.at(-1);
+    if (!terminal) throw new Error("Managed workflow has no terminal stage.");
+    terminal.objective += ` Required observable change: write ${observableChange.path} with these exact UTF-8 bytes: ${JSON.stringify(observableChange.expectedContent)}.`;
+    terminal.checks.push({
+      id: "observable-change",
+      command: [
+        "bun",
+        "scripts/verify-observable-change.ts",
+        "--path",
+        observableChange.path,
+        "--sha256",
+        observableChange.sha256,
+      ],
+      timeoutMs: 30_000,
+      required: true,
+    });
+  }
+  return stages;
 }
 
 export function createSoftwareFactoryRoutes(
@@ -211,6 +236,12 @@ export function createSoftwareFactoryRoutes(
     const tier = nonempty(body?.tier);
     const objective = nonempty(body?.objective);
     const trigger = nonempty(body?.trigger);
+    const observable = record(body?.observableChange);
+    const observablePath = nonempty(observable?.path);
+    const observableContent =
+      typeof observable?.expectedContent === "string"
+        ? observable.expectedContent
+        : null;
     const requiredContext = Array.isArray(body?.requiredContext)
       ? [
           ...new Set(
@@ -227,18 +258,52 @@ export function createSoftwareFactoryRoutes(
       !tier ||
       !executionTiers.includes(tier as ExecutionTier) ||
       !objective ||
-      !trigger
+      !trigger ||
+      !observablePath ||
+      observableContent === null ||
+      observableContent.length > 10_000 ||
+      observablePath.length > 240 ||
+      observablePath.startsWith("/") ||
+      observablePath.includes("\\") ||
+      observablePath.split("/").some((part) => part === ".." || !part)
     )
       return context.json(
-        { error: "A valid kind, tier, objective, and trigger are required." },
+        {
+          error:
+            "A valid kind, tier, objective, trigger, and safe observable file change are required.",
+        },
         400,
       );
+    const observableChange = {
+      path: observablePath,
+      sha256: createHash("sha256").update(observableContent).digest("hex"),
+      expectedContent: observableContent,
+    };
     const queued = await store.queueJob(context.var.actor.id, {
       kind: kind as ManagedJobKind,
       tier: tier as ExecutionTier,
       objective,
       trigger,
       minimumQuality: Number(body?.minimumQuality ?? 0.8),
+      launchMetadata: {
+        launcher:
+          trigger === "factory-live-run"
+            ? "scripts/factory-live-run.ts"
+            : "operator-ui",
+        actorId: context.var.actor.id,
+        arguments: {
+          kind,
+          tier,
+          objective,
+          maximumAttempts: Number(body?.maximumAttempts ?? 3),
+          concurrencyLimit: Number(body?.concurrencyLimit ?? 1),
+          requiredContext,
+          observableChange: {
+            path: observableChange.path,
+            sha256: observableChange.sha256,
+          },
+        },
+      },
     });
     const workflow = workflows
       ? await workflows.create({
@@ -249,6 +314,7 @@ export function createSoftwareFactoryRoutes(
             kind as ManagedJobKind,
             objective,
             requiredContext,
+            observableChange,
           ),
         })
       : null;

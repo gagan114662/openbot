@@ -39,6 +39,8 @@ function ProductionEngineerPage() {
   const [streamState, setStreamState] = useState("connecting");
   const [jobObjective, setJobObjective] = useState("");
   const [jobContextKeys, setJobContextKeys] = useState("");
+  const [jobObservablePath, setJobObservablePath] = useState("");
+  const [jobExpectedContent, setJobExpectedContent] = useState("");
   const [jobKind, setJobKind] = useState<
     "pull-request-review" | "ci-repair" | "bug-triage" | "visual-delivery"
   >("pull-request-review");
@@ -92,6 +94,8 @@ function ProductionEngineerPage() {
     onSuccess: () => {
       setJobObjective("");
       setJobContextKeys("");
+      setJobObservablePath("");
+      setJobExpectedContent("");
       return queryClient.invalidateQueries({ queryKey: ["software-factory"] });
     },
   });
@@ -314,9 +318,27 @@ function ProductionEngineerPage() {
             value={jobContextKeys}
             onChange={(event) => setJobContextKeys(event.target.value)}
           />
+          <Input
+            aria-label="Observable output path"
+            className="md:col-start-2"
+            placeholder="Observable output path (for example PROOF.md)"
+            value={jobObservablePath}
+            onChange={(event) => setJobObservablePath(event.target.value)}
+          />
+          <Input
+            aria-label="Expected exact output"
+            className="md:col-start-2"
+            placeholder="Expected exact file content"
+            value={jobExpectedContent}
+            onChange={(event) => setJobExpectedContent(event.target.value)}
+          />
           <Button
             className="md:col-start-3 md:row-start-1"
-            disabled={!jobObjective.trim() || createJob.isPending}
+            disabled={
+              !jobObjective.trim() ||
+              !jobObservablePath.trim() ||
+              createJob.isPending
+            }
             onClick={() =>
               createJob.mutate({
                 kind: jobKind,
@@ -327,6 +349,10 @@ function ProductionEngineerPage() {
                   .split(",")
                   .map((key) => key.trim())
                   .filter(Boolean),
+                observableChange: {
+                  path: jobObservablePath,
+                  expectedContent: jobExpectedContent,
+                },
               })
             }
           >

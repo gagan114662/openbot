@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import type { MiddlewareHandler } from "hono";
+import type { AppVariables } from "../auth/guards";
 import { createSoftwareFactoryRoutes, managedWorkflowStages } from "./routes";
 
 describe("managed workflow plans", () => {
@@ -51,6 +53,119 @@ describe("managed workflow plans", () => {
         kind: "human",
         roles: ["admin"],
       });
+  });
+
+  test("binds a declared observable file hash to the terminal runtime gate", () => {
+    const stages = managedWorkflowStages("ci-repair", "write the proof", [], {
+      path: "PROOF.md",
+      sha256: "a".repeat(64),
+      expectedContent: "proved\n",
+    });
+    expect(stages.at(-1)?.checks.at(-1)).toEqual({
+      id: "observable-change",
+      command: [
+        "bun",
+        "scripts/verify-observable-change.ts",
+        "--path",
+        "PROOF.md",
+        "--sha256",
+        "a".repeat(64),
+      ],
+      timeoutMs: 30_000,
+      required: true,
+    });
+  });
+});
+
+describe("managed workflow launch provenance", () => {
+  const requireUser: MiddlewareHandler<{ Variables: AppVariables }> = async (
+    context,
+    next,
+  ) => {
+    context.set("actor", {
+      id: "admin-1",
+      email: "admin@example.test",
+      role: "admin",
+    });
+    await next();
+  };
+
+  test("refuses a launch without a falsifiable observable change", async () => {
+    const routes = createSoftwareFactoryRoutes(
+      {} as never,
+      {} as never,
+      "tenant-1",
+      requireUser,
+    );
+    const response = await routes.request("/jobs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        kind: "ci-repair",
+        tier: "managed",
+        objective: "claim success",
+        trigger: "operator-ui",
+      }),
+    });
+    expect(response.status).toBe(400);
+    expect(await response.text()).toContain("observable file change");
+  });
+
+  test("persists server-derived actor and launcher arguments", async () => {
+    let queuedInput: Record<string, unknown> | undefined;
+    let workflowInput: Record<string, unknown> | undefined;
+    const routes = createSoftwareFactoryRoutes(
+      {
+        queueJob: async (_actorId: string, input: Record<string, unknown>) => {
+          queuedInput = input;
+          return { job: { id: "job-1" }, decision: { model: "model-1" } };
+        },
+      } as never,
+      {} as never,
+      "tenant-1",
+      requireUser,
+      undefined,
+      undefined,
+      {
+        create: async (input: Record<string, unknown>) => {
+          workflowInput = input;
+          return { run: { id: "run-1" } };
+        },
+      } as never,
+    );
+    const response = await routes.request("/jobs", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        kind: "ci-repair",
+        tier: "managed",
+        objective: "write exact proof",
+        trigger: "factory-live-run",
+        observableChange: { path: "PROOF.md", expectedContent: "proved\n" },
+      }),
+    });
+    expect(response.status).toBe(201);
+    expect(queuedInput?.launchMetadata).toMatchObject({
+      launcher: "scripts/factory-live-run.ts",
+      actorId: "admin-1",
+      arguments: {
+        objective: "write exact proof",
+        observableChange: {
+          path: "PROOF.md",
+          sha256:
+            "15ec80ab7455464f2f65af50f24b1ec10085d0e6f75a6e98ec3670e8ede0c8bd",
+        },
+      },
+    });
+    expect(workflowInput?.stages).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          checks: expect.arrayContaining([
+            expect.objectContaining({ id: "observable-change" }),
+          ]),
+        }),
+      ]),
+    );
   });
 });
 

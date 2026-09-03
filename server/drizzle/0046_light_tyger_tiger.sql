@@ -1,0 +1,1 @@
+ALTER TABLE "factory_managed_jobs" ADD COLUMN "launch_metadata" jsonb DEFAULT '{}'::jsonb NOT NULL;

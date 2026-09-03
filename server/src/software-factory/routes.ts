@@ -472,7 +472,7 @@ export function createSoftwareFactoryRoutes(
         });
         heartbeat = setInterval(
           () => send("heartbeat", { at: new Date().toISOString() }),
-          15_000,
+          5_000,
         );
         heartbeat.unref?.();
         context.req.raw.signal.addEventListener("abort", close, { once: true });

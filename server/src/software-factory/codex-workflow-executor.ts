@@ -94,6 +94,34 @@ function parseJsonPayload(value: string): Record<string, unknown> {
   return JSON.parse(unfenced ?? trimmed) as Record<string, unknown>;
 }
 
+export function focusedTestsFromChangedPaths(
+  changedPaths: string[],
+  repositoryPaths: string[],
+) {
+  const available = new Set(repositoryPaths);
+  const results = new Set<string>();
+  for (const path of changedPaths) {
+    if (/\.(?:test|spec)\.[cm]?[jt]sx?$/.test(path) && available.has(path)) {
+      results.add(path);
+      continue;
+    }
+    const match = path.match(/^(.*)\.([cm]?[jt]sx?)$/);
+    if (!match) continue;
+    const stem = match[1] ?? "";
+    const extension = match[2] ?? "ts";
+    for (const candidate of [
+      `${stem}.test.${extension}`,
+      `${stem}.spec.${extension}`,
+      path.startsWith("server/src/")
+        ? `server/tests/${stem.slice("server/src/".length)}.test.${extension}`
+        : "",
+    ]) {
+      if (candidate && available.has(candidate)) results.add(candidate);
+    }
+  }
+  return [...results].sort();
+}
+
 export async function persistReviewMaterial(
   directory: string,
   sessionId: string,
@@ -127,7 +155,6 @@ export function createCodexWorkflowExecutor(
     harness?: "codex" | "claude";
     binary?: string;
     workspaceRoot?: string;
-    onFallbackParse?: () => void;
   } = {},
 ): WorkflowHarnessExecutor {
   const root = resolve(repository);
@@ -290,7 +317,7 @@ export function createCodexWorkflowExecutor(
     if (harness === "codex") {
       const permissionArgs =
         sandbox === "workspace-write"
-          ? ["--approve-for-me"]
+          ? ["--sandbox", "workspace-write"]
           : ["--sandbox", "read-only"];
       await command(
         [
@@ -324,6 +351,12 @@ export function createCodexWorkflowExecutor(
         model,
         "--permission-mode",
         sandbox === "workspace-write" ? "acceptEdits" : "plan",
+        "--allowedTools",
+        sandbox === "workspace-write"
+          ? "Read,Edit,Write,Glob,Grep"
+          : "Read,Glob,Grep",
+        "--disallowedTools",
+        "Bash,WebFetch,WebSearch",
       ],
       cwd,
       signal,
@@ -338,10 +371,9 @@ export function createCodexWorkflowExecutor(
       !Array.isArray(envelope.structured_output)
     )
       return envelope.structured_output as Record<string, unknown>;
-    const payload =
-      typeof envelope.result === "string" ? envelope.result : response.stdout;
-    options.onFallbackParse?.();
-    return parseJsonPayload(payload);
+    throw new Error(
+      "Claude did not return CLI-validated structured_output; unvalidated result text is refused.",
+    );
   }
 
   return {
@@ -431,9 +463,39 @@ export function createCodexWorkflowExecutor(
             command(["git", "diff", "--binary", "--no-ext-diff"], cwd),
           ),
       ]);
+      const changedPaths = (
+        await command(["git", "diff", "--name-only", "HEAD"], cwd)
+      ).stdout
+        .split("\n")
+        .filter(Boolean);
+      const repositoryPaths = (
+        await command(
+          ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+          cwd,
+        )
+      ).stdout
+        .split("\n")
+        .filter(Boolean);
+      const focusedTests = focusedTestsFromChangedPaths(
+        changedPaths,
+        repositoryPaths,
+      );
       const checks = stageCheckSchema
         .array()
-        .parse((stage.checks as { items?: unknown }).items ?? []);
+        .parse((stage.checks as { items?: unknown }).items ?? [])
+        .map((check) => ({
+          ...check,
+          command: check.command.flatMap((argument) =>
+            argument === "__OPENBOT_CHANGED_TESTS__" ? focusedTests : argument,
+          ),
+        }))
+        .filter(
+          (check) =>
+            !check.command.includes("__OPENBOT_CHANGED_TESTS__") &&
+            !(
+              check.id === "factory-focused-tests" && focusedTests.length === 0
+            ),
+        );
       const executedChecks = [];
       for (const check of checks) {
         const executed = await runCheck(

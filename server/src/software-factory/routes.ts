@@ -38,13 +38,7 @@ export function managedWorkflowStages(
     diffCheck,
     {
       id: "factory-focused-tests",
-      command: [
-        "bun",
-        "test",
-        "server/src/software-factory/orchestrator.test.ts",
-        "server/src/software-factory/routes.test.ts",
-        "server/src/software-factory/workflow-evidence.test.ts",
-      ],
+      command: ["bun", "test", "__OPENBOT_CHANGED_TESTS__"],
       timeoutMs: 120_000,
       required: true,
     },

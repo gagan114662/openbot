@@ -1,9 +1,30 @@
 import { describe, expect, test } from "bun:test";
 import type { MiddlewareHandler } from "hono";
 import type { AppVariables } from "../auth/guards";
+import { focusedTestsFromChangedPaths } from "./codex-workflow-executor";
 import { createSoftwareFactoryRoutes, managedWorkflowStages } from "./routes";
 
 describe("managed workflow plans", () => {
+  test("derives focused tests from the candidate's changed paths", () => {
+    expect(
+      focusedTestsFromChangedPaths(
+        [
+          "server/src/software-factory/routes.ts",
+          "server/src/software-factory/workflow-worker.test.ts",
+          "README.md",
+        ],
+        [
+          "server/src/software-factory/routes.test.ts",
+          "server/src/software-factory/workflow-worker.test.ts",
+          "server/src/software-factory/unrelated.test.ts",
+        ],
+      ),
+    ).toEqual([
+      "server/src/software-factory/routes.test.ts",
+      "server/src/software-factory/workflow-worker.test.ts",
+    ]);
+  });
+
   test.each([
     ["pull-request-review", ["inspect", "review"]],
     ["ci-repair", ["diagnose", "repair", "verify"]],

@@ -55,10 +55,12 @@ const payload = review
     }
   : { summary: "fake worker result", checks: ["model reported"] };
 if (${JSON.stringify(harness)} === "codex") {
+  if (!args.includes("--sandbox")) process.exit(43);
   const output = args[args.indexOf("--output-last-message") + 1];
   await Bun.write(output, JSON.stringify(payload));
 } else {
   if (!args.includes("--json-schema")) process.exit(42);
+  if (!args.includes("--disallowedTools") || !args.includes("Bash,WebFetch,WebSearch")) process.exit(43);
   process.stdout.write(JSON.stringify({ structured_output: payload, result: "fallback must not run" }));
 }
 `,
@@ -74,17 +76,10 @@ describe.each(["codex", "claude"] as const)(
     test("honours the persisted model and satisfies the shared executor contract", async () => {
       const { root, binary, workspaceRoot, reviewPrompt } =
         await fixture(harness);
-      let fallbackParses = 0;
       const executor =
         harness === "codex"
           ? createCodexWorkflowExecutor(root, { binary, workspaceRoot })
-          : createClaudeWorkflowExecutor(root, {
-              binary,
-              workspaceRoot,
-              onFallbackParse: () => {
-                fallbackParses += 1;
-              },
-            });
+          : createClaudeWorkflowExecutor(root, { binary, workspaceRoot });
       const runId = crypto.randomUUID();
       const stage = {
         stageId: "verify",
@@ -147,7 +142,6 @@ describe.each(["codex", "claude"] as const)(
       expect(prompt).not.toContain("fake worker result");
       expect(prompt).not.toContain("model reported");
       expect(prompt).toContain('"kind":"runtime-check"');
-      expect(fallbackParses).toBe(0);
       const evidencePath = String(
         candidate.artifacts[1]?.metadata?.reviewMaterialPath,
       );

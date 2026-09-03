@@ -25,6 +25,7 @@ import {
   tuningProposalFrom,
   updateProductionIssueStatus,
 } from "@/lib/production-engineer/queries";
+import { workflowStreamRunIds } from "@/lib/production-engineer/workflow-streams";
 
 export const Route = createFileRoute("/_authed/admin/production-engineer")({
   component: ProductionEngineerPage,
@@ -61,10 +62,7 @@ function ProductionEngineerPage() {
     queryKey: ["software-factory"],
     queryFn: fetchSoftwareFactory,
   });
-  const liveRuns = (factory.data?.workflows ?? [])
-    .filter(({ run }) => ["running", "pausing"].includes(run.status))
-    .map(({ run }) => run.id)
-    .sort();
+  const liveRuns = workflowStreamRunIds(factory.data?.workflows ?? []);
   const liveRunKey = liveRuns.join(",");
   useEffect(() => {
     const runIds = liveRunKey ? liveRunKey.split(",") : [];

@@ -1259,4 +1259,35 @@ if (!prompt.includes("Independently review")) {
       lastError: "Managed stage exceeded its 40 ms execution deadline.",
     });
   });
+
+  test("an exhausted pending stage cannot monopolize the workflow queue", async () => {
+    const queued = await store.queueJob("admin", {
+      kind: "ci-repair",
+      tier: "managed",
+      objective: "reconcile an exhausted pending stage",
+      trigger: "no-progress-proof",
+      minimumQuality: 0.8,
+    });
+    const run = await runtime.create({
+      jobId: queued.job.id,
+      maximumAttempts: 1,
+      concurrencyLimit: 1,
+      stages: [
+        {
+          id: "exhausted",
+          objective: "must not be reclaimed forever",
+          requiredContext: [],
+          dependsOn: [],
+        },
+      ],
+    });
+    await runtime.claim("no-progress-worker");
+    await database
+      .update(factoryWorkflowStages)
+      .set({ attempts: 1, status: "pending" })
+      .where(eq(factoryWorkflowStages.runId, run.id));
+
+    expect(await runtime.readyStages(run.id)).toEqual([]);
+    expect((await runtime.snapshot(run.id))?.run.status).toBe("failed");
+  });
 });

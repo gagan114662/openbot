@@ -15,6 +15,7 @@ import {
 } from "../../../agent-codex/src/debt";
 import { artifactChecksum, stageCheckSchema } from "./workflow-runtime";
 import {
+  HarnessUnavailableError,
   StageExecutionFailure,
   type WorkflowHarnessExecutor,
 } from "./workflow-worker";
@@ -339,7 +340,11 @@ export function createCodexWorkflowExecutor(
         ],
         cwd,
         signal,
-      );
+      ).catch((error) => {
+        throw new HarnessUnavailableError(
+          error instanceof Error ? error.message : String(error),
+        );
+      });
       return parseJsonPayload(await readFile(outputPath, "utf8"));
     }
     const response = await command(
@@ -367,7 +372,11 @@ export function createCodexWorkflowExecutor(
       ],
       cwd,
       signal,
-    );
+    ).catch((error) => {
+      throw new HarnessUnavailableError(
+        error instanceof Error ? error.message : String(error),
+      );
+    });
     const envelope = JSON.parse(response.stdout) as {
       result?: unknown;
       structured_output?: unknown;

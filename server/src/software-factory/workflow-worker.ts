@@ -30,6 +30,14 @@ export class StageExecutionFailure extends Error {
   }
 }
 
+/** A provider/CLI transport failure is infrastructure unavailability, not a candidate attempt. */
+export class HarnessUnavailableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "HarnessUnavailableError";
+  }
+}
+
 type RunInput = {
   runId: string;
   stage: Stage;
@@ -87,6 +95,7 @@ export function createWorkflowWorker(options: {
   heartbeatMs?: number;
   stageTimeoutMs?: number;
   reviewAttempts?: number;
+  harnessBackoffMs?: number;
   onTerminalFailure?: (input: {
     runId: string;
     error: string;
@@ -96,6 +105,7 @@ export function createWorkflowWorker(options: {
   const leaseMs = options.leaseMs ?? 30_000;
   const heartbeatMs = options.heartbeatMs ?? Math.max(250, leaseMs / 3);
   const stageTimeoutMs = options.stageTimeoutMs ?? 10 * 60_000;
+  const harnessBackoffMs = options.harnessBackoffMs ?? 2_000;
   let draining = false;
   let swept = false;
   const active = new Set<Promise<void>>();
@@ -218,6 +228,24 @@ export function createWorkflowWorker(options: {
             ? "Paused by an operator while running."
             : "Restarted to apply new operator steering.",
         );
+      } else if (
+        error instanceof HarnessUnavailableError ||
+        String(controller.signal.reason ?? "").startsWith("Workflow lease")
+      ) {
+        const leaseInterrupted = !(error instanceof HarnessUnavailableError);
+        const message = `${leaseInterrupted ? "interrupted-by-lease" : "harness-unavailable"}: ${
+          error instanceof Error
+            ? error.message
+            : String(controller.signal.reason ?? error)
+        }`;
+        await options.runtime.interruptStage(
+          runId,
+          stage.stageId,
+          workerSessionId,
+          message,
+        );
+        if (!leaseInterrupted && harnessBackoffMs > 0)
+          await Bun.sleep(harnessBackoffMs);
       } else {
         const message = error instanceof Error ? error.message : String(error);
         const failure = await options.runtime.failStage(
@@ -252,7 +280,10 @@ export function createWorkflowWorker(options: {
         );
         swept = true;
       }
-      const run = await options.runtime.claim(options.workerId, leaseMs);
+      const run = await options.runtime.claim(options.workerId, leaseMs, {
+        heartbeatMs,
+        stageTimeoutMs,
+      });
       if (!run) return { claimed: false, stages: 0 };
       let renewing = false;
       const heartbeat = setInterval(() => {

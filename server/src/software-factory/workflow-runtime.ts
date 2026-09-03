@@ -758,7 +758,11 @@ export function createWorkflowRuntime(
       });
     },
 
-    async claim(workerId: string, leaseMs = 30_000) {
+    async claim(
+      workerId: string,
+      leaseMs = 30_000,
+      leasePolicy?: { heartbeatMs: number; stageTimeoutMs: number },
+    ) {
       const now = new Date();
       const expires = new Date(now.valueOf() + leaseMs);
       return database.transaction(async (tx) => {
@@ -852,6 +856,20 @@ export function createWorkflowRuntime(
           })
           .where(eq(factoryWorkflowRuns.id, run.id))
           .returning();
+        if (claimed && leasePolicy)
+          await tx.insert(factoryWorkflowEvents).values({
+            runId: claimed.id,
+            entity: "run",
+            fromStatus: run.status,
+            toStatus: "running",
+            detail: {
+              classification: "lease-policy",
+              workerId,
+              leaseMs,
+              heartbeatMs: leasePolicy.heartbeatMs,
+              stageTimeoutMs: leasePolicy.stageTimeoutMs,
+            },
+          });
         return claimed ?? null;
       });
     },
@@ -1145,25 +1163,40 @@ export function createWorkflowRuntime(
       sessionId: string,
       reason: string,
     ) {
-      const [stage] = await database
-        .update(factoryWorkflowStages)
-        .set({
-          status: "pending",
-          attempts: sql`greatest(${factoryWorkflowStages.attempts} - 1, 0)`,
-          sessionId: null,
-          lastError: reason.slice(0, 4_000),
-          updatedAt: new Date(),
-        })
-        .where(
-          and(
-            eq(factoryWorkflowStages.runId, runId),
-            eq(factoryWorkflowStages.stageId, stageId),
-            eq(factoryWorkflowStages.status, "running"),
-            eq(factoryWorkflowStages.sessionId, sessionId),
-          ),
-        )
-        .returning();
-      return stage ?? null;
+      return database.transaction(async (tx) => {
+        const [stage] = await tx
+          .update(factoryWorkflowStages)
+          .set({
+            status: "pending",
+            attempts: sql`greatest(${factoryWorkflowStages.attempts} - 1, 0)`,
+            sessionId: null,
+            lastError: reason.slice(0, 4_000),
+            updatedAt: new Date(),
+          })
+          .where(
+            and(
+              eq(factoryWorkflowStages.runId, runId),
+              eq(factoryWorkflowStages.stageId, stageId),
+              eq(factoryWorkflowStages.status, "running"),
+              eq(factoryWorkflowStages.sessionId, sessionId),
+            ),
+          )
+          .returning();
+        if (!stage) return null;
+        await tx.insert(factoryWorkflowEvents).values({
+          runId,
+          stageId,
+          entity: "stage",
+          fromStatus: "running",
+          toStatus: "pending",
+          detail: {
+            reason: reason.slice(0, 4_000),
+            classification: reason.split(":", 1)[0],
+            attemptRefunded: true,
+          },
+        });
+        return stage;
+      });
     },
   };
 }

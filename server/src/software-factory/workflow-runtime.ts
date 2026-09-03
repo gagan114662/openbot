@@ -980,6 +980,51 @@ export function createWorkflowRuntime(
             ),
           );
       }
+      if (
+        runnable.length === 0 &&
+        gated.length === 0 &&
+        running === 0 &&
+        !snapshot.stages.some(
+          (stage) => stage.status === "awaiting_approval",
+        ) &&
+        snapshot.stages.some(
+          (stage) =>
+            stage.status === "pending" &&
+            stage.attempts >= snapshot.run.maximumAttempts,
+        )
+      ) {
+        // A rejected stage can be returned to pending at the attempt ceiling. Without this
+        // reconciliation the oldest run is reclaimable forever but can never make progress,
+        // starving every newer workflow behind it.
+        await database.transaction(async (tx) => {
+          const [failed] = await tx
+            .update(factoryWorkflowRuns)
+            .set({
+              status: "failed",
+              completedAt: new Date(),
+              leaseOwner: null,
+              leaseExpiresAt: null,
+              updatedAt: new Date(),
+            })
+            .where(
+              and(
+                eq(factoryWorkflowRuns.id, runId),
+                eq(factoryWorkflowRuns.status, "running"),
+              ),
+            )
+            .returning({ id: factoryWorkflowRuns.id });
+          if (failed)
+            await tx.insert(factoryWorkflowEvents).values({
+              runId,
+              entity: "run",
+              fromStatus: "running",
+              toStatus: "failed",
+              detail: {
+                reason: "No runnable stage remains within the attempt budget.",
+              },
+            });
+        });
+      }
       return runnable;
     },
 

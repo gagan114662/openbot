@@ -61,27 +61,23 @@ function ProductionEngineerPage() {
     queryKey: ["software-factory"],
     queryFn: fetchSoftwareFactory,
   });
-  const liveRun = factory.data?.workflows.find(({ run }) =>
-    ["queued", "running", "pausing", "paused", "awaiting_approval"].includes(
-      run.status,
-    ),
-  )?.run.id;
+  const liveRuns = (factory.data?.workflows ?? [])
+    .filter(({ run }) =>
+      ["queued", "running", "pausing", "paused", "awaiting_approval"].includes(
+        run.status,
+      ),
+    )
+    .map(({ run }) => run.id)
+    .sort();
+  const liveRunKey = liveRuns.join(",");
   useEffect(() => {
-    if (!liveRun) {
+    const runIds = liveRunKey ? liveRunKey.split(",") : [];
+    if (runIds.length === 0) {
       setStreamState("idle");
       return;
     }
-    const events = new EventSource(
-      `/api/software-factory/workflows/${encodeURIComponent(liveRun)}/events`,
-    );
-    events.addEventListener("open", () => setStreamState("live"));
-    events.addEventListener("snapshot", () => {
-      setStreamState("live");
-      void queryClient.invalidateQueries({ queryKey: ["software-factory"] });
-    });
     const refreshFromPush = () =>
       void queryClient.invalidateQueries({ queryKey: ["software-factory"] });
-    events.addEventListener("transition", refreshFromPush);
     const appendOutput = (message: Event) => {
       const event = JSON.parse((message as MessageEvent).data) as {
         payload?: { chunk?: string };
@@ -94,18 +90,30 @@ function ProductionEngineerPage() {
           .split("\n"),
       );
     };
-    events.addEventListener("check-output", appendOutput);
-    events.addEventListener("executor-output", appendOutput);
-    events.addEventListener("control", (message) => {
-      const event = JSON.parse((message as MessageEvent).data) as {
-        payload?: { mode?: string };
-      };
-      setSteeringMode(event.payload?.mode ?? "applied");
-      refreshFromPush();
+    const streams = runIds.map((runId) => {
+      const events = new EventSource(
+        `/api/software-factory/workflows/${encodeURIComponent(runId)}/events`,
+      );
+      events.addEventListener("open", () => setStreamState("live"));
+      events.addEventListener("snapshot", () => {
+        setStreamState("live");
+        refreshFromPush();
+      });
+      events.addEventListener("transition", refreshFromPush);
+      events.addEventListener("check-output", appendOutput);
+      events.addEventListener("executor-output", appendOutput);
+      events.addEventListener("control", (message) => {
+        const event = JSON.parse((message as MessageEvent).data) as {
+          payload?: { mode?: string };
+        };
+        setSteeringMode(event.payload?.mode ?? "applied");
+        refreshFromPush();
+      });
+      events.addEventListener("error", () => setStreamState("reconnecting"));
+      return events;
     });
-    events.addEventListener("error", () => setStreamState("reconnecting"));
-    return () => events.close();
-  }, [liveRun, queryClient]);
+    return () => streams.forEach((events) => events.close());
+  }, [liveRunKey, queryClient]);
   const workflowControl = useMutation({
     mutationFn: controlWorkflow,
     onSuccess: () => {

@@ -154,3 +154,41 @@ describe.each(["codex", "claude"] as const)(
     });
   },
 );
+
+test("Claude refuses unvalidated fallback text when structured_output is absent", async () => {
+  const { root, binary, workspaceRoot } = await fixture("claude");
+  await writeFile(
+    binary,
+    `#!/usr/bin/env bun
+process.stdout.write(JSON.stringify({ result: ${JSON.stringify(
+      JSON.stringify({ summary: "unvalidated", checks: [] }),
+    )} }));
+`,
+    { mode: 0o700 },
+  );
+  await chmod(binary, 0o700);
+  const executor = createClaudeWorkflowExecutor(root, {
+    binary,
+    workspaceRoot,
+  });
+  const runId = crypto.randomUUID();
+  await expect(
+    executor.run({
+      runId,
+      stage: {
+        stageId: "verify",
+        objective: "refuse fallback text",
+        requiredContext: { keys: [] },
+        dependsOn: { ids: [] },
+        checks: { items: [] },
+        selectedModel: "claude-contract",
+        selectedHarness: "claude",
+        lastError: null,
+      },
+      snapshot: { run: { steering: { events: [] } }, artifacts: [] },
+      sessionId: "fallback-refusal-session",
+      signal: new AbortController().signal,
+    } as never),
+  ).rejects.toThrow("CLI-validated structured_output");
+  await executor.cleanup?.(runId);
+});

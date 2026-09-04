@@ -77,7 +77,13 @@ async function fixtureRepository() {
   await run(["git", "add", "-A"], repository);
   await run(["git", "commit", "-m", "fixture"], repository);
   await run(
-    ["git", "remote", "add", "origin", "https://github.com/example/fixture.git"],
+    [
+      "git",
+      "remote",
+      "add",
+      "origin",
+      "https://github.com/example/fixture.git",
+    ],
     repository,
   );
   await run(["git", "remote", "set-url", "--push", "origin", bare], repository);
@@ -104,7 +110,10 @@ async function fixtureRepository() {
 }
 
 async function productionWorktrees(repository: string) {
-  const listed = await run(["git", "worktree", "list", "--porcelain"], repository);
+  const listed = await run(
+    ["git", "worktree", "list", "--porcelain"],
+    repository,
+  );
   return listed
     .split("\n")
     .filter((line) => line.startsWith("worktree "))
@@ -123,7 +132,7 @@ afterAll(async () => {
     await rm(directory, { recursive: true, force: true });
 });
 
-test("concurrent drafts through the real drafter create exactly one worktree, one branch, and one invocation", async () => {
+test("four concurrent drafts spawn one drafter process, one git worktree, and one branch", async () => {
   const { repository, codexLog, release } = await fixtureRepository();
   const [issue] = await database
     .insert(productionIssues)
@@ -169,8 +178,7 @@ test("concurrent drafts through the real drafter create exactly one worktree, on
   // settles (each blocks in codex) — fall through and let the worktree count
   // fail loudly instead of spinning to the test timeout.
   const settleDeadline = Date.now() + 5_000;
-  while (settled.length < 3 && Date.now() < settleDeadline)
-    await Bun.sleep(20);
+  while (settled.length < 3 && Date.now() < settleDeadline) await Bun.sleep(20);
 
   expect(await productionWorktrees(repository)).toHaveLength(1);
   const rejections = settled.filter(

@@ -964,8 +964,10 @@ export function createWorkflowRuntime(
                 eq(factoryWorkflowStages.status, "running"),
               ),
             );
+          // MUTATION: the attempt ceiling is never detected, so a crash reset
+          // returns an exhausted stage to `pending` instead of going terminal.
           const exhausted = expiredStages.some(
-            (stage) => stage.attempts >= run.maximumAttempts,
+            (stage) => stage.attempts >= 1_000_000,
           );
           await tx
             .update(factoryWorkflowStages)

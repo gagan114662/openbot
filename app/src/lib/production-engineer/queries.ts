@@ -252,6 +252,16 @@ export type SoftwareFactoryDashboard = {
   }>;
 };
 
+export function workflowEventDetail(detail: Record<string, unknown>) {
+  if (detail.reason !== "stale-session") return null;
+  const operation =
+    typeof detail.operation === "string" ? detail.operation : "write";
+  const expected =
+    typeof detail.expected === "string" ? detail.expected : "none";
+  const actual = typeof detail.actual === "string" ? detail.actual : "none";
+  return `refused stale ${operation} · owner ${expected} · caller ${actual}`;
+}
+
 export async function fetchSoftwareFactory() {
   const response = await client("/api/software-factory");
   return response.json() as Promise<SoftwareFactoryDashboard>;

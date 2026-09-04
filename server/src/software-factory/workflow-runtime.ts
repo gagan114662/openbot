@@ -1415,7 +1415,7 @@ export function createWorkflowRuntime(
       sessionId: string,
       reason: string,
     ) {
-      return database.transaction(async (tx) => {
+      const mutationResult = await database.transaction(async (tx) => {
         const [run] = await tx
           .select({ id: factoryWorkflowRuns.id })
           .from(factoryWorkflowRuns)
@@ -1453,7 +1453,6 @@ export function createWorkflowRuntime(
           .update(factoryWorkflowStages)
           .set({
             status: "pending",
-            attempts: sql`greatest(${factoryWorkflowStages.attempts} - 1, 0)`,
             sessionId: null,
             lastError: reason.slice(0, 4_000),
             updatedAt: new Date(),
@@ -1490,6 +1489,20 @@ export function createWorkflowRuntime(
         });
         return stage;
       });
+      // MUTATION: the refund now lands in its own statement, after the
+      // transaction has already published status="pending".
+      await database
+        .update(factoryWorkflowStages)
+        .set({
+          attempts: sql`greatest(${factoryWorkflowStages.attempts} - 1, 0)`,
+        })
+        .where(
+          and(
+            eq(factoryWorkflowStages.runId, runId),
+            eq(factoryWorkflowStages.stageId, stageId),
+          ),
+        );
+      return mutationResult;
     },
   };
 }

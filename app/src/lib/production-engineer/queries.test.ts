@@ -1,5 +1,25 @@
 import { describe, expect, test } from "bun:test";
-import { fixAutomationMessage, tuningProposalFrom } from "./queries";
+import {
+  fixAutomationMessage,
+  tuningProposalFrom,
+  workflowEventDetail,
+} from "./queries";
+
+describe("workflow event evidence", () => {
+  test("renders a stale-session refusal with both process identities", () => {
+    expect(
+      workflowEventDetail({
+        reason: "stale-session",
+        operation: "complete",
+        expected: "live-process-session",
+        actual: "stale-process-session",
+      }),
+    ).toBe(
+      "refused stale complete · owner live-process-session · caller stale-process-session",
+    );
+    expect(workflowEventDetail({ reason: "ordinary-transition" })).toBeNull();
+  });
+});
 
 describe("production tuning proposals", () => {
   test("admits the persisted proposal shape rendered to an operator", () => {

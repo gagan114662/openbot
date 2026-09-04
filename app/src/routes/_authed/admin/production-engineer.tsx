@@ -24,6 +24,7 @@ import {
   tuneProductionMonitor,
   tuningProposalFrom,
   updateProductionIssueStatus,
+  workflowEventDetail,
 } from "@/lib/production-engineer/queries";
 import { workflowStreamRunIds } from "@/lib/production-engineer/workflow-streams";
 
@@ -631,13 +632,18 @@ function ProductionEngineerPage() {
                     </summary>
                     <ol className="mt-2 space-y-1 border-l pl-4 text-muted-foreground">
                       {events.map((event) => (
-                        <li key={event.id}>
+                        <li className="break-all" key={event.id}>
                           {event.entity}
                           {event.stageId ? ` ${event.stageId}` : ""}:{" "}
                           {event.fromStatus ?? "created"}
                           {" → "}
                           {event.toStatus} ·{" "}
                           {new Date(event.createdAt).toLocaleString()}
+                          {workflowEventDetail(event.detail) ? (
+                            <span className="block break-all pl-2 text-amber-700 dark:text-amber-300">
+                              {workflowEventDetail(event.detail)}
+                            </span>
+                          ) : null}
                         </li>
                       ))}
                     </ol>

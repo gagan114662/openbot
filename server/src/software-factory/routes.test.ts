@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { MiddlewareHandler } from "hono";
 import type { AppVariables } from "../auth/guards";
 import { focusedTestsFromChangedPaths } from "./codex-workflow-executor";
+import { NoEligibleModelError } from "./model-router";
 import { createSoftwareFactoryRoutes, managedWorkflowStages } from "./routes";
 import { publishWorkflowEvent } from "./workflow-stream";
 
@@ -169,6 +170,60 @@ describe("managed workflow launch provenance", () => {
     });
     expect(response.status).toBe(400);
     expect(await response.text()).toContain("observable file change");
+  });
+
+  test("names the job kind when no benchmark can serve it, instead of a bare 500", async () => {
+    /*
+     * A deployment whose benchmark catalogue only covers `ci-repair` -- which is
+     * every deployment today, since the catalogue holds one entry. The other three
+     * kinds the launch form offers cannot be routed, and the dropdown's default is
+     * one of them, so this is what a new operator hits first.
+     */
+    const store = {
+      queueJob: async (_actor: string, input: { kind: string }) => {
+        if (input.kind !== "ci-repair")
+          throw new NoEligibleModelError(input.kind);
+        return { job: { id: "job-1" } };
+      },
+    };
+    const launch = (kind: string) =>
+      createSoftwareFactoryRoutes(
+        store as never,
+        {} as never,
+        "tenant-1",
+        requireUser,
+      ).request("/jobs", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          kind,
+          tier: "managed",
+          objective: "launch from the admin page",
+          trigger: "operator-ui",
+          observableChange: { path: "audit/probe.txt", expectedContent: "x" },
+        }),
+      });
+
+    for (const kind of [
+      "pull-request-review",
+      "bug-triage",
+      "visual-delivery",
+    ]) {
+      const response = await launch(kind);
+      // Status first, deliberately. If the refusal escapes uncaught the response
+      // is a bare 500 with no body, and parsing it before asserting the status
+      // would fail on the JSON rather than on the thing under test.
+      // The status also separates this from the 400 above: the request is well
+      // formed, the deployment simply cannot route that kind.
+      expect({ kind, status: response.status }).toEqual({ kind, status: 422 });
+      const body = (await response.json()) as { error?: string };
+      // Naming the kind is the point. A message omitting it would leave the
+      // operator unable to tell that the dropdown value is what failed.
+      expect(body.error).toContain(`"${kind}"`);
+      expect(body.error).toContain("No benchmarked model");
+    }
+
+    expect((await launch("ci-repair")).status).toBe(201);
   });
 
   test("persists server-derived actor and launcher arguments", async () => {

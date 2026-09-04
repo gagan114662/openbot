@@ -6,7 +6,11 @@ import { type AppVariables, requireAdmin } from "../auth/guards";
 import type { WebhookReconciler } from "../webhooks/reconciler";
 import type { FactoryBenchmarkRunner } from "./benchmark-runner";
 import type { ContextGraph, ContextNodeInput } from "./context-graph";
-import { type ExecutionTier, executionTiers } from "./model-router";
+import {
+  type ExecutionTier,
+  executionTiers,
+  NoEligibleModelError,
+} from "./model-router";
 import { type ManagedJobKind, managedJobKinds } from "./orchestrator";
 import type { ShadowEvaluator } from "./shadow-evaluator";
 import type { SoftwareFactoryStore } from "./store";
@@ -305,32 +309,55 @@ export function createSoftwareFactoryRoutes(
       sha256: createHash("sha256").update(observableContent).digest("hex"),
       expectedContent: observableContent,
     };
-    const queued = await store.queueJob(context.var.actor.id, {
-      kind: kind as ManagedJobKind,
-      tier: tier as ExecutionTier,
-      objective,
-      trigger,
-      minimumQuality: Number(body?.minimumQuality ?? 0.8),
-      launchMetadata: {
-        launcher:
-          trigger === "factory-live-run"
-            ? "scripts/factory-live-run.ts"
-            : "operator-ui",
-        actorId: context.var.actor.id,
-        arguments: {
-          kind,
-          tier,
-          objective,
-          maximumAttempts: Number(body?.maximumAttempts ?? 3),
-          concurrencyLimit: Number(body?.concurrencyLimit ?? 1),
-          requiredContext,
-          observableChange: {
-            path: observableChange.path,
-            sha256: observableChange.sha256,
+    /*
+     * `chooseModel` refuses when no benchmark row can serve this job kind. That
+     * refusal is the operator's problem rather than a fault: nothing in the request
+     * is malformed, the deployment simply has no route for that kind. Left uncaught
+     * it reached the framework as a bare 500 with no body, which told the operator
+     * nothing -- and because the kind comes from a dropdown whose default is one of
+     * the unserved kinds, it read as "the launch button is broken".
+     *
+     * Returned rather than rethrown so the type checker can see that `queued` is
+     * either a job or the refusal, without a definite-assignment assertion.
+     */
+    const queued = await store
+      .queueJob(context.var.actor.id, {
+        kind: kind as ManagedJobKind,
+        tier: tier as ExecutionTier,
+        objective,
+        trigger,
+        minimumQuality: Number(body?.minimumQuality ?? 0.8),
+        launchMetadata: {
+          launcher:
+            trigger === "factory-live-run"
+              ? "scripts/factory-live-run.ts"
+              : "operator-ui",
+          actorId: context.var.actor.id,
+          arguments: {
+            kind,
+            tier,
+            objective,
+            maximumAttempts: Number(body?.maximumAttempts ?? 3),
+            concurrencyLimit: Number(body?.concurrencyLimit ?? 1),
+            requiredContext,
+            observableChange: {
+              path: observableChange.path,
+              sha256: observableChange.sha256,
+            },
           },
         },
-      },
-    });
+      })
+      .catch((error: unknown) => {
+        if (error instanceof NoEligibleModelError) return error;
+        throw error;
+      });
+    if (queued instanceof NoEligibleModelError)
+      return context.json(
+        {
+          error: `No benchmarked model is available for the "${queued.task}" job kind, so it cannot be launched. Benchmarks are recorded per job kind, and a kind can only run once one of its benchmarks clears the quality floor.`,
+        },
+        422,
+      );
     const workflow = workflows
       ? await workflows.create({
           jobId: queued.job.id,

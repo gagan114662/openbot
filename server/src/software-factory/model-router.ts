@@ -66,6 +66,21 @@ export function paretoFrontier(candidates: ModelBenchmark[]) {
   });
 }
 
+/**
+ * No benchmark row can serve this task, so no route can be chosen for it.
+ *
+ * Typed rather than a bare Error because the route boundary has to tell this
+ * apart from a genuine fault: this one is a 4xx an operator can act on, and
+ * anything else is a 500. Matching on the message string would break the first
+ * time the wording changed.
+ */
+export class NoEligibleModelError extends Error {
+  constructor(readonly task: string) {
+    super(`No benchmarked model clears the quality floor for ${task}.`);
+    this.name = "NoEligibleModelError";
+  }
+}
+
 export function chooseModel(input: {
   task: string;
   tier: ExecutionTier;
@@ -91,10 +106,7 @@ export function chooseModel(input: {
       candidate.quality >= input.minimumQuality &&
       candidate.attemptedOutcomes >= 1,
   );
-  if (eligible.length === 0)
-    throw new Error(
-      `No benchmarked model clears the quality floor for ${input.task}.`,
-    );
+  if (eligible.length === 0) throw new NoEligibleModelError(input.task);
   const frontier = paretoFrontier(eligible);
   const selected = [...frontier].sort((left, right) => {
     const cost = observedCostPerOutcome(left) - observedCostPerOutcome(right);

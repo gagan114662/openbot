@@ -57,6 +57,29 @@ afterAll(async () => {
 let runId = crypto.randomUUID();
 
 describe("durable workflow runtime", () => {
+  /**
+   * `claim` takes the oldest claimable run in the tenant, and earlier tests in this
+   * file leave runs behind that are still claimable. A worker in a later test would
+   * then pick up somebody else's run instead of its own. Parking the others makes
+   * these tests depend on their own run rather than on file ordering; `claim`
+   * filters on `abortRequested`, so this takes effect immediately.
+   */
+  const isolateRun = async (keepRunId: string) => {
+    const others = await database
+      .select({
+        id: factoryWorkflowRuns.id,
+        status: factoryWorkflowRuns.status,
+      })
+      .from(factoryWorkflowRuns)
+      .where(eq(factoryWorkflowRuns.tenantId, tenantId));
+    for (const other of others)
+      if (
+        other.id !== keepRunId &&
+        ["queued", "running", "pausing", "paused"].includes(other.status)
+      )
+        await runtime.requestAbort(other.id);
+  };
+
   test("commits exactly one privacy-safe audit row with each durable control transition", async () => {
     await store.benchmark({
       source: "measured",
@@ -659,9 +682,16 @@ if (!prompt.includes("Independently review")) {
         sessionId: "claude-cli-session-1",
         reviewerSessionId: "claude-cli-session-3",
       });
-      expect(snapshot?.artifacts.map((artifact) => artifact.kind)).toEqual([
-        "model-prompt",
+      // Sorted, because the runtime does not promise an order here and asserting
+      // one made this test flaky. `snapshot` orders artifacts by `createdAt`, but
+      // Postgres `now()` is transaction-start time, so everything written in one
+      // transaction shares a timestamp and the sort has nothing to separate. What
+      // is guaranteed is which artifacts exist, so that is what this asserts.
+      expect(
+        snapshot?.artifacts.map((artifact) => artifact.kind).sort(),
+      ).toEqual([
         "codex-stage-result",
+        "model-prompt",
         "runtime-check",
         "runtime-check",
       ]);
@@ -1668,6 +1698,7 @@ if (!prompt.includes("Independently review")) {
         },
       ],
     });
+    await isolateRun(run.id);
     const worker = createWorkflowWorker({
       runtime,
       workerId: "deadline-worker",
@@ -1731,29 +1762,6 @@ if (!prompt.includes("Independently review")) {
     expect(await runtime.readyStages(run.id)).toEqual([]);
     expect((await runtime.snapshot(run.id))?.run.status).toBe("failed");
   });
-
-  /**
-   * `claim` takes the oldest claimable run in the tenant, and earlier tests in this
-   * file leave runs behind that are still claimable. A worker in a later test would
-   * then pick up somebody else's run instead of its own. Parking the others makes
-   * these tests depend on their own run rather than on file ordering; `claim`
-   * filters on `abortRequested`, so this takes effect immediately.
-   */
-  const isolateRun = async (keepRunId: string) => {
-    const others = await database
-      .select({
-        id: factoryWorkflowRuns.id,
-        status: factoryWorkflowRuns.status,
-      })
-      .from(factoryWorkflowRuns)
-      .where(eq(factoryWorkflowRuns.tenantId, tenantId));
-    for (const other of others)
-      if (
-        other.id !== keepRunId &&
-        ["queued", "running", "pausing", "paused"].includes(other.status)
-      )
-        await runtime.requestAbort(other.id);
-  };
 
   test("pausing and resuming five times on a one attempt run still lets the stage complete", async () => {
     const queued = await store.queueJob("admin", {

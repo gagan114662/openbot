@@ -249,11 +249,16 @@ export function createWorkflowWorker(options: {
         throw new Error(
           `Independent verification rejected the candidate: ${verification.summary}`,
         );
-      await options.runtime.completeStage(runId, stage.stageId, {
-        ...candidate,
-        reviewerSessionId,
-        verification: { ...verification, accepted: true as const },
-      });
+      const completion = await options.runtime.completeStage(
+        runId,
+        stage.stageId,
+        {
+          ...candidate,
+          reviewerSessionId,
+          verification: { ...verification, accepted: true as const },
+        },
+      );
+      if ("kind" in completion && completion.kind === "stale-session") return;
       publishWorkflowEvent({
         runId,
         stageId: stage.stageId,
@@ -316,13 +321,18 @@ export function createWorkflowWorker(options: {
               }))
             : [],
         );
-        if (failure?.terminal)
+        if (failure && "terminal" in failure && failure.terminal)
           await options.onTerminalFailure?.({ runId, error: message });
         publishWorkflowEvent({
           runId,
           stageId: stage.stageId,
           type: "transition",
-          payload: { status: failure?.terminal ? "failed" : "retrying" },
+          payload: {
+            status:
+              failure && "terminal" in failure && failure.terminal
+                ? "failed"
+                : "retrying",
+          },
         });
       }
     } finally {

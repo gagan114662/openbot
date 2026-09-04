@@ -9,6 +9,7 @@ import {
   factoryManagedJobs,
   factoryModelBenchmarks,
   factoryWorkflowArtifacts,
+  factoryWorkflowEvents,
   factoryWorkflowRuns,
   factoryWorkflowStages,
 } from "../src/db/schema";
@@ -1300,7 +1301,17 @@ if (!prompt.includes("Independently review")) {
     await worker.drain();
   }, 15_000);
 
-  test("same-owner crash recovery resets an expired stage and stale sessions cannot mutate it", async () => {
+  test("two worker processes race and only the owning session can commit or fail the stage", async () => {
+    await store.benchmark({
+      source: "measured",
+      model: "session-race-model",
+      task: "ci-repair",
+      quality: 0.9,
+      successfulOutcomes: 1,
+      attemptedOutcomes: 1,
+      totalCostMicros: 0,
+      enabled: true,
+    });
     const queued = await store.queueJob("admin", {
       kind: "ci-repair",
       tier: "managed",
@@ -1310,7 +1321,7 @@ if (!prompt.includes("Independently review")) {
     });
     const run = await runtime.create({
       jobId: queued.job.id,
-      maximumAttempts: 2,
+      maximumAttempts: 1,
       concurrencyLimit: 1,
       stages: [
         {
@@ -1321,56 +1332,77 @@ if (!prompt.includes("Independently review")) {
         },
       ],
     });
-    expect((await runtime.claim("same-host", 20))?.id).toBe(run.id);
+    expect((await runtime.claim("session-race-owner", 1_000))?.id).toBe(run.id);
     expect(
-      await runtime.startStage(run.id, "owned", "stale-session"),
+      await runtime.startStage(run.id, "owned", "live-process-session"),
     ).not.toBeNull();
-    await Bun.sleep(30);
-    expect((await runtime.claim("same-host", 1_000))?.id).toBe(run.id);
-    expect((await runtime.snapshot(run.id))?.stages[0]).toMatchObject({
-      status: "pending",
+    const spawnRacer = (mode: "winner" | "stale") =>
+      Bun.spawn(["bun", "server/tests/fixtures/workflow-session-racer.ts"], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          WORKFLOW_TEST_TENANT: tenantId,
+          WORKFLOW_TEST_RUN: run.id,
+          WORKFLOW_TEST_MODE: mode,
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+    const winner = spawnRacer("winner");
+    const stale = spawnRacer("stale");
+    const staleOutput = await new Response(stale.stdout).text();
+    const staleError = await new Response(stale.stderr).text();
+    expect(await stale.exited).toBe(0);
+    expect(staleError).toBe("");
+    expect(JSON.parse(staleOutput)).toEqual({
+      completion: {
+        kind: "stale-session",
+        expected: "live-process-session",
+        actual: "stale-process-session",
+      },
+      failure: {
+        kind: "stale-session",
+        expected: "live-process-session",
+        actual: "stale-process-session",
+      },
+      interruption: {
+        kind: "stale-session",
+        expected: "live-process-session",
+        actual: "stale-process-session",
+      },
+    });
+    const winnerOutput = await new Response(winner.stdout).text();
+    const winnerError = await new Response(winner.stderr).text();
+    expect(await winner.exited).toBe(0);
+    expect(winnerError).toBe("");
+    expect(JSON.parse(winnerOutput)).toMatchObject({
+      status: "succeeded",
+      sessionId: "live-process-session",
       attempts: 1,
     });
+    const refused = await database
+      .select()
+      .from(factoryWorkflowEvents)
+      .where(eq(factoryWorkflowEvents.runId, run.id));
     expect(
-      await runtime.startStage(run.id, "owned", "live-session"),
-    ).not.toBeNull();
-    expect(
-      await runtime.failStage(run.id, "owned", "stale-session", "late failure"),
-    ).toBeNull();
-    expect(
-      await runtime.interruptStage(
-        run.id,
-        "owned",
-        "stale-session",
-        "late interrupt",
-      ),
-    ).toBeNull();
-    const content = "live result";
-    await runtime.completeStage(run.id, "owned", {
-      summary: content,
-      sessionId: "live-session",
-      reviewerSessionId: "fresh-reviewer",
-      verification: {
-        accepted: true,
-        summary: "session ownership verified",
-        checks: ["race test"],
-      },
-      artifacts: [
+      refused
+        .map((event) => event.detail)
+        .filter(
+          (detail) =>
+            (detail as { reason?: string }).reason === "stale-session",
+        ),
+    ).toHaveLength(3);
+    expect(await runtime.snapshot(run.id)).toMatchObject({
+      run: { status: "awaiting_approval" },
+      stages: [
         {
-          kind: "race-proof",
-          uri: `workflow://${run.id}/race`,
-          content,
-          checksum: artifactChecksum(content),
-          revision: "deadbeef",
-          producerSessionId: "live-session",
-          command: "bun test",
-          exitCode: 0,
+          status: "succeeded",
+          sessionId: "live-process-session",
+          attempts: 1,
+          output: { summary: "winner process result" },
         },
       ],
     });
-    expect((await runtime.snapshot(run.id))?.run.status).toBe(
-      "awaiting_approval",
-    );
   });
 
   test("an expired final attempt terminates instead of being reclaimed forever", async () => {

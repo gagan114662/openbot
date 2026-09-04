@@ -133,6 +133,12 @@ const assertDag = (stages: z.infer<typeof stagePlanSchema>) => {
 export const artifactChecksum = (content: string | Uint8Array) =>
   createHash("sha256").update(content).digest("hex");
 
+export type StaleStageSession = {
+  kind: "stale-session";
+  expected: string | null;
+  actual: string;
+};
+
 export function verifyWorkflowEvidence(snapshot: {
   run: { status: string; approvedBy: string | null };
   stages: Array<{
@@ -224,6 +230,36 @@ export function createWorkflowRuntime(
   tenantId: string,
   options: { failControlAudit?: () => Promise<never> } = {},
 ) {
+  const staleStageSession = async (
+    tx: Parameters<Parameters<typeof database.transaction>[0]>[0],
+    input: {
+      runId: string;
+      stageId: string;
+      status: string;
+      expected: string | null;
+      actual: string;
+      operation: "complete" | "fail" | "interrupt";
+    },
+  ): Promise<StaleStageSession> => {
+    await tx.insert(factoryWorkflowEvents).values({
+      runId: input.runId,
+      stageId: input.stageId,
+      entity: "stage",
+      fromStatus: input.status,
+      toStatus: input.status,
+      detail: {
+        reason: "stale-session",
+        operation: input.operation,
+        expected: input.expected,
+        actual: input.actual,
+      },
+    });
+    return {
+      kind: "stale-session",
+      expected: input.expected,
+      actual: input.actual,
+    };
+  };
   const controlAudit = async (
     tx: Parameters<Parameters<typeof database.transaction>[0]>[0],
     run: typeof factoryWorkflowRuns.$inferSelect,
@@ -1188,6 +1224,40 @@ export function createWorkflowRuntime(
           );
       }
       return database.transaction(async (tx) => {
+        const [run] = await tx
+          .select({ id: factoryWorkflowRuns.id })
+          .from(factoryWorkflowRuns)
+          .where(
+            and(
+              eq(factoryWorkflowRuns.id, runId),
+              eq(factoryWorkflowRuns.tenantId, tenantId),
+            ),
+          );
+        if (!run) throw new Error("Running workflow stage was not found.");
+        const [ownedStage] = await tx
+          .select()
+          .from(factoryWorkflowStages)
+          .where(
+            and(
+              eq(factoryWorkflowStages.runId, runId),
+              eq(factoryWorkflowStages.stageId, stageId),
+            ),
+          )
+          .for("update");
+        if (!ownedStage)
+          throw new Error("Running workflow stage was not found.");
+        if (
+          ownedStage.status !== "running" ||
+          ownedStage.sessionId !== result.sessionId
+        )
+          return staleStageSession(tx, {
+            runId,
+            stageId,
+            status: ownedStage.status,
+            expected: ownedStage.sessionId,
+            actual: result.sessionId,
+            operation: "complete",
+          });
         const [stage] = await tx
           .update(factoryWorkflowStages)
           .set({
@@ -1208,7 +1278,15 @@ export function createWorkflowRuntime(
             ),
           )
           .returning();
-        if (!stage) throw new Error("Running workflow stage was not found.");
+        if (!stage)
+          return staleStageSession(tx, {
+            runId,
+            stageId,
+            status: ownedStage.status,
+            expected: ownedStage.sessionId,
+            actual: result.sessionId,
+            operation: "complete",
+          });
         await tx
           .insert(factoryWorkflowArtifacts)
           .values(
@@ -1270,13 +1348,16 @@ export function createWorkflowRuntime(
             ),
           )
           .for("update");
-        if (
-          !run ||
-          !stage ||
-          stage.status !== "running" ||
-          stage.sessionId !== sessionId
-        )
-          return null;
+        if (!run || !stage) return null;
+        if (stage.status !== "running" || stage.sessionId !== sessionId)
+          return staleStageSession(tx, {
+            runId,
+            stageId,
+            status: stage.status,
+            expected: stage.sessionId,
+            actual: sessionId,
+            operation: "fail",
+          });
         const checkedArtifacts = artifacts.length
           ? stageResultSchema.shape.artifacts.parse(artifacts)
           : [];
@@ -1335,6 +1416,39 @@ export function createWorkflowRuntime(
       reason: string,
     ) {
       return database.transaction(async (tx) => {
+        const [run] = await tx
+          .select({ id: factoryWorkflowRuns.id })
+          .from(factoryWorkflowRuns)
+          .where(
+            and(
+              eq(factoryWorkflowRuns.id, runId),
+              eq(factoryWorkflowRuns.tenantId, tenantId),
+            ),
+          );
+        if (!run) return null;
+        const [ownedStage] = await tx
+          .select()
+          .from(factoryWorkflowStages)
+          .where(
+            and(
+              eq(factoryWorkflowStages.runId, runId),
+              eq(factoryWorkflowStages.stageId, stageId),
+            ),
+          )
+          .for("update");
+        if (!ownedStage) return null;
+        if (
+          ownedStage.status !== "running" ||
+          ownedStage.sessionId !== sessionId
+        )
+          return staleStageSession(tx, {
+            runId,
+            stageId,
+            status: ownedStage.status,
+            expected: ownedStage.sessionId,
+            actual: sessionId,
+            operation: "interrupt",
+          });
         const [stage] = await tx
           .update(factoryWorkflowStages)
           .set({
@@ -1353,7 +1467,15 @@ export function createWorkflowRuntime(
             ),
           )
           .returning();
-        if (!stage) return null;
+        if (!stage)
+          return staleStageSession(tx, {
+            runId,
+            stageId,
+            status: ownedStage.status,
+            expected: ownedStage.sessionId,
+            actual: sessionId,
+            operation: "interrupt",
+          });
         await tx.insert(factoryWorkflowEvents).values({
           runId,
           stageId,

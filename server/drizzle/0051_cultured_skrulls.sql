@@ -1,0 +1,1 @@
+ALTER TABLE "production_issues" ADD COLUMN "fix_claim_id" uuid;

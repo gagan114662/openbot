@@ -36,6 +36,25 @@ function pendingThreshold(proposal: Record<string, unknown>) {
   return proposal.proposedThreshold;
 }
 
+/**
+ * The losing caller of a concurrent fix claim. Carries the identity of the fix
+ * that already holds the issue so the route can answer 409 with something a
+ * client can act on instead of a bare apology.
+ */
+export class FixAlreadyClaimedError extends Error {
+  constructor(
+    readonly existing: {
+      fixId: string | null;
+      fixStatus: string;
+      fixBranch: string | null;
+      pullRequestUrl: string | null;
+    },
+  ) {
+    super("A fix is already running or awaiting review for this issue.");
+    this.name = "FixAlreadyClaimedError";
+  }
+}
+
 export type FixDrafter = (input: {
   issueId: string;
   title: string;
@@ -116,10 +135,12 @@ export function createProductionEngineerStore(
   const claimFix = async (actorId: string, issueId: string) => {
     if (!fixDrafter)
       throw new Error("Fix automation is disabled for this deployment.");
+    const fixClaimId = crypto.randomUUID();
     const [issue] = await database
       .update(productionIssues)
       .set({
         fixStatus: "running",
+        fixClaimId,
         humanApprovedBy: actorId,
         updatedAt: new Date(),
       })
@@ -135,10 +156,44 @@ export function createProductionEngineerStore(
         ),
       )
       .returning();
-    if (!issue)
+    if (!issue) {
+      const [held] = await database
+        .select({
+          status: productionIssues.status,
+          fixClaimId: productionIssues.fixClaimId,
+          fixStatus: productionIssues.fixStatus,
+          fixBranch: productionIssues.fixBranch,
+          pullRequestUrl: productionIssues.pullRequestUrl,
+        })
+        .from(productionIssues)
+        .where(eq(productionIssues.id, issueId))
+        .limit(1);
+      if (held && held.status === "open")
+        throw new FixAlreadyClaimedError({
+          fixId: held.fixClaimId,
+          fixStatus: held.fixStatus,
+          fixBranch: held.fixBranch,
+          pullRequestUrl: held.pullRequestUrl,
+        });
       throw new Error(
         "This production issue is not open for a new fix; a fix may already be running or awaiting review.",
       );
+    }
+    // A re-draft after a failed or reviewed fix supersedes the old branch and PR
+    // explicitly: the durable audit row names what this claim replaces, so the
+    // old pull request is never silently joined by a parallel one.
+    if (issue.pullRequestUrl && auditStore)
+      await recordAuditEvent(auditStore, {
+        eventType: "production.fix_superseded",
+        targetType: "production_issue",
+        targetId: issueId,
+        actorUserId: actorId,
+        payload: {
+          fixClaimId,
+          supersededBranch: issue.fixBranch,
+          supersededPullRequestUrl: issue.pullRequestUrl,
+        },
+      });
     return issue;
   };
 

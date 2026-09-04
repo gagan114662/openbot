@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { eq, inArray } from "drizzle-orm";
+import { asc, eq, inArray } from "drizzle-orm";
 import { createDatabase } from "../src/db/client";
 import {
   auditEvents,
@@ -877,10 +877,14 @@ if (!prompt.includes("Independently review")) {
       ),
     ).toHaveLength(2);
     expect(snapshot?.evidence.checks.producerBound).toBe(true);
+    // Two rows with no ORDER BY come back in heap order, which Postgres does
+    // not guarantee; CI caught the reversed sequence once. The claim is
+    // reject-then-approve in time, so ask for time.
     const gateAudits = await database
       .select()
       .from(auditEvents)
-      .where(eq(auditEvents.targetId, run.id));
+      .where(eq(auditEvents.targetId, run.id))
+      .orderBy(asc(auditEvents.createdAt));
     expect(
       gateAudits.map((event) => (event.payload as { action: string }).action),
     ).toEqual(["stage_reject", "stage_approve"]);

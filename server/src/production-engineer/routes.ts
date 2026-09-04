@@ -5,7 +5,7 @@ import type { AppVariables } from "../auth/guards";
 import { requireAdmin } from "../auth/guards";
 import type { VerifiedValueStore } from "../software-factory/verified-value";
 import type { WebhookReconciler } from "../webhooks/reconciler";
-import type { ProductionEngineerStore } from "./store";
+import { FixAlreadyClaimedError, type ProductionEngineerStore } from "./store";
 
 const text = (value: unknown, maximum = 2_000) =>
   typeof value === "string" && value.trim()
@@ -393,14 +393,31 @@ export function createProductionEngineerRoutes(
     // A real Codex fix takes minutes. Holding the request open lets Bun's HTTP idle timeout turn a
     // healthy child into a browser-visible failure while the child keeps working. The durable issue
     // row is the job state; the admin page polls it until the terminal status lands.
-    const issue = await store.claimFix(actorId, issueId).catch(() => null);
-    if (!issue)
+    let issue: Awaited<ReturnType<typeof store.claimFix>>;
+    try {
+      issue = await store.claimFix(actorId, issueId);
+    } catch (error) {
+      if (error instanceof FixAlreadyClaimedError)
+        return context.json(
+          {
+            error: error.message,
+            fixId: error.existing.fixId,
+            fixStatus: error.existing.fixStatus,
+            fixBranch: error.existing.fixBranch,
+            pullRequestUrl: error.existing.pullRequestUrl,
+          },
+          409,
+        );
       return context.json(
         {
-          error: "A fix is already running or awaiting review for this issue.",
+          error:
+            error instanceof Error
+              ? error.message
+              : "This production issue is not open for a new fix.",
         },
         409,
       );
+    }
     void store.runClaimedFix(actorId, issue).catch((error) => {
       console.error(
         JSON.stringify({

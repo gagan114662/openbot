@@ -49,6 +49,7 @@ export const productionIssues = pgTable(
     recentDeploy: jsonb("recent_deploy").notNull().default({}),
     evidence: jsonb("evidence").notNull().default({}),
     fixStatus: text("fix_status").notNull().default("none"),
+    fixClaimId: uuid("fix_claim_id"),
     fixBranch: text("fix_branch"),
     pullRequestUrl: text("pull_request_url"),
     humanApprovedBy: text("human_approved_by"),

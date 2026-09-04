@@ -10,7 +10,15 @@ import {
 import { type FixDrafter, TechnicalDebtGateError } from "./store";
 
 async function command(args: string[], cwd: string) {
-  const child = spawn(args, { cwd, stdout: "pipe", stderr: "pipe" });
+  // Resolve executables through the process's CURRENT environment. Bun's spawn
+  // otherwise consults the environ captured at startup, which silently ignores
+  // PATH changes and makes the drafter untestable against shimmed binaries.
+  const child = spawn(args, {
+    cwd,
+    env: process.env,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
   const [stdout, stderr, status] = await Promise.all([
     new Response(child.stdout).text(),
     new Response(child.stderr).text(),

@@ -53,6 +53,7 @@ export const auditEventTypes = [
   "knowledge.searched",
   /** An administrator declined a generated monitor threshold change. */
   "production.tuning_rejected",
+  "production.fix_superseded",
   /**
    * Which coworker an untagged message was routed to, and why.
    *

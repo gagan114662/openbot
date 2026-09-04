@@ -207,3 +207,41 @@ describe("Production Engineer Alertmanager ingress", () => {
     ]);
   });
 });
+
+describe("Production fix drafting route", () => {
+  test("a second draft answers 409 with the existing fix's id, branch, and PR", async () => {
+    const existing = {
+      fixId: "11111111-2222-4333-8444-555555555555",
+      fixStatus: "pull_request_open",
+      fixBranch: "openbot/production-abcd1234-ef567890",
+      pullRequestUrl: "https://github.com/example/fixture/pull/35",
+    };
+    const { FixAlreadyClaimedError } = await import(
+      "../src/production-engineer/store"
+    );
+    const routes = createProductionEngineerRoutes(
+      {
+        async claimFix() {
+          throw new FixAlreadyClaimedError(existing);
+        },
+      } as unknown as ProductionEngineerStore,
+      async (context, next) => {
+        context.set("actor", {
+          id: "route-test-admin",
+          role: "admin",
+        } as never);
+        await next();
+      },
+    );
+    const response = await routes.request("/issues/some-issue/fix", {
+      method: "POST",
+    });
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({
+      fixId: existing.fixId,
+      fixStatus: existing.fixStatus,
+      fixBranch: existing.fixBranch,
+      pullRequestUrl: existing.pullRequestUrl,
+    });
+  });
+});

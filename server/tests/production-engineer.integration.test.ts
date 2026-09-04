@@ -10,6 +10,7 @@ import {
 } from "../src/db/schema";
 import {
   createProductionEngineerStore,
+  FixAlreadyClaimedError,
   monitorForChange,
   TechnicalDebtGateError,
 } from "../src/production-engineer/store";
@@ -96,7 +97,7 @@ describe("persistent production engineer", () => {
     while (invocations === 0) await Bun.sleep(5);
     await expect(
       concurrentStore.draftFix("admin-two", issue!.id),
-    ).rejects.toThrow("not open for a new fix");
+    ).rejects.toThrow(FixAlreadyClaimedError);
     expect(invocations).toBe(1);
     release();
     await first;

@@ -1732,6 +1732,29 @@ if (!prompt.includes("Independently review")) {
     expect((await runtime.snapshot(run.id))?.run.status).toBe("failed");
   });
 
+  /**
+   * `claim` takes the oldest claimable run in the tenant, and earlier tests in this
+   * file leave runs behind that are still claimable. A worker in a later test would
+   * then pick up somebody else's run instead of its own. Parking the others makes
+   * these tests depend on their own run rather than on file ordering; `claim`
+   * filters on `abortRequested`, so this takes effect immediately.
+   */
+  const isolateRun = async (keepRunId: string) => {
+    const others = await database
+      .select({
+        id: factoryWorkflowRuns.id,
+        status: factoryWorkflowRuns.status,
+      })
+      .from(factoryWorkflowRuns)
+      .where(eq(factoryWorkflowRuns.tenantId, tenantId));
+    for (const other of others)
+      if (
+        other.id !== keepRunId &&
+        ["queued", "running", "pausing", "paused"].includes(other.status)
+      )
+        await runtime.requestAbort(other.id);
+  };
+
   test("pausing and resuming five times on a one attempt run still lets the stage complete", async () => {
     const queued = await store.queueJob("admin", {
       kind: "ci-repair",
@@ -1753,6 +1776,7 @@ if (!prompt.includes("Independently review")) {
         },
       ],
     });
+    await isolateRun(run.id);
     let executions = 0;
     const worker = createWorkflowWorker({
       runtime,
@@ -1841,6 +1865,7 @@ if (!prompt.includes("Independently review")) {
         },
       ],
     });
+    await isolateRun(run.id);
     const child = Bun.spawn(
       ["bun", "server/tests/fixtures/workflow-crash-worker.ts"],
       {
@@ -1888,5 +1913,116 @@ if (!prompt.includes("Independently review")) {
       lastError: "Worker lease expired before a result was committed.",
     });
     await worker.drain();
+  });
+
+  test("a concurrent reader never sees a reset stage still holding the attempt it was given back", async () => {
+    // A second connection, so what it reads is what any other process would read
+    // rather than anything this test's own connection is holding open.
+    const observerDatabase = createDatabase(
+      process.env.DATABASE_URL ??
+        "postgres://openbot:openbot@localhost:5432/openbot",
+      { max: 1 },
+    );
+    const queued = await store.queueJob("admin", {
+      kind: "ci-repair",
+      tier: "managed",
+      objective: "hold the attempt and the status together",
+      trigger: "atomic-refund-proof",
+      minimumQuality: 0.8,
+    });
+    const run = await runtime.create({
+      jobId: queued.job.id,
+      maximumAttempts: 3,
+      concurrencyLimit: 1,
+      stages: [
+        {
+          id: "atomic",
+          objective: "be reset atomically",
+          requiredContext: [],
+          dependsOn: [],
+        },
+      ],
+    });
+    await isolateRun(run.id);
+
+    /** Every distinct `status:attempts` pair the stage row passes through. */
+    const watch = () => {
+      const seen = new Set<string>();
+      let running = true;
+      const loop = (async () => {
+        while (running) {
+          const [row] = await observerDatabase
+            .select({
+              status: factoryWorkflowStages.status,
+              attempts: factoryWorkflowStages.attempts,
+            })
+            .from(factoryWorkflowStages)
+            .where(eq(factoryWorkflowStages.runId, run.id));
+          if (row) seen.add(`${row.status}:${row.attempts}`);
+        }
+      })();
+      return {
+        seen,
+        /**
+         * Keep watching until the reset has actually been observed, then stop.
+         * Stopping the moment the write returns races the observer's in-flight
+         * query, which can end the watch having sampled only the pre-reset row.
+         */
+        settle: async () => {
+          const deadline = Date.now() + 5_000;
+          while (
+            Date.now() < deadline &&
+            ![...seen].some((sample) => sample.startsWith("pending:"))
+          )
+            await Bun.sleep(5);
+          running = false;
+          await loop;
+        },
+      };
+    };
+
+    const holdOneAttempt = async (sessionId: string) => {
+      await database
+        .update(factoryWorkflowStages)
+        .set({ status: "running", attempts: 1, sessionId })
+        .where(eq(factoryWorkflowStages.runId, run.id));
+    };
+
+    // Positive control. Reset the status and give the attempt back as two
+    // separate statements, which is what "outside the transaction" looks like.
+    // If the observer cannot catch that, it cannot catch anything, and the
+    // assertion below would pass for the wrong reason.
+    await holdOneAttempt("control-session");
+    const control = watch();
+    await database
+      .update(factoryWorkflowStages)
+      .set({ status: "pending" })
+      .where(eq(factoryWorkflowStages.runId, run.id));
+    await Bun.sleep(50);
+    await database
+      .update(factoryWorkflowStages)
+      .set({ attempts: 0 })
+      .where(eq(factoryWorkflowStages.runId, run.id));
+    await control.settle();
+    expect([...control.seen]).toContain("pending:1");
+
+    // The real path. Same observer, same stage, same starting point.
+    await holdOneAttempt("live-session");
+    const live = watch();
+    await runtime.interruptStage(
+      run.id,
+      "atomic",
+      "live-session",
+      "Paused by an operator while running.",
+    );
+    await live.settle();
+
+    // "pending:1" is a stage that has been handed back to the queue while still
+    // counted as having spent the attempt. It is the state the issue describes,
+    // and the control above proves this observer would have caught it.
+    expect([...live.seen]).not.toContain("pending:1");
+    expect([...live.seen]).toContain("pending:0");
+
+    await runtime.requestAbort(run.id);
   });
 });

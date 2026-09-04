@@ -1239,7 +1239,7 @@ if (!prompt.includes("Independently review")) {
     await worker.drain();
   });
 
-  test("five pause cycles do not spend the only attempt before the stage succeeds", async () => {
+  test("five pause cycles do not spend the one attempt before the stage succeeds", async () => {
     await store.benchmark({
       source: "measured",
       model: "pause-proof-model",
@@ -1763,95 +1763,6 @@ if (!prompt.includes("Independently review")) {
     expect((await runtime.snapshot(run.id))?.run.status).toBe("failed");
   });
 
-  test("pausing and resuming five times on a one attempt run still lets the stage complete", async () => {
-    const queued = await store.queueJob("admin", {
-      kind: "ci-repair",
-      tier: "managed",
-      objective: "survive repeated operator pauses",
-      trigger: "five-pause-proof",
-      minimumQuality: 0.8,
-    });
-    const run = await runtime.create({
-      jobId: queued.job.id,
-      maximumAttempts: 1,
-      concurrencyLimit: 1,
-      stages: [
-        {
-          id: "paused-five-times",
-          objective: "complete after five pauses",
-          requiredContext: [],
-          dependsOn: [],
-        },
-      ],
-    });
-    await isolateRun(run.id);
-    let executions = 0;
-    const worker = createWorkflowWorker({
-      runtime,
-      workerId: "five-pause-worker",
-      executor: {
-        async execute({ sessionId, signal }) {
-          executions += 1;
-          if (executions <= 5)
-            await new Promise<never>((_resolve, reject) =>
-              signal.addEventListener(
-                "abort",
-                () => reject(new Error(String(signal.reason))),
-                { once: true },
-              ),
-            );
-          const content = "completed after five pauses";
-          return {
-            sessionId,
-            summary: content,
-            artifacts: [
-              {
-                kind: "five-pause-proof",
-                uri: `workflow://${run.id}/five-pause`,
-                content,
-                checksum: artifactChecksum(content),
-                revision: "deadbeef",
-                producerSessionId: sessionId,
-              },
-            ],
-          };
-        },
-        async review() {
-          return {
-            accepted: true,
-            summary: "fresh review",
-            checks: ["five pause history"],
-          };
-        },
-      },
-    });
-
-    for (let pause = 1; pause <= 5; pause += 1) {
-      const tick = worker.runOnce();
-      while ((await runtime.snapshot(run.id))?.stages[0]?.status !== "running")
-        await Bun.sleep(10);
-      await runtime.requestPause(run.id);
-      await tick;
-      await runtime.claim("five-pause-worker");
-      expect({
-        pause,
-        status: (await runtime.snapshot(run.id))?.run.status,
-        // The refund keeps the single configured attempt available across every pause.
-        attempts: (await runtime.snapshot(run.id))?.stages[0]?.attempts,
-      }).toEqual({ pause, status: "paused", attempts: 0 });
-      await runtime.resume(run.id);
-    }
-
-    await worker.runOnce();
-    expect((await runtime.snapshot(run.id))?.stages[0]?.attempts).toBe(1);
-    expect((await runtime.snapshot(run.id))?.run.status).toBe(
-      "awaiting_approval",
-    );
-    await worker.drain();
-    // Five pause/resume cycles each poll the durable stage, so this needs more
-    // than the default per-test budget.
-  }, 30_000);
-
   test("a SIGKILLed worker on a one attempt run reaches a terminal state within two worker ticks", async () => {
     const queued = await store.queueJob("admin", {
       kind: "ci-repair",
@@ -1923,6 +1834,25 @@ if (!prompt.includes("Independently review")) {
     await worker.drain();
   });
 
+  /**
+   * What this guarantees, and what it does not.
+   *
+   * It verifies **atomic observability**, not lexical placement. It reads through a
+   * second connection, so it measures what another process can see — which is the
+   * property issue #32 is about, since the bug is a worker picking up a stage that
+   * is `pending` while still counted as having spent its attempt.
+   *
+   * #32's criterion 2 asks for a read "inside the same transaction as the reset".
+   * That would measure what the *writer* sees, and a read inside the writing
+   * transaction sees that transaction's own uncommitted writes. Reading from
+   * outside is therefore the correct measurement rather than a workaround.
+   *
+   * The consequence worth knowing before you change `interruptStage`: an
+   * implementation reaching the same guarantee another way — an advisory lock, a
+   * serializable retry — would also pass this test. That is correct behaviourally.
+   * Do not read it as pinning the refund statement's position inside a transaction
+   * block; it pins the observable outcome, which is the thing callers depend on.
+   */
   test("a concurrent reader never sees a reset stage still holding the attempt it was given back", async () => {
     // A second connection, so what it reads is what any other process would read
     // rather than anything this test's own connection is holding open.

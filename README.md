@@ -4,10 +4,9 @@
 
 **AI coworkers you can hand real work to, and actually trust with the access.** Each gets a computer of its own: a real browser with its own logins, its own files, and only the tools you grant. Every action decided before it happens and recorded after.
 
-[**copilotkit.ai/openbot**](https://copilotkit.ai/openbot) · [**Quick start**](#quick-start) · [**Features**](#features) · [**Bring your own agent**](#bring-your-own-agent) · [**Architecture**](#architecture) · [**Docs**](docs/README.md)
+[**Quick start**](#quick-start) · [**Features**](#features) · [**The software factory**](#the-software-factory) · [**What "verified" means here**](#what-verified-means-here) · [**Architecture**](#architecture) · [**Docs**](docs/README.md)
 
-[![CI](https://github.com/CopilotKit/openbot/actions/workflows/ci.yml/badge.svg)](https://github.com/CopilotKit/openbot/actions/workflows/ci.yml)
-[![security](https://github.com/CopilotKit/openbot/actions/workflows/security_zizmor.yml/badge.svg)](https://github.com/CopilotKit/openbot/actions/workflows/security_zizmor.yml)
+[![CI](https://github.com/gagan114662/openbot/actions/workflows/ci.yml/badge.svg)](https://github.com/gagan114662/openbot/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](./LICENSE)
 ![Alpha](https://img.shields.io/badge/status-alpha-orange.svg)
 
@@ -39,7 +38,7 @@ Three coworkers ship in the example package, and they are configuration rather t
 
 Anything a Bot does to a computer, a file, an MCP server or a component goes through one gateway that decides and records it. That is the difference between an agent that can use your tools and an agent you can let near them.
 
-More at [copilotkit.ai/openbot](https://copilotkit.ai/openbot).
+This fork adds a second thing on top of the platform: a **software factory** that runs multi-stage agent workflows against this repository as a durable, crash-safe state machine, and a set of guarantees about what is allowed to count as evidence that the work was actually done. If you only want the coworker platform, ignore [The software factory](#the-software-factory) and everything after it; the platform stands on its own.
 
 ## Built on AG-UI
 
@@ -128,24 +127,27 @@ Leave `EMBEDDED_POSTGRES` off and set `DATABASE_URL` to point at a database you 
 - Ask the Bot to fill out <https://httpbin.org/forms/post>, then inspect `/admin/audit`.
 - Open `/admin/boundaries`, add a deny rule or preset, and retry the same browser action.
 - Create a coworker from `/agents`, give it a standing role, and start a channel with it.
+- Open `/admin/production-engineer`, start a factory run, and pause it mid-stage. The attempt counter should not move.
 
 ## Main surfaces
 
-| Route                | Purpose                                                            |
-| -------------------- | ------------------------------------------------------------------ |
-| `/`                  | Start and browse channels.                                         |
-| `/agents`            | Create, edit, duplicate, hide, delete, and launch coworkers.       |
-| `/channel/:id`       | Converse with one coworker, watch its screen, and see what it ran. |
-| `/bot`               | Direct chat with a Bot; `?agent=<id>` selects one.                 |
-| `/skills`            | Create and enable personal skills.                                 |
-| `/settings`          | User preferences.                                                  |
-| `/admin/credentials` | Store write-only encrypted credentials.                            |
-| `/admin/computers`   | View, stop, and reset Bot computers.                               |
-| `/admin/boundaries`  | Configure browser/file/MCP action policy.                          |
-| `/admin/components`  | Publish components and govern which Bots may use them.             |
-| `/admin/playground`  | Draft and publish sandboxed components in the browser.             |
-| `/admin/plugins`     | Configure MCP servers, MCP grants, and deployment skills.          |
-| `/admin/audit`       | Review permitted, refused, and failed actions.                     |
+| Route                        | Purpose                                                            |
+| ---------------------------- | ------------------------------------------------------------------ |
+| `/`                          | Start and browse channels.                                         |
+| `/agents`                    | Create, edit, duplicate, hide, delete, and launch coworkers.       |
+| `/channel/:id`               | Converse with one coworker, watch its screen, and see what it ran. |
+| `/bot`                       | Direct chat with a Bot; `?agent=<id>` selects one.                 |
+| `/skills`                    | Create and enable personal skills.                                 |
+| `/settings`                  | User preferences.                                                  |
+| `/admin/credentials`         | Store write-only encrypted credentials.                            |
+| `/admin/computers`           | View, stop, and reset Bot computers.                               |
+| `/admin/boundaries`          | Configure browser/file/MCP action policy.                          |
+| `/admin/components`          | Publish components and govern which Bots may use them.             |
+| `/admin/playground`          | Draft and publish sandboxed components in the browser.             |
+| `/admin/plugins`             | Configure MCP servers, MCP grants, and deployment skills.          |
+| `/admin/audit`               | Review permitted, refused, and failed actions.                     |
+| `/admin/analytics`           | Agent traces, evaluators, datasets, the review queue, and cost.    |
+| `/admin/production-engineer` | Factory runs and stages, their evidence, and approve/pause/resume/abort/steer. |
 
 ## Features
 
@@ -167,6 +169,64 @@ Leave `EMBEDDED_POSTGRES` off and set `DATABASE_URL` to point at a database you 
 - **Loopback by default**: computers bind to `127.0.0.1` and require a per-container token, so nothing reaches a logged-in browser by knowing its port. The supervisor binds there too, because it holds the Docker socket and its token is a shared secret rather than a network boundary.
 - **Durable threads and memory**: conversations survive restarts through CopilotKit Intelligence, and each deployment stamps the threads it owns.
 - **Routines**: ask a Bot to do something on a schedule and it does, running as you, in the channel you asked in. A 15-minute floor and a cap of 20 enabled routines keep a sentence from scheduling more than a person meant, and ten failures in a row switch a routine off rather than burn model spend forever. Needs a worker process; see [docs/routines.md](docs/routines.md).
+
+Hardening this fork added at the platform level:
+
+- **The content guard runs on the main path**, not only in the Codex adapter: every granted MCP tool call is inspected before it executes, and each refusal is audited as `mcp.call_rejected` recording categories and paths only. Matched values are never persisted.
+- **Outbound fetches dial the address that passed policy.** The URL check returns the vetted IP and the socket opens to that exact address, keeping the hostname only for the `Host` header and TLS SNI, so a DNS-rebinding domain cannot answer the check publicly and the fetch internally. Every redirect hop re-runs the check before a socket opens.
+- **Hostile MCP tool metadata is capped and stripped**: limits on tool count, name, description and schema size, control and bidi-override characters removed, and a listing that violates them is refused whole so the connector stays on its previously reviewed tools rather than persisting an instruction-bearing description into every future run's context.
+- **Analytics ingestion cannot be forged**: ingestion authorizes the session's agent through the same check the plugins surface uses, and browser-supplied session ids are replaced with a server-derived HMAC id that is unguessable without the key and stable across retries.
+- **Key rotation is crash-recoverable and single-writer**: the replacement `.env` is written and fsynced before the first database write, all rows re-encrypt in one transaction so the database is never mixed-key, and an advisory lock stops two rotations racing. A rerun distinguishes a committed-but-unrenamed rotation from a pre-commit crash and recovers either.
+- **Shutdown drains**: a single-fire, bounded 30-second SIGTERM drain races a deadline so it honours a Kubernetes grace period even with a wedged dependency, stopping loops, timers and listeners and awaiting in-flight handoff work.
+- **Client analytics survive tab close**: a bounded, deduplicated, localStorage-backed queue flushes on `pagehide`, on `online` and at startup, and the server reaps stale sessions on a shared retention timer so one lost event cannot strand a session as running forever.
+
+## The software factory
+
+The factory runs a **DAG of stages**. Each stage is executed by a CLI harness in its own git worktree, leased to exactly one worker, with attempts bounded and every transition persisted. It is a state machine first and an agent second: the interesting parts are what happens when a worker dies, when an operator intervenes, and when a model claims success it cannot support.
+
+Where to drive it:
+
+- `/admin/production-engineer` — runs, stages, evidence, and the operator controls.
+- `bun run factory:live-run` — the checked-in launcher.
+- `POST /api/software-factory/jobs` — the API path. The objective and the launching actor are stored on the job, so there is no unrecorded way to start work.
+
+What the runtime guarantees:
+
+- **Only the session that produced work may commit it.** Stage transitions carry the caller's session id; a stale worker's write matches zero rows, produces a typed refusal and a durable `stale-session` event, and leaves the stage untouched.
+- **A slow model turn is not a crash.** Leases renew on a heartbeat while the child process is alive. A lease genuinely lost interrupts the live child and records it without spending an attempt, and harness transport outages are classified, backed off and refunded.
+- **Operator control does not cost you an attempt.** Pause, steer and abort return the stage to `pending` and refund the attempt in the same write that resets it, so pausing a run five times on a one-attempt budget still lets the stage finish.
+- **A run always reaches a terminal state.** If a crash reset would leave a stage at its attempt ceiling, the stage and the run are marked failed in the same transaction. If no stage is startable and none is running, the run is reconciled to failed rather than sitting in `running` forever holding a concurrency slot.
+- **Worktrees are bounded.** On every terminal state the runtime removes and prunes the worktree after the evidence bundle is copied out, a retention sweep reaps orphans on worker start, and evidence lives outside the worktree so artifacts stay retrievable after it is gone.
+- **Fan-out is bounded by construction.** Evaluator and shadow work run behind a pool and a semaphore with configured capacity, drops are counted, and inflight counts are exported as Prometheus gauges.
+
+## What "verified" means here
+
+This is the part of the fork worth reading. The claim is not that an agent did the work; it is that the evidence would fail if the work had not been done.
+
+- **A check is a command the runtime spawns.** A stage plan declares `checks: [{id, command, cwd, timeoutMs, required}]`. The runtime runs them in the worktree after the worker and before the reviewer, and each produces an artifact carrying the exit code, duration, bounded checksummed stdout and stderr, and the git revision. "Done" is not a sentence anybody writes.
+- **The reviewer never sees the candidate's own account of success.** A fresh reviewer session is given the objective, the runtime-scoped diff and the check artifacts. Contract tests assert the candidate's summary is absent from that prompt, and restoring it fails them.
+- **Evidence provenance is set by the runtime, never accepted from the executor.** A check artifact is stamped `runtime-recorded` by the code that spawned the process; anything else a caller supplies is overwritten. An integration test creates a real temporary git repository, declares a real command as a required check, and asserts the artifact's exit code and output came from the spawned process.
+- **Human approval means a user id.** It is derived from a route actor, and system completion writes a separate field. A run completed by the system cannot mint verified value.
+- **A route must be paid for.** A benchmark refuses to record without CLI-reported token usage and real cost, and the catalogue carries a negative-control task so a no-op tree cannot score a perfect result.
+- **A skipped CI job is not a pass.** The `verify` gate requires success from static analysis, deployables, charts, tests, the replica drill, build, and migrations. The only permitted skip is the image job, and only on an unlabelled pull request; anything else prints an error naming the job and exits non-zero.
+- **Test names may not claim evidence they do not produce.** A lint scans every test and describe name and rejects words like "real" or "executed" where no command is spawned.
+
+## Operating it safely
+
+- Every operator control — approve, abort, pause, resume, steer — writes an audit row with actor, run, job, action and from/to status in the same transaction as the state change. Steer stores a hash of the instruction, never its text.
+- Agent-produced diffs are measured against a technical-debt budget after editing and before typecheck, commit, push or PR creation. Violations move to `review_required` rather than being accepted silently.
+- Evaluator concurrency, shadow concurrency and queue capacity, worktree retention, and the stall watchdog are all configurable and all bounded by default.
+- Worktree counts and disk use are exported alongside the inflight gauges; `observability/` carries Prometheus rules, an alertmanager config and a Grafana dashboard, and `ops/systemd` carries the unit files.
+
+> **Factory settings are read from the environment but are not yet templated in `.env.example`.** `SOFTWARE_FACTORY_*`, `SHADOW_*`, `EVALUATOR_CONCURRENCY` and `CODEX_DEBT_*` are read at startup; until they are added to the template, copy them from the source or set them explicitly.
+
+## Backup and recovery
+
+Streaming `pg_dump` with no RAM buffering, a SHA-256 manifest, a six-hour schedule and documented retention. The ops tests execute rather than grep: one dumps and restores for real, and the replica drill boots two real API processes and drives concurrent requests against them. Both write audit rows.
+
+Be aware of the split: the database dump and restore are genuinely exercised in CI, but the object-storage upload in CI uses a generated stand-in binary that copies to a local directory. The live off-host round trip has been done manually and is **not** reproduced by CI. Treat this as streamed, checksummed, off-host-capable backup with an executed restore drill — not as a cloud backup verified on every run.
+
+Details and the schedule: [docs/backup-and-restore.md](docs/backup-and-restore.md).
 
 ## Bring your own agent
 
@@ -228,6 +288,9 @@ Settings worth knowing:
 | `AGENT_ENDPOINT_ALLOWED_HOSTS`       | Private addresses an agent may be registered at, comma separated. A host, optionally with a port. |
 | `TENANT_PACKAGE_DIR`                 | Directory containing tenant YAML. Defaults to `../examples/fintech`.      |
 | `DEPLOYMENT_ID`                      | Names this deployment when two share one Intelligence project.            |
+| `AGENT_STALL_TIMEOUT_MS`             | Stall watchdog, defaulting to 120s. `0` disables it explicitly.           |
+| `SOFTWARE_FACTORY_WORKER`            | Set to `false` to run the server without the factory worker loop.         |
+| `SOFTWARE_FACTORY_REPOSITORY`        | Repository the factory operates on. Defaults to the working directory.    |
 
 Full reference: [docs/configuration.md](docs/configuration.md).
 
@@ -236,13 +299,17 @@ Full reference: [docs/configuration.md](docs/configuration.md).
 | Service                  | Port                       | Purpose                                                                                          |
 | ------------------------ | -------------------------- | ------------------------------------------------------------------------------------------------ |
 | `app`                    | 3010                       | React/Vite UI.                                                                                   |
-| `server`                 | 3001                       | Hono API, CopilotKit runtime, auth, policy, audit, plugins, components, coworkers, and channels. |
+| `server`                 | 3001                       | Hono API, CopilotKit runtime, auth, policy, audit, plugins, components, coworkers, channels, and the factory runtime. |
+| `worker`                 | —                          | Background loops: routines, retention, handoff delivery.                                         |
 | `agent-computer`         | 4100                       | Chromium plus `/workspace` and browser profile.                                                  |
 | `agent-bot`              | 4200                       | Proof-of-concept AG-UI Bot.                                                                          |
 | `agent-langgraph`        | 4201                       | LangGraph AG-UI Bot.                                                                             |
+| `agent-codex`            | —                          | Local Codex CLI adapter, including the technical-debt gate on agent-produced diffs.               |
 | `supervisor`             | 4500 host / 4300 container | Creates and manages one computer per Bot.                                                        |
-| PostgreSQL with pgvector | 5432                       | Product data, policy, audit, credentials, grants, channels, and component metadata.              |
+| PostgreSQL with pgvector | 5432                       | Product data, policy, audit, credentials, grants, channels, component metadata, and factory state. |
 | CopilotKit Intelligence  | external                   | Durable threads and memory.                                                                      |
+
+`observability/` carries Prometheus rules, an alertmanager configuration and a Grafana dashboard; `ops/` carries systemd units for the scheduled jobs; `audit/` holds the evidence bundles referenced by closed issues.
 
 The server gateway is the product/API path for Bot browser and file tool calls.
 It resolves the target, evaluates policy, writes an audit row, and then calls
@@ -338,6 +405,21 @@ bun run test
 bun run build
 ```
 
+`bun run test:ci` is the gate CI runs. It takes a database-scoped advisory lock held for the whole
+run, so a second concurrent suite exits **73 before any test starts** with one diagnostic line rather
+than producing dozens of spurious "too many clients" failures. The lock is session-scoped, so a
+killed suite releases it and there is no stale-lock cleanup to remember.
+
+Operational drills, all of which execute rather than inspect:
+
+```sh
+bun run eval:golden      # golden-set evaluation
+bun run drill:replicas   # boots two real API processes and drives concurrent requests
+bun run backup:drill     # dumps and restores for real, writing an audit row
+bun run key:rotate       # crash-recoverable encryption key rotation
+bun run factory:live-run # the checked-in factory launcher
+```
+
 After changing the Drizzle schema:
 
 ```sh
@@ -347,16 +429,18 @@ bun run --filter server db:migrate
 
 Use `bash scripts/start.sh` for the whole stack. Use `bun run dev` only when you want the app and server without the Docker Bots and computers.
 
-## Documentation
+## Status and roadmap
 
-- [copilotkit.ai/openbot](https://copilotkit.ai/openbot)
-- [docs/README.md](docs/README.md)
-- [docs/architecture.md](docs/architecture.md)
-- [docs/configuration.md](docs/configuration.md)
-- [docs/development.md](docs/development.md)
-- [docs/coworkers.md](docs/coworkers.md)
-- [docs/deployment.md](docs/deployment.md)
-- [docs/releasing.md](docs/releasing.md)
+Closed issues cover the runtime, evidence, security and operational work described above. These are **open** and should not be read into anything above:
+
+- Natural-language workflow authoring, with approval before a run starts.
+- Applying a route decision per stage, and a second harness adapter behind the same contract with per-harness budgets.
+- Factory-as-code and a Factory MCP server.
+- Computer-use visual verification.
+- Versioned outcome scorers and cost-per-success routing feedback.
+- Governed self-improvement with promotion gates.
+
+Two evidence gaps are recorded against otherwise-closed work: fault-injection proof that the control-audit write is atomic across a kill between writes, and a positive live run of the observable-change gate.
 
 ## Contributing
 
@@ -364,6 +448,22 @@ Use `bash scripts/start.sh` for the whole stack. Use `bun run dev` only when you
 - Keep changes focused and update docs when setup, configuration, architecture, or user behavior changes.
 - Keep secrets, service-account JSON, customer data, and local transcripts out of the repository.
 - Run the checks in [Development](#development) before opening a pull request.
+
+## Documentation
+
+- [docs/README.md](docs/README.md)
+- [docs/architecture.md](docs/architecture.md)
+- [docs/configuration.md](docs/configuration.md)
+- [docs/development.md](docs/development.md)
+- [docs/coworkers.md](docs/coworkers.md)
+- [docs/deployment.md](docs/deployment.md)
+- [docs/releasing.md](docs/releasing.md)
+- [docs/agent-analytics.md](docs/agent-analytics.md)
+- [docs/backup-and-restore.md](docs/backup-and-restore.md)
+- [docs/production-readiness.md](docs/production-readiness.md)
+- [docs/multi-tenancy.md](docs/multi-tenancy.md)
+- [docs/tool-coverage.md](docs/tool-coverage.md)
+- [docs/routines.md](docs/routines.md)
 
 ## License
 

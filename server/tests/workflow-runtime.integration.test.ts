@@ -1731,4 +1731,162 @@ if (!prompt.includes("Independently review")) {
     expect(await runtime.readyStages(run.id)).toEqual([]);
     expect((await runtime.snapshot(run.id))?.run.status).toBe("failed");
   });
+
+  test("pausing and resuming five times on a one attempt run still lets the stage complete", async () => {
+    const queued = await store.queueJob("admin", {
+      kind: "ci-repair",
+      tier: "managed",
+      objective: "survive repeated operator pauses",
+      trigger: "five-pause-proof",
+      minimumQuality: 0.8,
+    });
+    const run = await runtime.create({
+      jobId: queued.job.id,
+      maximumAttempts: 1,
+      concurrencyLimit: 1,
+      stages: [
+        {
+          id: "paused-five-times",
+          objective: "complete after five pauses",
+          requiredContext: [],
+          dependsOn: [],
+        },
+      ],
+    });
+    let executions = 0;
+    const worker = createWorkflowWorker({
+      runtime,
+      workerId: "five-pause-worker",
+      executor: {
+        async execute({ sessionId, signal }) {
+          executions += 1;
+          if (executions <= 5)
+            await new Promise<never>((_resolve, reject) =>
+              signal.addEventListener(
+                "abort",
+                () => reject(new Error(String(signal.reason))),
+                { once: true },
+              ),
+            );
+          const content = "completed after five pauses";
+          return {
+            sessionId,
+            summary: content,
+            artifacts: [
+              {
+                kind: "five-pause-proof",
+                uri: `workflow://${run.id}/five-pause`,
+                content,
+                checksum: artifactChecksum(content),
+                revision: "deadbeef",
+                producerSessionId: sessionId,
+              },
+            ],
+          };
+        },
+        async review() {
+          return {
+            accepted: true,
+            summary: "fresh review",
+            checks: ["five pause history"],
+          };
+        },
+      },
+    });
+
+    for (let pause = 1; pause <= 5; pause += 1) {
+      const tick = worker.runOnce();
+      while ((await runtime.snapshot(run.id))?.stages[0]?.status !== "running")
+        await Bun.sleep(10);
+      await runtime.requestPause(run.id);
+      await tick;
+      await runtime.claim("five-pause-worker");
+      expect({
+        pause,
+        status: (await runtime.snapshot(run.id))?.run.status,
+        // The refund keeps the single configured attempt available across every pause.
+        attempts: (await runtime.snapshot(run.id))?.stages[0]?.attempts,
+      }).toEqual({ pause, status: "paused", attempts: 0 });
+      await runtime.resume(run.id);
+    }
+
+    await worker.runOnce();
+    expect((await runtime.snapshot(run.id))?.stages[0]?.attempts).toBe(1);
+    expect((await runtime.snapshot(run.id))?.run.status).toBe(
+      "awaiting_approval",
+    );
+    await worker.drain();
+    // Five pause/resume cycles each poll the durable stage, so this needs more
+    // than the default per-test budget.
+  }, 30_000);
+
+  test("a SIGKILLed worker on a one attempt run reaches a terminal state within two worker ticks", async () => {
+    const queued = await store.queueJob("admin", {
+      kind: "ci-repair",
+      tier: "managed",
+      objective: "terminate after a fatal crash",
+      trigger: "two-tick-proof",
+      minimumQuality: 0.8,
+    });
+    const run = await runtime.create({
+      jobId: queued.job.id,
+      maximumAttempts: 1,
+      concurrencyLimit: 1,
+      stages: [
+        {
+          id: "crash-stage",
+          objective: "must not stay running forever",
+          requiredContext: [],
+          dependsOn: [],
+        },
+      ],
+    });
+    const child = Bun.spawn(
+      ["bun", "server/tests/fixtures/workflow-crash-worker.ts"],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          WORKFLOW_TEST_TENANT: tenantId,
+          WORKFLOW_TEST_RUN: run.id,
+        },
+        stdout: "pipe",
+        stderr: "pipe",
+      },
+    );
+    const reader = child.stdout.getReader();
+    const first = await reader.read();
+    expect(new TextDecoder().decode(first.value)).toContain("STAGE_STARTED");
+    child.kill(9);
+    expect(await child.exited).not.toBe(0);
+    await Bun.sleep(150);
+
+    const worker = createWorkflowWorker({
+      runtime,
+      workerId: "two-tick-worker",
+      executor: {
+        async execute() {
+          throw new Error("A terminal run must not start its stage again.");
+        },
+        async review() {
+          throw new Error("A terminal run must not reach review.");
+        },
+      },
+    });
+
+    let ticks = 0;
+    let status = (await runtime.snapshot(run.id))?.run.status;
+    while (ticks < 2 && status !== "failed" && status !== "succeeded") {
+      await worker.runOnce();
+      ticks += 1;
+      status = (await runtime.snapshot(run.id))?.run.status;
+    }
+    expect({ status, ticks }).toEqual({ status: "failed", ticks: 1 });
+    expect((await runtime.snapshot(run.id))?.stages[0]).toMatchObject({
+      status: "failed",
+      attempts: 1,
+      lastError: "Worker lease expired before a result was committed.",
+    });
+    await worker.drain();
+  });
 });

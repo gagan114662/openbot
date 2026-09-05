@@ -1963,4 +1963,90 @@ if (!prompt.includes("Independently review")) {
 
     await runtime.requestAbort(run.id);
   });
+
+  test("the runs list returns the newest first and keeps unfinished runs inside the limit", async () => {
+    /*
+     * Its own tenant. `list` is a limit query over one tenant, so an ordering
+     * assertion run against the shared tenant would be measuring whatever other
+     * tests left behind rather than the order under test.
+     */
+    const listTenant = `workflow-list-${crypto.randomUUID()}`;
+    const listStore = createSoftwareFactoryStore(database, listTenant);
+    const listRuntime = createWorkflowRuntime(database, listTenant);
+    await listStore.benchmark({
+      source: "measured",
+      model: "list-order-model",
+      task: "ci-repair",
+      quality: 0.9,
+      successfulOutcomes: 1,
+      attemptedOutcomes: 1,
+      totalCostMicros: 0,
+      enabled: true,
+    });
+
+    const make = async (label: string) => {
+      const queued = await listStore.queueJob("admin", {
+        kind: "ci-repair",
+        tier: "managed",
+        objective: `list ordering ${label}`,
+        trigger: "list-order-proof",
+        minimumQuality: 0.8,
+      });
+      return listRuntime.create({
+        jobId: queued.job.id,
+        maximumAttempts: 1,
+        concurrencyLimit: 1,
+        stages: [
+          {
+            id: "only",
+            objective: label,
+            requiredContext: [],
+            dependsOn: [],
+          },
+        ],
+      });
+    };
+
+    // Oldest first by construction, so ascending order would put `oldest` first.
+    const oldest = await make("oldest");
+    const middle = await make("middle");
+    const newest = await make("newest");
+
+    // The oldest is the one still needing an operator; the two newer ones are done.
+    for (const run of [middle, newest])
+      await database
+        .update(factoryWorkflowRuns)
+        .set({ status: "succeeded" })
+        .where(eq(factoryWorkflowRuns.id, run.id));
+
+    const listed = await listRuntime.list();
+    expect(listed.map((entry) => entry.run.id)).toEqual([
+      oldest.id, // unfinished, so ahead of both finished runs despite being oldest
+      newest.id,
+      middle.id,
+    ]);
+
+    /*
+     * The severity, not just the arrangement. `list` limits after ordering, so
+     * under ascending order a tenant past the cap stopped returning its newest
+     * run at all. A limit of one has to still reach a run an operator can act on.
+     */
+    const capped = await listRuntime.list(1);
+    expect(capped.map((entry) => entry.run.id)).toEqual([oldest.id]);
+
+    await database
+      .delete(factoryWorkflowStages)
+      .where(
+        inArray(factoryWorkflowStages.runId, [oldest.id, middle.id, newest.id]),
+      );
+    await database
+      .delete(factoryWorkflowRuns)
+      .where(eq(factoryWorkflowRuns.tenantId, listTenant));
+    await database
+      .delete(factoryManagedJobs)
+      .where(eq(factoryManagedJobs.tenantId, listTenant));
+    await database
+      .delete(factoryModelBenchmarks)
+      .where(eq(factoryModelBenchmarks.tenantId, listTenant));
+  });
 });

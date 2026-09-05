@@ -17,8 +17,9 @@ import {
  *
  * Declared once because the lists derived from it had already drifted apart.
  * `pause`, `resume`, `requestAbort`, `steer` and `claim` each carried their own
- * literal array, and `activeRunIds` carried `"aborting"` -- never assigned to a
- * run anywhere in this file -- while omitting `"awaiting_approval"`, which is.
+ * literal array, and the sweep protection set (since renamed to
+ * `protectedWorktreeRunIds`) carried `"aborting"` -- never assigned to a run
+ * anywhere in this file -- while omitting `"awaiting_approval"`, which is.
  * Nothing linked them, so a status added later would be silently absent from
  * every list that should have gained it.
  */
@@ -378,21 +379,25 @@ export function createWorkflowRuntime(
     });
   };
   return {
-    async activeRunIds() {
+    /**
+     * Run ids whose worktree a sweep must not remove -- across every tenant.
+     *
+     * Deliberately NOT tenant-scoped, and that is the whole point. The worktree
+     * root is shared (`join(workspaces, "worktrees")` in the executor) and its
+     * directories are keyed by run id alone, with no tenant segment. A sweep
+     * therefore iterates every tenant's worktrees, while this set decides what
+     * survives. Scoping it to the calling tenant left every other tenant's
+     * running work unprotected, and the sweep deletes on absence. See #126.
+     *
+     * Derived from `nonTerminalRunStatuses` rather than a literal list, so a
+     * status added later is protected by default instead of silently sweepable.
+     */
+    async protectedWorktreeRunIds() {
       const rows = await database
         .select({ id: factoryWorkflowRuns.id })
         .from(factoryWorkflowRuns)
         .where(
-          and(
-            eq(factoryWorkflowRuns.tenantId, tenantId),
-            inArray(factoryWorkflowRuns.status, [
-              "queued",
-              "running",
-              "paused",
-              "pausing",
-              "aborting",
-            ]),
-          ),
+          inArray(factoryWorkflowRuns.status, [...nonTerminalRunStatuses]),
         );
       return rows.map((row) => row.id);
     },

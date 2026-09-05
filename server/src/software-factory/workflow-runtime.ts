@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { and, asc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, lt, or, sql } from "drizzle-orm";
 import { z } from "zod";
 import type { Database } from "../db/client";
 import {
@@ -340,7 +340,21 @@ export function createWorkflowRuntime(
         .select()
         .from(factoryWorkflowRuns)
         .where(eq(factoryWorkflowRuns.tenantId, tenantId))
-        .orderBy(asc(factoryWorkflowRuns.createdAt))
+        /*
+         * Newest first, and anything still needing an operator ahead of anything
+         * finished.
+         *
+         * This is a `limit` query, so the order decides what is *returned*, not
+         * merely how it is arranged. Ascending meant the window held the OLDEST
+         * runs: once a tenant passed the cap the newest run stopped appearing in
+         * the operator console at all. Sorting non-terminal first additionally
+         * keeps a long-running or paused run reachable even when newer runs would
+         * otherwise push it past the cap.
+         */
+        .orderBy(
+          sql`case when ${factoryWorkflowRuns.status} in ('running', 'queued', 'pausing', 'paused', 'awaiting_approval') then 0 else 1 end`,
+          desc(factoryWorkflowRuns.createdAt),
+        )
         .limit(Math.max(1, Math.min(100, limit)));
       if (runs.length === 0) return [];
       const runIds = runs.map((run) => run.id);

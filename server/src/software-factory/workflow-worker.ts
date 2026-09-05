@@ -348,7 +348,7 @@ export function createWorkflowWorker(options: {
       if (draining) return { claimed: false, stages: 0 };
       if (!swept && "sweep" in options.executor && options.executor.sweep) {
         await options.executor.sweep(
-          new Set(await options.runtime.activeRunIds()),
+          new Set(await options.runtime.protectedWorktreeRunIds()),
         );
         swept = true;
       }

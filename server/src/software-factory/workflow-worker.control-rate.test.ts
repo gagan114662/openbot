@@ -44,7 +44,7 @@ test("a 60-second running stage performs fewer than one database query per secon
     },
     renewLease: async () => true,
     completeStage: async () => ({}),
-    activeRunIds: async () => [],
+    protectedWorktreeRunIds: async () => [],
   };
   const content = "bounded result";
   const worker = createWorkflowWorker({

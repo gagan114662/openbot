@@ -122,7 +122,7 @@ describe("real Git worktree lifecycle", () => {
           worktreeStats: executor.worktreeStats,
         },
         runtime: {
-          activeRunIds: async () => [runId],
+          protectedWorktreeRunIds: async () => [runId],
           claim: async () => {
             if (claimed) return null;
             claimed = true;

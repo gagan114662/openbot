@@ -2073,4 +2073,71 @@ if (!prompt.includes("Independently review")) {
     const capped = await listRuntime.list(1);
     expect(capped.map((entry) => entry.run.id)).toEqual([oldest.id]);
   });
+
+  test("the sweep protection set keeps a gated run and another tenant's live work", async () => {
+    /*
+     * #126. The worktree root is shared across tenants and keyed by run id, so
+     * the set that decides what a sweep spares has to span tenants too. It also
+     * has to cover `awaiting_approval`: a run parked at a human gate is idle, not
+     * finished, and the retention cutoff defaults to 24 hours -- shorter than
+     * people take to approve things.
+     */
+    const otherTenant = `workflow-sweep-${crypto.randomUUID()}`;
+    ownedTenants.push(otherTenant);
+    const otherStore = createSoftwareFactoryStore(database, otherTenant);
+    const otherRuntime = createWorkflowRuntime(database, otherTenant);
+    await otherStore.benchmark({
+      source: "measured",
+      model: "sweep-scope-model",
+      task: "ci-repair",
+      quality: 0.9,
+      successfulOutcomes: 1,
+      attemptedOutcomes: 1,
+      totalCostMicros: 0,
+      enabled: true,
+    });
+
+    const build = async (
+      owner: typeof store,
+      runtimeFor: typeof runtime,
+      status: "awaiting_approval" | "running" | "succeeded",
+    ) => {
+      const queued = await owner.queueJob("admin", {
+        kind: "ci-repair",
+        tier: "managed",
+        objective: `sweep scope ${status}`,
+        trigger: "sweep-scope-proof",
+        minimumQuality: 0.8,
+      });
+      const created = await runtimeFor.create({
+        jobId: queued.job.id,
+        maximumAttempts: 1,
+        concurrencyLimit: 1,
+        stages: [
+          { id: "only", objective: status, requiredContext: [], dependsOn: [] },
+        ],
+      });
+      await database
+        .update(factoryWorkflowRuns)
+        .set({ status })
+        .where(eq(factoryWorkflowRuns.id, created.id));
+      return created.id;
+    };
+
+    const gated = await build(store, runtime, "awaiting_approval");
+    const otherRunning = await build(otherStore, otherRuntime, "running");
+    const finished = await build(store, runtime, "succeeded");
+
+    // Built from THIS tenant's runtime, which is what the worker does.
+    const protectedIds = new Set(await runtime.protectedWorktreeRunIds());
+
+    // A run at a human gate is idle, not finished. Sweeping its worktree at the
+    // 24h cutoff would destroy the workspace the approval is about.
+    expect(protectedIds.has(gated)).toBe(true);
+    // The defect: this tenant's worker sweeps a shared directory, so it must
+    // spare a run it does not own.
+    expect(protectedIds.has(otherRunning)).toBe(true);
+    // Terminal runs stay sweepable, or the sweep would never reclaim anything.
+    expect(protectedIds.has(finished)).toBe(false);
+  });
 });

@@ -36,7 +36,45 @@ const tenantId = `workflow-test-${crypto.randomUUID()}`;
 const store = createSoftwareFactoryStore(database, tenantId);
 const runtime = createWorkflowRuntime(database, tenantId);
 
+/**
+ * Tenants a test created for itself, cleaned in `afterAll`.
+ *
+ * A test that needs isolation from the shared tenant falls outside the cleanup
+ * below, and cleaning up at the end of its own body only works when it passes:
+ * a failing assertion throws before reaching those deletes and leaves the tenant
+ * behind. That happened -- a mutation-check run left a `workflow-list-*` tenant
+ * with three runs. `afterAll` runs regardless of outcome, so registering here is
+ * the version that survives failure.
+ */
+const ownedTenants: string[] = [];
+
+const deleteTenant = async (owned: string) => {
+  const runs = await database
+    .select({ id: factoryWorkflowRuns.id })
+    .from(factoryWorkflowRuns)
+    .where(eq(factoryWorkflowRuns.tenantId, owned));
+  const ids = runs.map((run) => run.id);
+  if (ids.length > 0) {
+    await database
+      .delete(factoryWorkflowArtifacts)
+      .where(inArray(factoryWorkflowArtifacts.runId, ids));
+    await database
+      .delete(factoryWorkflowStages)
+      .where(inArray(factoryWorkflowStages.runId, ids));
+  }
+  await database
+    .delete(factoryWorkflowRuns)
+    .where(eq(factoryWorkflowRuns.tenantId, owned));
+  await database
+    .delete(factoryManagedJobs)
+    .where(eq(factoryManagedJobs.tenantId, owned));
+  await database
+    .delete(factoryModelBenchmarks)
+    .where(eq(factoryModelBenchmarks.tenantId, owned));
+};
+
 afterAll(async () => {
+  for (const owned of ownedTenants) await deleteTenant(owned);
   await database
     .delete(factoryWorkflowArtifacts)
     .where(eq(factoryWorkflowArtifacts.runId, runId));
@@ -1971,6 +2009,7 @@ if (!prompt.includes("Independently review")) {
      * tests left behind rather than the order under test.
      */
     const listTenant = `workflow-list-${crypto.randomUUID()}`;
+    ownedTenants.push(listTenant);
     const listStore = createSoftwareFactoryStore(database, listTenant);
     const listRuntime = createWorkflowRuntime(database, listTenant);
     await listStore.benchmark({
@@ -2033,20 +2072,5 @@ if (!prompt.includes("Independently review")) {
      */
     const capped = await listRuntime.list(1);
     expect(capped.map((entry) => entry.run.id)).toEqual([oldest.id]);
-
-    await database
-      .delete(factoryWorkflowStages)
-      .where(
-        inArray(factoryWorkflowStages.runId, [oldest.id, middle.id, newest.id]),
-      );
-    await database
-      .delete(factoryWorkflowRuns)
-      .where(eq(factoryWorkflowRuns.tenantId, listTenant));
-    await database
-      .delete(factoryManagedJobs)
-      .where(eq(factoryManagedJobs.tenantId, listTenant));
-    await database
-      .delete(factoryModelBenchmarks)
-      .where(eq(factoryModelBenchmarks.tenantId, listTenant));
   });
 });

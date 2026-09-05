@@ -12,6 +12,95 @@ import {
   factoryWorkflowStages,
 } from "../db/schema";
 
+/**
+ * Every status a run row can hold.
+ *
+ * Declared once because the lists derived from it had already drifted apart.
+ * `pause`, `resume`, `requestAbort`, `steer` and `claim` each carried their own
+ * literal array, and `activeRunIds` carried `"aborting"` -- never assigned to a
+ * run anywhere in this file -- while omitting `"awaiting_approval"`, which is.
+ * Nothing linked them, so a status added later would be silently absent from
+ * every list that should have gained it.
+ */
+export const runStatuses = [
+  "queued",
+  "running",
+  "pausing",
+  "paused",
+  "awaiting_approval",
+  "succeeded",
+  "failed",
+  "aborted",
+] as const;
+
+export type RunStatus = (typeof runStatuses)[number];
+
+/**
+ * Whether each status means the run has finished.
+ *
+ * A `Record<RunStatus, boolean>` rather than two arrays, so the compiler demands
+ * a classification for every status: adding one to `runStatuses` without saying
+ * whether it is terminal fails the build here, instead of silently falling into
+ * whichever hand-written list happened to omit it.
+ */
+const runStatusTerminality = {
+  queued: false,
+  running: false,
+  pausing: false,
+  paused: false,
+  awaiting_approval: false,
+  succeeded: true,
+  failed: true,
+  aborted: true,
+} as const satisfies Record<RunStatus, boolean>;
+
+/** A run that has not finished. Something may still move it. */
+export const nonTerminalRunStatuses: readonly RunStatus[] = runStatuses.filter(
+  (status) => !runStatusTerminality[status],
+);
+
+/*
+ * The sets below are deliberately narrower than `nonTerminalRunStatuses`. Each
+ * records what it excludes, because the previous version left that to be
+ * inferred from five arrays that no longer agreed with one another.
+ */
+
+/** `pause` acts only on a run that is actually progressing. */
+const pausableRunStatuses = [
+  "queued",
+  "running",
+] as const satisfies readonly RunStatus[];
+
+/** `resume` acts only on a run an operator already paused. */
+const resumableRunStatuses = [
+  "paused",
+  "pausing",
+] as const satisfies readonly RunStatus[];
+
+/**
+ * Steering excludes `awaiting_approval`. Whether that is deliberate is not
+ * recorded anywhere, and it is preserved exactly as it was: changing it would be
+ * a behaviour change rather than a refactor. Flagged here so the question is
+ * visible to whoever next touches steering.
+ */
+const steerableRunStatuses = [
+  "queued",
+  "running",
+  "paused",
+  "pausing",
+] as const satisfies readonly RunStatus[];
+
+/**
+ * A worker may claim only a run it can begin work on now: never one an operator
+ * paused, and never one held at a human gate, since in both cases the run is
+ * waiting on a decision that has not been made.
+ */
+const claimableRunStatuses = [
+  "queued",
+  "running",
+  "pausing",
+] as const satisfies readonly RunStatus[];
+
 export const stageCheckSchema = z.object({
   id: z.string().trim().min(1).max(100),
   command: z.array(z.string().min(1).max(1_000)).min(1).max(50),
@@ -738,7 +827,7 @@ export function createWorkflowRuntime(
             and(
               eq(factoryWorkflowRuns.id, runId),
               eq(factoryWorkflowRuns.tenantId, tenantId),
-              inArray(factoryWorkflowRuns.status, ["queued", "running"]),
+              inArray(factoryWorkflowRuns.status, pausableRunStatuses),
             ),
           )
           .returning();
@@ -771,7 +860,7 @@ export function createWorkflowRuntime(
             and(
               eq(factoryWorkflowRuns.id, runId),
               eq(factoryWorkflowRuns.tenantId, tenantId),
-              inArray(factoryWorkflowRuns.status, ["paused", "pausing"]),
+              inArray(factoryWorkflowRuns.status, resumableRunStatuses),
             ),
           )
           .returning();
@@ -803,13 +892,7 @@ export function createWorkflowRuntime(
             and(
               eq(factoryWorkflowRuns.id, runId),
               eq(factoryWorkflowRuns.tenantId, tenantId),
-              inArray(factoryWorkflowRuns.status, [
-                "queued",
-                "running",
-                "paused",
-                "pausing",
-                "awaiting_approval",
-              ]),
+              inArray(factoryWorkflowRuns.status, nonTerminalRunStatuses),
             ),
           )
           .returning();
@@ -853,12 +936,7 @@ export function createWorkflowRuntime(
             and(
               eq(factoryWorkflowRuns.id, runId),
               eq(factoryWorkflowRuns.tenantId, tenantId),
-              inArray(factoryWorkflowRuns.status, [
-                "queued",
-                "running",
-                "paused",
-                "pausing",
-              ]),
+              inArray(factoryWorkflowRuns.status, steerableRunStatuses),
             ),
           )
           .returning();
@@ -948,11 +1026,7 @@ export function createWorkflowRuntime(
           .where(
             and(
               eq(factoryWorkflowRuns.tenantId, tenantId),
-              inArray(factoryWorkflowRuns.status, [
-                "queued",
-                "running",
-                "pausing",
-              ]),
+              inArray(factoryWorkflowRuns.status, claimableRunStatuses),
               eq(factoryWorkflowRuns.abortRequested, false),
               or(
                 isNull(factoryWorkflowRuns.leaseExpiresAt),
